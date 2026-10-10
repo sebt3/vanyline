@@ -21,9 +21,9 @@ pub mod maint;
 /// des tools vers `tools_impl` (spec : `./mcp.sdd`).
 pub mod mcp;
 pub mod telemetry;
-/// Backend des 16 tools MCP de la sandbox : garde de confinement du workspace,
-/// dispatchs `filesystem`/`search`/`command`/`lsp`/`edit_and_check` (spec :
-/// `./tools_impl.sdd`).
+/// Backend des 17 tools MCP de la sandbox : garde de confinement du workspace,
+/// dispatchs `filesystem`/`search`/`command`/`lsp`/`edit_and_check`/`code_health`
+/// (spec : `./tools_impl.sdd`, `./health.sdd`).
 pub mod tools_impl;
 pub mod venv;
 pub mod ws;

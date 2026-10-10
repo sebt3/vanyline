@@ -128,6 +128,9 @@ pub(crate) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
     tools.extend(vanyline_tools::mcp::search_tools());
     tools.extend(vanyline_tools::mcp::command_tools());
     tools.extend(tools_impl::lsp_tools());
+    // `code_health` (health.sdd `Exposes`) : déclaré avec les outils LSP, dans
+    // la même famille de déclarations de ./tools_impl.rs.
+    tools.push(tools_impl::code_health_tool());
     JsonRpcResponse::ok(id, serde_json::json!({ "tools": tools }))
 }
 
@@ -142,8 +145,13 @@ pub(crate) async fn handle_tools_call(
 
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
-    if let Some(result) =
-        tools_impl::dispatch_filesystem(&state.config.sandbox_root, name, arguments.clone()).await
+    if let Some(result) = tools_impl::dispatch_filesystem(
+        &state.config.sandbox_root,
+        &state.health,
+        name,
+        arguments.clone(),
+    )
+    .await
     {
         JsonRpcResponse::ok(id, result)
     } else if let Some(result) =
@@ -156,9 +164,15 @@ pub(crate) async fn handle_tools_call(
         JsonRpcResponse::ok(id, result)
     } else if let Some(result) = tools_impl::dispatch_lsp(state, name, arguments.clone()).await {
         JsonRpcResponse::ok(id, result)
-    } else if let Some(result) = tools_impl::dispatch_edit_and_check(state, name, arguments).await {
+    } else if let Some(result) =
+        tools_impl::dispatch_edit_and_check(state, name, arguments.clone()).await
+    {
         // `edit_and_check` (tâche 08d) : frère de `dispatch_lsp`, même forme
         // `Option<Value>` — `None` si le nom est étranger à cette famille.
+        JsonRpcResponse::ok(id, result)
+    } else if let Some(result) = tools_impl::dispatch_code_health(state, name, arguments) {
+        // `code_health` (health.sdd) : lecture pure du snapshot de santé, forme
+        // synchrone `Option<Value>` — `None` si le nom est étranger.
         JsonRpcResponse::ok(id, result)
     } else {
         JsonRpcResponse::err(id, -32602, format!("Unknown tool: {name}"))
@@ -212,7 +226,7 @@ mod tests {
         let resp = handle_tools_list(Some(serde_json::json!(1)));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 17);
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
@@ -230,6 +244,7 @@ mod tests {
         assert!(names.contains(&"lsp_workspace_symbols"));
         assert!(names.contains(&"inspect_symbol"));
         assert!(names.contains(&"edit_and_check"));
+        assert!(names.contains(&"code_health"));
     }
 
     #[tokio::test]

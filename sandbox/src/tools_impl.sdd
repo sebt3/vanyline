@@ -1,8 +1,8 @@
 Spec: tools_impl
 
 Purpose:
-  Backend des 16 tools MCP de la sandbox : le dispatch `tools/call` de ./mcp.rs
-  (ordre strict filesystem → search → command → lsp → edit_and_check, premier `Some`
+  Backend des 17 tools MCP de la sandbox : le dispatch `tools/call` de ./mcp.rs
+  (ordre strict filesystem → search → command → lsp → edit_and_check → code_health, premier `Some`
   gagnant) atterrit ici. Le fichier porte trois contrats distincts formant un seul
   périmètre — ils se partagent l'enveloppe MCP de résultat et la garde de confinement :
   1) LA garde anti-évasion du workspace : @confine_path / @confine (marqueurs
@@ -73,7 +73,8 @@ Depends on:
     `tests/http.rs::tools_call_execute_command_envs_non_injectables`) ; `timeout_secs`
     absent ⟹ `0` ⟹ PAS de timeout côté sandbox (le schéma et le CLI disent `30` —
     écart `[?]` déjà ouvert dans `../../tools/src/mcp.sdd`, cf. `Tasks`)
-  ./mcp.rs — unique appelant des cinq @dispatch_* et de @lsp_tools ; le nom d'outil
+  ./mcp.rs — unique appelant des six @dispatch_*, de @lsp_tools et de
+    @code_health_tool ; le nom d'outil
     inconnu de toutes les familles devient `-32602` chez lui, jamais ici
   std : @serde_json, @thiserror, @anyhow, @tokio::task::spawn_blocking, @tracing
 
@@ -90,18 +91,30 @@ Exposes:
     résolu en `String` (lossy), échec = enveloppe @err_result prête à rendre
   @ok_result / @err_result — constructeurs d'enveloppe MCP `{content: [{type: "text",
     text}], isError: false|true}` (pub, réutilisés par les autres modules)
-  @dispatch_filesystem — `tools/call` des 5 outils filesystem ; @None si nom étranger
+  @dispatch_filesystem — `tools/call` des 5 outils filesystem ; @None si nom étranger ;
+    prend `health: &@CodeHealth` (2ᵉ paramètre, amendé 2026-10-10 suite H2) et appelle
+    @CodeHealth::notify_modified sur chaque écriture réussie — ./health.sdd `Handles`
   @dispatch_search — `tools/call` de `find_files` / `search` ; @None sinon
   @dispatch_command — `tools/call` de `execute_command` (+ overlay venv) ; @None sinon
   @dispatch_lsp — `tools/call` des 7 outils `lsp_*` / `inspect_symbol` ; @None sinon ;
     consomme `state.lsp` et `state.config.sandbox_root`
   @dispatch_edit_and_check — `tools/call` de `edit_and_check` ; @None sinon ; timeouts
     de prod (`FS_FLUSH_TIMEOUT_SECS`, `DIAGNOSTICS_TIMEOUT * 2`) injectés à
-    `run_edit_and_check` (cœur testable à timeouts injectés)
+    `run_edit_and_check` (cœur testable à timeouts injectés) ; notifie la modification
+    du worktree sur succès d'édition (./health.sdd `Handles`)
+  @dispatch_code_health — `tools/call` de `code_health` ; @None sinon ; LECTURE pure de
+    @state.health.snapshot() (jamais refresh — ./health.sdd `Must not`) ; rendu TEXTE
+    borné en final par `vanyline_tools::output::bound_lines` (`READ_MAX_LINES`,
+    `READ_MAX_BYTES`) ; argument `detail` summary (défaut) | issues | coverage, filtre
+    `path` par préfixe, `limit` ; rapport absent ⇒ texte de phase, pas une erreur
+  @code_health_tool — déclaration `tools/list` de `code_health` (name/description/
+    inputSchema `detail` enum `[summary, issues, coverage]`, `path` string, `limit`
+    integer) — ./health.sdd `Exposes`
   @lsp_tools — les 8 déclarations `tools/list` de la famille (name/description/
     inputSchema) : `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_rename`,
     `lsp_document_symbols`, `lsp_workspace_symbols`, `inspect_symbol`, `edit_and_check`
-    — concaténées par ./mcp.rs après les 8 de `vanyline_tools` (16 au total)
+    — concaténées par ./mcp.rs après les 8 de `vanyline_tools`, puis @code_health_tool
+    (17 au total — 16→17 aligné 2026-10-10, ./health.sdd `Exposes`)
   @toolchain_for_path — `pub fn toolchain_for_path(path: &str) ->
     Option<(&'static str, &'static str)>` : (nom de toolchain, languageId LSP)
   @resolve_position + @PositionResolution (`Unique`/`Ambiguous`) + @LspSymbolTarget +
@@ -869,6 +882,6 @@ Scenario: lsp_tools_declarent_huit_outils
     `edit_and_check` (dans cet ordre, `edit_and_check` en 8e)
   And chaque description de tool ciblé mentionne `VNL-SBX-LSP-006` pour les extensions
     non couvertes
-  And @lsp_tools combiné aux 8 outils de `vanyline_tools` fait les 16 outils de
-    `tools/list` de ./mcp.rs
+  And @lsp_tools combiné aux 8 outils de `vanyline_tools` et à @code_health_tool fait
+    les 17 outils de `tools/list` de ./mcp.rs
 

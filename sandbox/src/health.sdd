@@ -31,6 +31,9 @@ Can modify:
   ./tools_impl.rs
   ./mcp.rs
   ./ws/fs.rs
+  ./git.rs (ratifié 2026-10-09 — `Handles` nomme les endpoints git qui changent
+    l'arbre : ajout des appels @notify_modified dans @handle_checkout, @handle_merge,
+    @handle_merge_abort sur succès seulement, rien d'autre).
   ./maint.rs (extraction de la fonction pure « chemins → langages » seulement — la
     tâche Tasks ci-dessous ; la décision 2026-10-04 vise `maint::detect_languages`,
     déjà appelé par le binaire `vanyline-maint` : c'est CE fichier qui doit consommer
@@ -86,8 +89,12 @@ Handles:
   ./maint.sdd) sauf `languages` fourni à `/refresh` ; vérifications = presets des langages
   (@checks_for_languages), langages sans preset rapportés dans `unchecked_languages`.
   Déclencheurs de modification (@CodeHealth::notify_modified) : outils MCP qui écrivent
-  (`write_file`, `edit_file`, `delete_file`, `mkdir`, `rename_file`, `edit_and_check`), opérations
-  d'écriture de `/ws/fs`, endpoints git qui changent l'arbre (`checkout`, `merge`, `merge/abort`).
+  (`write_file`, `edit_file`, `delete_file`, `edit_and_check`), opérations
+  d'écriture de `/ws/fs` (`write`, `edit`, `delete`, `mkdir`, `rename` — `mkdir` et
+  `rename_file` ne vivent qu'ici, la famille MCP filesystem n'a pas ces deux noms :
+  énumération re-formulée 2026-10-10 après validation H2, le fond est inchangé),
+  endpoints git qui changent l'arbre (`checkout`, `merge`, `merge/abort` — `merge` en
+  conflit compte : l'arbre est muté (marqueurs + @MERGE_HEAD), ratifié validation H2).
   Les lectures et opérations git de pure lecture n'en sont pas.
   Délai de calme (debounce) : chaque notification (re)lance un minuteur de `health_cooldown_secs` ;
   le calcul démarre quand il s'écoule sans nouvelle notification (`0` = immédiat). Avant de
@@ -157,9 +164,22 @@ Tasks:
   [?] @VNL-SBX-CH-002 au HTTP : 400 (choix du code à ce jour — « le client ne peut pas
     être servi » traité comme refus) ou 500 (cause serveur : git non lançable) ? Trancher
     ; le code suit la spec.
-  [ ] Câbler `notify_modified` dans les dispatchs d'écriture de ./tools_impl.rs, les opérations
-    d'écriture de ./ws/fs.rs et les handlers git concernés ; déclarer l'outil `code_health` dans
-    ./tools_impl.rs et ./mcp.rs (amender ces specs).
+  [x] Câbler `notify_modified` + déclarer l'outil `code_health` — FAIT 2026-10-10
+    (validator-PASS : 12 sites succès-seul — tools_impl write_file/edit_file/delete_file/
+    edit_and_check, ops `write`/`edit`/`delete`/`mkdir`/`rename` de `/ws/fs`,
+    @handle_checkout/@handle_merge/@handle_merge_abort ; hook synchrone sans await ni
+    propagation ; outil déclaré+dispatché+testé, plafond @bound_lines réel ; specs
+    ../mcp.sdd, ../tools_impl.sdd, ../../../tools/src/mcp.sdd alignées 16→17 ;
+    8 tests nouveaux, 505 verts).
+  [?] @lsp_rename écrit des fichiers suivis mais N'EST PAS dans l'énumération des
+    déclencheurs ci-dessus (listée « outils MCP qui écrivent »). La liste est-elle
+    EXHAUSTIVE par contrat (⇒ lsp_rename reste rattrapé par le sondage
+    `health_poll_secs`, conforme) ou illustrative (⇒ l'ajouter aux déclencheurs et
+    câble) ? Trancher.
+  [ ] Verrou unitaire du site `edit_and_check` (constat validation H2 : site conforme en
+    lecture, famille verrouillée via `write_file`, mais non verrouillé nommément —
+    l'infra existe : `make_edit_check_state` + fake LSP, troquer `CodeHealth::new` par
+    `with_timing` source compteuse).
   [x] Extraire de `vanyline-maint` la fonction pure « chemins → langages » — FAIT
     2026-10-09 (validator-vert : @maint::languages_from_paths pure `#[must_use]`,
     @detect_languages réduite au wrapper git + délégation, suite maint 47 tests intacte ;

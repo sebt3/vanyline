@@ -153,12 +153,18 @@ pub fn confine_path(sandbox_root: &Path, user_path: &str) -> Result<PathBuf, San
     }
 }
 
+use vanyline_health::report::{
+    CheckKind, CheckStatus, FileCoverage, HealthReport, Issue, Severity,
+};
 use vanyline_tools::command::{self, ExecuteCommandOptions};
 use vanyline_tools::filesystem::{
     self, DeleteFileOptions, EditFileOptions, ListDirectoryOptions, ReadFileOptions,
     WriteFileOptions,
 };
+use vanyline_tools::output::{READ_MAX_BYTES, READ_MAX_LINES, bound_lines};
 use vanyline_tools::search::{self, FindFilesOptions, SearchOptions};
+
+use crate::health::{CodeHealth, HealthState, Phase};
 
 /// Successful MCP tool-result envelope (`isError: false`).
 // tooling.sdd D3b — constructeurs d'enveloppe Exposes par tools_impl.sdd, signature
@@ -208,12 +214,18 @@ pub async fn confine(sandbox_root: &Path, raw_path: &str) -> Result<String, Valu
 /// (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`).
 /// Returns `None` if `name` isn't one of them, so the caller can try other
 /// tool families (search, command — added in follow-up tasks).
+///
+/// Les outils qui écrivent (`write_file`, `edit_file`, `delete_file`) notifient
+/// `health` sur SUCCÈS seulement (spec `./health.sdd` `Handles`, déclencheurs) —
+/// `notify_modified` est un émission de canal non bloquante qui ne peut pas
+/// faire échouer l'opération.
 // tooling.sdd D3b — tools_impl.sdd §Purpose 1/2 : @dispatch_filesystem est le
 // dispatcheur unique contracté des 5 tools filesystem (ordre strict, premier `Some`
 // gagnant) ; scinder sortirait le contrat du seul fichier qui le porte.
 #[allow(clippy::too_many_lines)]
 pub async fn dispatch_filesystem(
     sandbox_root: &Path,
+    health: &CodeHealth,
     name: &str,
     arguments: Value,
 ) -> Option<Value> {
@@ -249,7 +261,11 @@ pub async fn dispatch_filesystem(
                 })
                 .await
                 {
-                    Ok(()) => Some(ok_result(format!("wrote {resolved}"))),
+                    Ok(()) => {
+                        // health.sdd `Handles` — écriture réussie = déclencheur.
+                        health.notify_modified();
+                        Some(ok_result(format!("wrote {resolved}")))
+                    }
                     Err(e) => Some(err_result(e.to_string())),
                 }
             }
@@ -272,7 +288,11 @@ pub async fn dispatch_filesystem(
                 })
                 .await
                 {
-                    Ok(text) => Some(ok_result(text)),
+                    Ok(text) => {
+                        // health.sdd `Handles` — écriture réussie = déclencheur.
+                        health.notify_modified();
+                        Some(ok_result(text))
+                    }
                     Err(e) => Some(err_result(e.to_string())),
                 }
             }
@@ -292,7 +312,11 @@ pub async fn dispatch_filesystem(
                 })
                 .await
                 {
-                    Ok(()) => Some(ok_result(format!("deleted {resolved}"))),
+                    Ok(()) => {
+                        // health.sdd `Handles` — écriture réussie = déclencheur.
+                        health.notify_modified();
+                        Some(ok_result(format!("deleted {resolved}")))
+                    }
                     Err(e) => Some(err_result(e.to_string())),
                 }
             }
@@ -803,7 +827,8 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
 /// symboles) ; since task 06, `inspect_symbol` (composition def + refs en un
 /// appel, nom sans préfixe `lsp_` — design §tableau tools) ; since task 08d,
 /// `edit_and_check` (édition + diff de diagnostics — 16 tools MCP au
-/// total).
+/// total, 17 avec `code_health`, déclaré séparément par `code_health_tool`,
+/// spec `./health.sdd`).
 // tooling.sdd D3b — tools_impl.sdd §Purpose 3 : @lsp_tools porte les 8 déclarations
 // `tools/list` contractées (une entrée = un bloc json littéral) ; scinder viderait
 // le contrat hors du seul fichier qui le porte.
@@ -3000,6 +3025,12 @@ async fn run_edit_and_check(
         }
     };
 
+    // health.sdd `Handles` — l'édition réussie de edit_and_check compte comme
+    // écriture : l'édition EST sur disque à ce point (les échecs ont rendu un
+    // err_result plus haut ; la branche VNL-SBX-LSP-011 qui suit est un succès
+    // d'édition en état mou, déjà notifié ici).
+    state.health.notify_modified();
+
     // Étape 5 — déclencher la ré-analyse : cas A par le tool (didChange
     // versionné), cas B par l'éditeur (broadcast, JAMAIS de didChange du
     // tool — deux émetteurs actifs sur la même URI = désync interdit).
@@ -3095,6 +3126,291 @@ async fn run_edit_and_check(
 enum EditMode {
     Write(String),
     Edit { old: String, new: String },
+}
+
+// ── Outil MCP `code_health` (spec : `./health.sdd`, `Exposes`) ────────────────
+
+/// Nombre d'issues rendues par le résumé par défaut (spec `./health.sdd`
+/// `Exposes` : « les 20 premières issues »).
+const CODE_HEALTH_SUMMARY_ISSUES: usize = 20;
+
+/// Arguments de l'outil `code_health` (tous optionnels) :
+/// `{ "detail"?: "summary" | "issues" | "coverage", "path"?: string,
+/// "limit"?: integer }`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct CodeHealthArgs {
+    /// Niveau de détail ; absent = `summary`.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Filtre par préfixe de chemin (issues et fichiers de couverture).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Nombre maximum d'entries rendues (`issues`/`coverage`) ; absent =
+    /// plafond `vanyline_tools::output::READ_MAX_LINES`.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Déclaration `tools/list` de l'outil `code_health` (même famille de
+/// déclarations que `lsp_tools`, concaténée par ./mcp.rs — spec `./health.sdd`,
+/// `Exposes`).
+#[must_use]
+pub fn code_health_tool() -> serde_json::Value {
+    serde_json::json!({
+        "name": "code_health",
+        "description": "Read the pod's code-health state (always available, computed in the background — this tool never triggers a computation). Default detail 'summary': phase, global status, one line per check, coverage totals, unchecked languages, and the first 20 issues. 'issues' and 'coverage' render the details, filterable by path (prefix) and limit. Output is bounded (vanyline_tools::output ceilings).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "detail": {"type": "string", "enum": ["summary", "issues", "coverage"], "description": "Level of detail; default summary."},
+                "path": {"type": "string", "description": "Prefix filter on issue/coverage file paths (e.g. \"src/\")."},
+                "limit": {"type": "integer", "description": "Max rendered issues/coverage files in issues/coverage detail (default and ceiling 200)."}
+            }
+        }
+    })
+}
+
+/// Dispatch `tools/call` de l'outil `code_health` ; @None si le nom est
+/// étranger (même forme que `dispatch_lsp`). LECTURE PURE du snapshot partagé
+/// (spec `./health.sdd` `Must not` : jamais déclencher un calcul depuis une
+/// lecture — `refresh` n'est jamais appelé ici). Rendu texte borné par
+/// `vanyline_tools::output::bound_lines` (plafonds `READ_MAX_LINES` lignes,
+/// `READ_MAX_BYTES` octets — les mêmes que les autres outils).
+#[must_use]
+pub fn dispatch_code_health(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
+    if name != "code_health" {
+        return None;
+    }
+    // `arguments` absent (Null) = tous les défauts (summary), pas une erreur.
+    let arguments = if arguments.is_null() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        arguments
+    };
+    let args: CodeHealthArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+    };
+    let detail = match args.detail.as_deref() {
+        None | Some("summary") => "summary",
+        Some(other @ ("issues" | "coverage")) => other,
+        Some(other) => {
+            return Some(err_result(format!(
+                "invalid arguments for {name}: detail must be \"summary\", \"issues\" or \"coverage\", got \"{other}\""
+            )));
+        }
+    };
+    let limit = args.limit.unwrap_or(READ_MAX_LINES).min(READ_MAX_LINES);
+    let snapshot = state.health.snapshot();
+    Some(ok_result(render_code_health(
+        &snapshot,
+        detail,
+        args.path.as_deref(),
+        limit,
+    )))
+}
+
+/// Rendu texte de l'état de santé (spec `./health.sdd`, `Exposes` outil
+/// `code_health`). Rapport absent (tout premier calcul) ⇒ un texte qui dit la
+/// phase, jamais une erreur. Sortie toujours passée par `bound_lines`.
+fn render_code_health(
+    snapshot: &HealthState,
+    detail: &str,
+    path_prefix: Option<&str>,
+    limit: usize,
+) -> String {
+    let mut lines: Vec<String> = vec![format!("phase: {}", health_phase_label(snapshot.phase))];
+    let Some(report) = snapshot.report.as_ref() else {
+        lines.push(
+            "rapport absent — premier calcul en cours, réessayez dans quelques instants"
+                .to_string(),
+        );
+        return bound_lines(&lines.join("\n"), 0, READ_MAX_LINES, READ_MAX_BYTES);
+    };
+    lines.push(format!(
+        "statut global: {}",
+        health_status_label(&report.status())
+    ));
+
+    match detail {
+        "issues" => {
+            let matching: Vec<&Issue> = report
+                .issues
+                .iter()
+                .filter(|issue| health_path_matches(&issue.path, path_prefix))
+                .collect();
+            push_health_issue_list(&mut lines, &matching, limit);
+        }
+        "coverage" => {
+            push_health_coverage_totals(&mut lines, report);
+            if let Some(coverage) = report.coverage.as_ref() {
+                let files: Vec<&FileCoverage> = coverage
+                    .files
+                    .iter()
+                    .filter(|file| health_path_matches(&file.path, path_prefix))
+                    .collect();
+                let shown = files.len().min(limit);
+                lines.push(format!("fichiers couverts ({shown} sur {}):", files.len()));
+                for file in files.iter().take(shown) {
+                    let totals = vanyline_health::report::CoverageTotals {
+                        lines_found: file.lines_found,
+                        lines_hit: file.lines_hit,
+                    };
+                    let uncovered = if file.uncovered.is_empty() {
+                        String::new()
+                    } else {
+                        let ranges: Vec<String> = file
+                            .uncovered
+                            .iter()
+                            .map(|r| {
+                                if r.start == r.end {
+                                    format!("{}", r.start)
+                                } else {
+                                    format!("{}-{}", r.start, r.end)
+                                }
+                            })
+                            .collect();
+                        format!(" — non couvert: {}", ranges.join(", "))
+                    };
+                    lines.push(format!(
+                        "  {}: {}/{} ({:.1}%){}",
+                        file.path,
+                        file.lines_hit,
+                        file.lines_found,
+                        totals.percent(),
+                        uncovered
+                    ));
+                }
+                let rest = files.len().saturating_sub(shown);
+                if rest > 0 {
+                    lines.push(format!(
+                        "… {rest} fichiers supplémentaires (affinez avec path ou limit)"
+                    ));
+                }
+            }
+        }
+        _ => {
+            lines.push(format!("vérifications ({}):", report.checks.len()));
+            for check in &report.checks {
+                lines.push(format!(
+                    "  {} [{}]: {} ({} ms)",
+                    check.id,
+                    health_check_kind_label(&check.kind),
+                    health_status_label(&check.status),
+                    check.duration_ms
+                ));
+            }
+            push_health_coverage_totals(&mut lines, report);
+            if !report.unchecked_languages.is_empty() {
+                lines.push(format!(
+                    "langages non vérifiés: {}",
+                    report.unchecked_languages.join(", ")
+                ));
+            }
+            let matching: Vec<&Issue> = report
+                .issues
+                .iter()
+                .filter(|issue| health_path_matches(&issue.path, path_prefix))
+                .collect();
+            if matching.is_empty() {
+                lines.push("aucune issue".to_string());
+            } else {
+                push_health_issue_list(&mut lines, &matching, CODE_HEALTH_SUMMARY_ISSUES);
+            }
+        }
+    }
+
+    bound_lines(&lines.join("\n"), 0, READ_MAX_LINES, READ_MAX_BYTES)
+}
+
+/// Liste d'issues (ligne d'en-tête, lignes rendues, reliquat annoncé
+/// honnêtement — style des mentions de troncature des outils fs/search).
+fn push_health_issue_list(lines: &mut Vec<String>, matching: &[&Issue], limit: usize) {
+    let shown = matching.len().min(limit);
+    lines.push(format!("issues ({shown} sur {}):", matching.len()));
+    for issue in matching.iter().take(shown) {
+        let code = issue
+            .code
+            .as_deref()
+            .map_or_else(String::new, |c| format!("{c}: "));
+        lines.push(format!(
+            "  {}:{}:{} {} {code}{}",
+            issue.path,
+            issue.line,
+            issue.column,
+            health_severity_label(&issue.severity),
+            issue.message
+        ));
+    }
+    let rest = matching.len().saturating_sub(shown);
+    if rest > 0 {
+        lines.push(format!(
+            "… {rest} issues supplémentaires (affinez avec path ou limit)"
+        ));
+    }
+}
+
+/// Ligne des totaux de couverture (« pas de mesure » ≠ « 0 % », même règle que
+/// le rapport du crate).
+fn push_health_coverage_totals(lines: &mut Vec<String>, report: &HealthReport) {
+    match report.coverage.as_ref() {
+        Some(coverage) => {
+            let totals = coverage.totals();
+            lines.push(format!(
+                "couverture: {}/{} lignes ({:.1}%)",
+                totals.lines_hit,
+                totals.lines_found,
+                totals.percent()
+            ));
+        }
+        None => lines.push("couverture: aucune mesure".to_string()),
+    }
+}
+
+/// Filtre `path` de l'outil : préfixe de chemin (spec : « filtrables par
+/// `path` (préfixe) »).
+fn health_path_matches(path: &str, prefix: Option<&str>) -> bool {
+    prefix.is_none_or(|p| path.starts_with(p))
+}
+
+/// Étiquette de phase, alignée sur le serde lowercase de `@Phase` (routes
+/// `/code-health`).
+fn health_phase_label(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Computing => "computing",
+        Phase::Fresh => "fresh",
+        Phase::Stale => "stale",
+    }
+}
+
+/// Étiquette de statut, alignée sur le serde `snake_case` de `@CheckStatus`.
+fn health_status_label(status: &CheckStatus) -> &'static str {
+    match status {
+        CheckStatus::Passed => "passed",
+        CheckStatus::Failed => "failed",
+        CheckStatus::Errored => "errored",
+        CheckStatus::Skipped => "skipped",
+    }
+}
+
+/// Étiquette de nature de vérification, alignée sur le serde `snake_case` de
+/// `@CheckKind`.
+fn health_check_kind_label(kind: &CheckKind) -> &'static str {
+    match kind {
+        CheckKind::Format => "format",
+        CheckKind::Lint => "lint",
+        CheckKind::Tests => "tests",
+        CheckKind::Coverage => "coverage",
+        CheckKind::NewCode => "new_code",
+    }
+}
+
+/// Étiquette de gravité, alignée sur le serde `snake_case` de `@Severity`.
+fn health_severity_label(severity: &Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
 }
 
 /// Mention obligatoire quand le flush cas B n'a pas été acquitté (sq3 : le
@@ -6466,6 +6782,113 @@ mod tests {
         assert_eq!(mirror.unchanged, 1);
     }
 
+    /// Attend (horloge réelle, borné 10 s) que la source de vérifications
+    /// compte au moins `want` appels — motif de `wait_until` dans
+    /// `tests/health.rs`.
+    async fn wait_checks(counter: &std::sync::atomic::AtomicUsize, want: usize, why: &str) {
+        use std::sync::atomic::Ordering;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .expect("borne de 10 s additionnable à l'horloge");
+        while counter.load(Ordering::SeqCst) < want {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{why}: compteur {} < {want}",
+                counter.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Verrou H2 (constat validation) — le site `notify_modified` de
+    /// `run_edit_and_check` (health.sdd `Handles` : l'édition réussie compte
+    /// comme écriture, les échecs ne notifient pas). `CodeHealth::with_timing`
+    /// (cooldown 0, sondage coupé) + `CheckSource` compteuse (motif de
+    /// `tests/health.rs`) : un write qui réussit fait passer le compteur de 1
+    /// à 2 ; un échec qui rend `err_result` avant l'écriture laisse le
+    /// compteur inchangé — succès-seul verrouillé dans les deux sens.
+    #[tokio::test]
+    async fn edit_and_check_notifies_health_on_success_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (mut state, _tmpdir, _root) = make_edit_check_state("ec_notify").await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&counter);
+        let source: crate::health::CheckSource = Arc::new(move |_languages: &[String]| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            vec![vanyline_health::checks::Check {
+                id: "echo".to_string(),
+                kind: vanyline_health::report::CheckKind::Tests,
+                argv: vec!["echo".to_string(), "ok".to_string()],
+                cwd: String::new(),
+                output: vanyline_health::checks::OutputKind::None,
+                expand: None,
+                serial_group: Some("echo".to_string()),
+                after: None,
+            }]
+        });
+        let health = crate::health::CodeHealth::with_timing(
+            Arc::clone(&state.config),
+            source,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        state.health = Arc::clone(&health);
+        health.spawn_background();
+
+        // Premier calcul amorce le compteur (refresh forcé : le tmpdir n'est
+        // pas un worktree git, le premier calcul du démarrage est gardé par
+        // son existence).
+        health.refresh(None, None).await.unwrap();
+        wait_checks(&counter, 1, "premier calcul (refresh)").await;
+
+        // ── succès — write qui réussit → notify → recalcul (1 → 2).
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_edit_and_check(
+                &state,
+                EditAndCheckArgs {
+                    path: "main.rs".to_string(),
+                    mode: "write".to_string(),
+                    content: Some("y\n".to_string()),
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                },
+                Duration::from_millis(150),
+                Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("edit_and_check timeout");
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "write should be OK, got: {result}"
+        );
+        wait_checks(&counter, 2, "recalcul après écriture réussie").await;
+
+        // ── échec — old_string absent : `err_result` AVANT l'écriture, donc
+        // aucune notification. Marge de grâce bornée : avec cooldown 0, un
+        // notify déclencherait le recalcul en quelques millisecondes.
+        let failed = run_edit_and_check(
+            &state,
+            edit_args("main.rs", "absent", "z"),
+            Duration::from_millis(150),
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(
+            failed["isError"].as_bool().unwrap(),
+            "old_string absent = erreur, got: {failed}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "aucun recalcul déclenché par un échec d'écriture"
+        );
+    }
+
     /// Test 10 — `edit_and_check` rejoint la liste des outils (16ᵗʰ entrée
     /// MCP, 8ᵉ dans `lsp_tools()`) avec son schéma plat discriminé par mode.
     #[test]
@@ -6474,7 +6897,8 @@ mod tests {
         assert_eq!(
             tools.len(),
             8,
-            "7 lsp_* + edit_and_check = 16 tools MCP au total (5 fs + 2 search + 1 command)"
+            "7 lsp_* + edit_and_check (16ᵗʰ entrée) — 17 tools MCP au total \
+             (5 fs + 2 search + 1 command + 1 code_health)"
         );
         let names: Vec<_> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"edit_and_check"), "names: {names:?}");

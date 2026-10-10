@@ -1,17 +1,27 @@
-//! Tests d'intégration de `sandbox/src/health.rs` (spec `./health.sdd`, lot H1) :
+//! Tests d'intégration de `sandbox/src/health.rs` (spec `./health.sdd`, lots H1+H2) :
 //! machine d'état `CodeHealth` (démarrage, délai de calme/debounce, empreinte du
 //! worktree, sondage périodique, un-seul-calcul, refresh forcé, base sticky,
 //! échec de calcul — fraîcheur honnête et retry sur la même empreinte),
 //! routes `GET /code-health` et `POST /code-health/refresh` sur le routeur
 //! protégé (jeton d'Owner) et séparation d'avec la sonde `/health` du port
-//! d'exploitation.
+//! d'exploitation, outil MCP `code_health` (rendu borné, filtre `path`, phase
+//! annoncée sans rapport, déclaration `tools/list`) et câblage des déclencheurs
+//! de modification (`write_file` MCP, op `write` `/ws/fs`, `POST /git/checkout`)
+//! comme des non-déclencheurs de lecture (`read_file` MCP, op `read`,
+//! `GET /git/status`).
 //!
-//! Hors périmètre (Tasks de `./health.sdd`, lot H2 et câblage LSP) : l'outil MCP
-//! `code_health` et ses Scenarios `outil_mcp_*`, le câblage de `notify_modified`
-//! dans les dispatchs `tools_impl`/`ws/fs`/git (les appels directs en test sont
-//! le moyen de vérifier le debounce), les diagnostics LSP transmis comme
-//! `preliminary_issues`, et la vue `new_code` du worktree non commité (mécanique
-//! du runner, couverte par `health/src/runner.rs` — cf. le test `code_neuf`).
+//! Sites câblés sur la même mécanique mais non testés individuellement (la
+//! revue diff les compte ; le déclencheur est un `notify_modified` synchrone
+//! non bloquant, sans branche d'erreur) : `edit_file`/`delete_file` MCP et
+//! `edit_and_check` (même dispatch que `write_file`, testé), ops
+//! `edit`/`delete`/`mkdir`/`rename` de `/ws/fs` (même dispatch que `write`,
+//! testé), `merge` et `merge/abort` git (même handler de succès que
+//! `checkout`, testé).
+//!
+//! Hors périmètre (Tasks de `./health.sdd`) : les diagnostics LSP transmis
+//! comme `preliminary_issues` (câblage `./lsp.rs`, hors H2), et la vue
+//! `new_code` du worktree non commité (mécanique du runner, couverte par
+//! `health/src/runner.rs` — cf. le test `code_neuf`).
 //!
 //! Horloges : l'horloge simulée de tokio est INCOMPATIBLE avec les faux
 //! subprocesses du runner (auto-advance : avancer le temps déclenche le
@@ -39,8 +49,10 @@ use vanyline_health::checks::{Check, OutputKind};
 use vanyline_health::report::{CheckKind, CheckStatus};
 use vanyline_sandbox::auth::test_support;
 use vanyline_sandbox::health::{CheckSource, CodeHealth};
+use vanyline_sandbox::ws::fs::dispatch_fs_message;
 use vanyline_sandbox::ws::ticket::TicketStore;
 use vanyline_sandbox::{AppState, LspManager, build_app, build_ops_app, fs_push_channels};
+use vanyline_tools::output::{READ_MAX_BYTES, READ_MAX_LINES, bound_lines};
 
 // ── Helpers fixtures git ──────────────────────────────────────────────────────
 
@@ -1121,5 +1133,486 @@ async fn build_app_ne_duplique_pas_la_tache_de_fond() {
         counter.load(Ordering::SeqCst),
         1,
         "build_app ne relance pas le cycle"
+    );
+}
+
+// ── Lot H2 — presets factices à issues (sortie texte type tsc) ────────────────
+
+/// Écrit un script `/bin/sh` exécutable dans `dir` (motif de `slow_script`).
+fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let script = dir.join(name);
+    std::fs::write(&script, body).expect("script écrit");
+    let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).expect("chmod");
+    script
+}
+
+/// Vérification factice dont la sortie est interprétée comme du texte `tsc`
+/// (une ligne `<chemin>(<ligne>,<col>): error|warning TS<n>: <message>` = une
+/// [`vanyline_health::report::Issue`]) — c'est ainsi qu'un `CheckSource` factice
+/// produit de vraies issues dans le rapport, sans toolchain.
+fn tsc_probe(id: &str, script: &Path) -> Check {
+    Check {
+        id: id.to_string(),
+        kind: CheckKind::Lint,
+        argv: vec![script.to_string_lossy().into_owned()],
+        cwd: String::new(),
+        output: OutputKind::TscText,
+        expand: None,
+        serial_group: Some(id.to_string()),
+        after: None,
+    }
+}
+
+/// Preset « flood » : une vérification tsc qui échoue avec `count` issues sous
+/// `src/` (plus un `echo` qui passe, pour avoir deux lignes de vérification au
+/// résumé). Chaque appel de la source incrémente le compteur.
+fn flood_source(dir: &Path, counter: &Arc<AtomicUsize>, count: u32) -> CheckSource {
+    let script = write_script(
+        dir,
+        "flood-tsc.sh",
+        &format!(
+            "#!/bin/sh\ni=1\nwhile [ \"$i\" -le {count} ]; do echo \"src/f$i.ts(1,1): error TS1$i: flood $i\"; i=$((i+1)); done\nexit 2\n"
+        ),
+    );
+    let counter = Arc::clone(counter);
+    Arc::new(move |_languages: &[String]| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        vec![
+            tsc_probe("tsc-flood", &script),
+            probe("echo", &["echo", "ok"]),
+        ]
+    })
+}
+
+/// Preset « deux chemins » : 3 issues sous `src/`, 2 sous `tests/` (filtre
+/// `path` de l'outil `code_health`).
+fn paths_source(dir: &Path) -> CheckSource {
+    let script = write_script(
+        dir,
+        "paths-tsc.sh",
+        "#!/bin/sh\n\
+         echo \"src/a.ts(1,1): error TS1: alpha\"
+echo \"src/b.ts(2,3): warning TS2: beta\"
+echo \"src/c.ts(9,1): error TS3: gamma\"
+echo \"tests/x.ts(4,2): error TS4: delta\"
+echo \"tests/y.spec.ts(5,1): warning TS5: epsilon\"
+exit 1\n",
+    );
+    let script: PathBuf = script;
+    Arc::new(move |_languages: &[String]| vec![tsc_probe("tsc-paths", &script)])
+}
+
+// ── Lot H2 — helpers outil MCP ────────────────────────────────────────────────
+
+/// `tools/call` d'un outil via le routeur protégé `POST /mcp` (jeton d'Owner).
+async fn mcp_tool_call(
+    app: &Router,
+    name: &str,
+    arguments: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments },
+    });
+    request(app, Method::POST, "/mcp", Some(bearer()), &body.to_string()).await
+}
+
+/// Texte du tool-result d'une réponse `tools/call` (panique explicite sinon —
+/// une réponse d'erreur JSON-RPC est un échec de test, pas une branche).
+fn tool_text(json: &serde_json::Value) -> String {
+    json["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("attendu un tool-result texte, obtenu : {json}"))
+        .to_string()
+}
+
+// ── Lot H2 — Scenarios outil MCP `code_health` ────────────────────────────────
+
+/// Scenario `outil_mcp_rend_un_resume_borne` : un rapport de 2500 issues, appel
+/// sans argument ⇒ texte borné (plafond `vanyline_tools::output` :
+/// `READ_MAX_LINES` lignes / `READ_MAX_BYTES` octets), contenant la phase, le
+/// statut global, une ligne par vérification et au plus 20 issues, avec mention
+/// honnête des issues non rendues.
+#[tokio::test]
+async fn outil_mcp_rend_un_resume_borne() {
+    const FLOOD: u32 = 2500;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, flood_source(tmp.path(), &counter, FLOOD), 0, 0);
+    health.spawn_background();
+    wait_until("rapport inondé publié", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap
+                .report
+                .as_ref()
+                .is_some_and(|r| r.issues.len() == FLOOD as usize)
+    })
+    .await;
+
+    let app = build_app(state);
+    let (status, json) = mcp_tool_call(&app, "code_health", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["result"]["isError"],
+        serde_json::json!(false),
+        "lecture d'état : jamais une erreur d'outil, obtenu : {json}"
+    );
+    let text = tool_text(&json);
+
+    // Contenu contracté du résumé : phase, statut global, une ligne par
+    // vérification, totaux de couverture (ici « aucune mesure »).
+    assert!(text.contains("phase: fresh"), "obtenu : {text}");
+    assert!(text.contains("statut global: failed"), "obtenu : {text}");
+    assert!(
+        text.contains("tsc-flood"),
+        "ligne de vérification tsc-flood attendue : {text}"
+    );
+    assert!(
+        text.contains("echo"),
+        "ligne de vérification echo attendue : {text}"
+    );
+    assert!(
+        text.contains("couverture: aucune mesure"),
+        "totaux de couverture à rendre : {text}"
+    );
+
+    // Au plus 20 issues rendues, et le reliquat annoncé honnêtement.
+    let rendered = text.lines().filter(|l| l.starts_with("  src/f")).count();
+    assert_eq!(
+        rendered, 20,
+        "exactement les 20 premières issues, obtenu {rendered}"
+    );
+    assert!(
+        text.contains("issues supplémentaires"),
+        "mention du reliquat attendue : {text}"
+    );
+
+    // Plafond : le texte rendu respecte le bornage des autres outils
+    // (`bound_lines` est idempotent sur une sortie déjà conforme).
+    assert_eq!(
+        text,
+        bound_lines(&text, 0, READ_MAX_LINES, READ_MAX_BYTES),
+        "sortie au-delà du plafond vanyline_tools::output"
+    );
+}
+
+/// Scenario `outil_mcp_filtre_par_chemin` : des issues sous `src/` et `tests/`,
+/// appel `detail: "issues"` + `path: "src/"` ⇒ seules les issues sous `src/`
+/// sont rendues (sans filtre, les deux familles le sont).
+#[tokio::test]
+async fn outil_mcp_filtre_par_chemin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter2 = Arc::clone(&counter);
+    let inner = paths_source(tmp.path());
+    let source: CheckSource = Arc::new(move |languages: &[String]| {
+        counter2.fetch_add(1, Ordering::SeqCst);
+        inner(languages)
+    });
+    let (state, health) = health_on(&root, source, 0, 0);
+    health.spawn_background();
+    wait_until("rapport à deux chemins publié", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap.report.as_ref().is_some_and(|r| r.issues.len() == 5)
+    })
+    .await;
+
+    let app = build_app(state);
+
+    // Sans filtre, les deux familles sont rendues (le filtre filtre vraiment).
+    let (_, json) =
+        mcp_tool_call(&app, "code_health", serde_json::json!({"detail": "issues"})).await;
+    let text = tool_text(&json);
+    assert!(
+        text.contains("src/a.ts") && text.contains("tests/x.ts"),
+        "sans filtre, obtenu : {text}"
+    );
+
+    // Avec `path: "src/"` : seulement src/, aucune ligne sous tests/.
+    let (status, json) = mcp_tool_call(
+        &app,
+        "code_health",
+        serde_json::json!({"detail": "issues", "path": "src/"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let text = tool_text(&json);
+    for expected in ["src/a.ts", "src/b.ts", "src/c.ts"] {
+        assert!(
+            text.contains(expected),
+            "issue {expected} attendue sous le filtre src/ : {text}"
+        );
+    }
+    for line in text.lines() {
+        assert!(
+            !line.contains("tests/"),
+            "ligne sous tests/ passée au filtre src/ : {line}"
+        );
+    }
+}
+
+/// Volet `Must` « répondre à l'outil `code_health` à tout instant » : pendant
+/// le tout premier calcul (aucun rapport), l'outil rend un TEXTE disant la
+/// phase (`computing`), pas une erreur d'outil ni une erreur JSON-RPC.
+#[tokio::test]
+async fn outil_mcp_sans_rapport_annonce_la_phase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (source, lock, _log) = slow_source(tmp.path(), &counter);
+    let (state, health) = health_on(&root, source, 0, 0);
+    health.spawn_background();
+    wait_until("premier calcul démarré", || {
+        counter.load(Ordering::SeqCst) == 1
+    })
+    .await;
+
+    let app = build_app(state);
+    let (status, json) = mcp_tool_call(&app, "code_health", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["error"].is_null(),
+        "jamais une erreur JSON-RPC, obtenu : {json}"
+    );
+    assert_eq!(json["result"]["isError"], serde_json::json!(false));
+    let text = tool_text(&json);
+    assert!(text.contains("computing"), "le texte dit la phase : {text}");
+
+    // Libère le calcul lent pour que le pod de test meure proprement.
+    std::fs::remove_file(&lock).unwrap();
+    wait_until("calcul de fond terminé", || {
+        health.snapshot().report.is_some()
+    })
+    .await;
+}
+
+/// Volet `Exposes` : l'outil `code_health` est déclaré dans `tools/list` avec
+/// le schéma d'arguments `{detail?, path?, limit?}` (famille des déclarations
+/// de `./tools_impl.rs`, concaténées par ./mcp.rs).
+#[tokio::test]
+async fn tools_list_contient_code_health() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, _health) = health_on(&root, echo_source(&counter), 0, 0);
+    let app = build_app(state);
+
+    let (status, json) = request(
+        &app,
+        Method::POST,
+        "/mcp",
+        Some(bearer()),
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let tools = json["result"]["tools"]
+        .as_array()
+        .expect("tableau d'outils");
+    let tool = tools
+        .iter()
+        .find(|t| t["name"].as_str() == Some("code_health"))
+        .expect("code_health déclaré dans tools/list");
+    let props = &tool["inputSchema"]["properties"];
+    assert_eq!(props["path"]["type"], "string");
+    assert_eq!(props["limit"]["type"], "integer");
+    let detail_enum: Vec<&str> = props["detail"]["enum"]
+        .as_array()
+        .expect("detail borné enum")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(detail_enum, ["summary", "issues", "coverage"]);
+}
+
+// ── Lot H2 — déclencheurs et non-déclencheurs (`Handles` « Déclencheurs ») ────
+
+/// Déclencheur, famille outils MCP qui écrivent : `tools/call write_file` via
+/// `/mcp` ⇒ notification posée, recalcul après le délai de calme (ici 0,
+/// immédiat) — prouvé par le compteur de la source de vérifications.
+#[tokio::test]
+async fn declencheur_mcp_write_file_reprogramme_le_calcul() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 0, 0);
+    health.spawn_background();
+    wait_until("état fresh initial", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    let app = build_app(state);
+    let (status, json) = mcp_tool_call(
+        &app,
+        "write_file",
+        serde_json::json!({"path": "declencheur.txt", "content": "x\n"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["result"]["isError"], serde_json::json!(false));
+
+    wait_until("recalcul déclenché par write_file", || {
+        counter.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    wait_until("retour à fresh", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+}
+
+/// Déclencheur, famille opérations d'écriture de `/ws/fs` : op `write` via
+/// `dispatch_fs_message` ⇒ recalcul (les ops `edit`/`delete`/`mkdir`/`rename`
+/// partagent la même accroche de succès).
+#[tokio::test]
+async fn declencheur_ws_fs_write_reprogramme_le_calcul() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 0, 0);
+    health.spawn_background();
+    wait_until("état fresh initial", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    let resp = dispatch_fs_message(
+        &state,
+        r#"{"op":"write","path":"ws_write.txt","content":"x\n"}"#,
+    )
+    .await;
+    assert_eq!(
+        resp["ok"],
+        serde_json::json!(true),
+        "l'op write doit réussir : {resp}"
+    );
+
+    wait_until("recalcul déclenché par l'op write", || {
+        counter.load(Ordering::SeqCst) == 2
+    })
+    .await;
+}
+
+/// Déclencheur, famille endpoints git qui changent l'arbre : succès de
+/// `POST /git/checkout` (fixture réel, branche `feature` au contenu distinct)
+/// ⇒ recalcul (checkout échoué et `merge`/`merge/abort` partagent la règle
+/// succès-seul).
+#[tokio::test]
+async fn declencheur_git_checkout_reprogramme_le_calcul() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+    // Seconde branche avec un contenu distinct (l'empreinte doit bouger au
+    // checkout, sinon le garde d'empreinte refuserait le recalcul à juste titre).
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("feature.rs"), "fn feature() {}\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "feature"]);
+    git(&root, &["checkout", "-q", "main"]);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 0, 0);
+    health.spawn_background();
+    wait_until("état fresh initial", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    let app = build_app(state);
+    let (status, json) = request(
+        &app,
+        Method::POST,
+        "/git/checkout",
+        Some(bearer()),
+        r#"{"branch": "feature"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "checkout attendu réussi : {json}");
+
+    wait_until("recalcul déclenché par checkout", || {
+        counter.load(Ordering::SeqCst) == 2
+    })
+    .await;
+}
+
+/// Non-déclencheurs (`Must not` « déclencher un calcul depuis une lecture ») :
+/// `read_file` MCP, op `read` de `/ws/fs` et `GET /git/status` ne lancent
+/// AUCUN calcul après écoulement du délai. Ce test verrouille un `Must not` :
+/// il est vert par construction tant que les lectures ne notifient pas — c'est
+/// exactement la régression qu'il attrape si un câblage dérape.
+#[tokio::test]
+async fn non_declencheur_lecture_ne_calcule_rien() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 0, 0);
+    health.spawn_background();
+    wait_until("état fresh initial", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    let app = build_app(state.clone());
+
+    let (_, json) =
+        mcp_tool_call(&app, "read_file", serde_json::json!({"path": "Cargo.toml"})).await;
+    assert_eq!(
+        json["result"]["isError"],
+        serde_json::json!(false),
+        "lecture valide : {json}"
+    );
+
+    let resp = dispatch_fs_message(&state, r#"{"op":"read","path":"Cargo.toml"}"#).await;
+    assert_eq!(
+        resp["ok"],
+        serde_json::json!(true),
+        "op read valide : {resp}"
+    );
+
+    let (status, _json) = request(&app, Method::GET, "/git/status", Some(bearer()), "").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Le délai de calme est 0 : tout calcul eût été quasi immédiat ; on observe
+    // largement au-delà (précédent `empreinte_identique_aucun_recalcul`).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "aucune lecture ne doit déclencher de calcul"
     );
 }

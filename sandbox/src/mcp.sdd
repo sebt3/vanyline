@@ -78,8 +78,10 @@ Returns:
     `list_directory`), search (2 : `find_files`, `search`), command (1 :
     `execute_command`), @tools_impl::lsp_tools (8 : `lsp_diagnostics`, `lsp_definition`,
     `lsp_references`, `lsp_rename`, `lsp_document_symbols`, `lsp_workspace_symbols`,
-    `inspect_symbol`, `edit_and_check`) — 16 outils au total, noms d'origine sans
-    préfixe. `params` (dont `cursor`) ignoré, pas de pagination ni de `nextCursor`.
+    `inspect_symbol`, `edit_and_check`) + @tools_impl::code_health_tool (1 :
+    `code_health`, déclaré après la famille lsp — ./health.sdd `Exposes`) — 17 outils au
+    total, noms d'origine sans préfixe (16→17 aligné 2026-10-10 : la déclaration est
+    contractée par ./health.sdd ; l'inventaire de CE fichier suit). `params` (dont `cursor`) ignoré, pas de pagination ni de `nextCursor`.
   `tools/call` réussi ou en échec d'outil : `result` = l'enveloppe rendue par le dispatch
     (`{content: [{type: "text", text}], isError: bool}`) — un échec d'exécution d'outil
     (chemin hors sandbox, LSP absent…) reste un `result` avec `isError: true`, JAMAIS un
@@ -134,7 +136,7 @@ Must:
     deux seuls défauts de `params` de `tools/call` (nom absent/non-chaîne, outil inconnu
     de toutes les familles).
   Dépiler `tools/call` dans l'ordre strict filesystem → search → command → lsp →
-    edit_and_check, premier `Some` gagnant, nom testé par nom (aucune table de
+    edit_and_check → code_health, premier `Some` gagnant, nom testé par nom (aucune table de
     routage) — un nom présent dans deux familles serait résolu par la première (aucun
     aujourd'hui, les 16 noms sont distincts).
   Déclarer `initialize` avec `protocolVersion` fixe `"2024-11-05"` et `serverInfo`
@@ -176,7 +178,7 @@ Tasks:
     accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
   [ ] Convertir en tests taggés par leur titre les Scenarios sans couverture actuelle.
     Couverture unitaire existante (mod tests de ./mcp.rs) : `initialize` (version +
-    écho d'id), `tools/list` (16 outils, noms), `tools/call` outil inconnu et nom absent,
+    écho d'id), `tools/list` (17 outils, noms), `tools/call` outil inconnu et nom absent,
     formes des enveloppes ok/err. Non couvert : tout le niveau HTTP — notifications
     (`notification_sans_id_recoit_202_sans_corps`, `id_explicite_null_traite_comme_notification`,
     `initialized_avec_id_porteur_recoit_202`), méthode inconnue avec id (`methode_inconnue_avec_id_rend_32601`),
@@ -255,11 +257,12 @@ Scenario: methode_inconnue_avec_id_rend_32601
   Then HTTP 200, `error.code` vaut -32601 et `error.message` vaut `Method not found: foo/bar`
   And `result` est absent de la sérialisation
 
-Scenario: outils_listes_en_noms_origine_et_16_entrees
+Scenario: outils_listes_en_noms_origine_et_17_entrees
   Given un `tools/list` authentifié avec `params: {"cursor": "n'importe"}`
   When le résultat est lu
-  Then `result.tools` compte exactement 16 entrées nommées, sans préfixe `/`
-  And l'ordre est filesystem, search, command puis la famille lsp (dernier : `edit_and_check`)
+  Then `result.tools` compte exactement 17 entrées nommées, sans préfixe `/`
+  And l'ordre est filesystem, search, command, la famille lsp (`edit_and_check`
+    avant-dernier), puis `code_health` (dernier — ./health.sdd)
   And aucun `nextCursor` n'est rendu malgré le `cursor` envoyé
 
 Scenario: outils_appelles_par_nom_origine_sans_initialisation

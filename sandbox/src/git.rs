@@ -1497,6 +1497,12 @@ pub async fn handle_checkout(
     .await
     .expect("handle_checkout blocking task panicked");
 
+    // health.sdd `Handles` — checkout : succès seul (un refus `CheckoutRefused`
+    // ou un échec git n'a rien changé au worktree). `notify_modified` est une
+    // émission de canal non bloquante — jamais un await, jamais une erreur.
+    if result.is_ok() {
+        state.health.notify_modified();
+    }
     result.map(|_| Json(OkResponse { ok: true }))
 }
 
@@ -2025,6 +2031,13 @@ pub async fn handle_merge(
     .await
     .expect("handle_merge blocking task panicked");
 
+    // health.sdd `Handles` — merge : les deux réponses 200 changent l'arbre
+    // (succès auto-commité comme conflit, qui écrit les marqueurs et
+    // MERGE_HEAD). `MergeNotStarted` (autre code de sortie) = merge jamais
+    // démarré, arbre intact : pas de notification.
+    if result.is_ok() {
+        state.health.notify_modified();
+    }
     result.map(Json)
 }
 
@@ -2066,7 +2079,13 @@ pub async fn handle_merge_abort(
 
     // Exécution de `run_git` → CommandFailed (non-zero exit) signifie aucun merge en cours.
     match result {
-        Ok(_) => Ok(Json(OkResponse { ok: true })),
+        Ok(_) => {
+            // health.sdd `Handles` — merge/abort : succès seul (il restaure
+            // l'arbre d'avant-merge ; l'échec « aucun merge en cours » ne change
+            // rien).
+            state.health.notify_modified();
+            Ok(Json(OkResponse { ok: true }))
+        }
         Err(GitError::CommandFailed { .. }) => Err(GitError::NoMergeInProgress),
         Err(e) => Err(e),
     }

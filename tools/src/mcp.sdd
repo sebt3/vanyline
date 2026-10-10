@@ -5,7 +5,8 @@ Purpose:
   (`tools/list`) : trois fonctions pures produisant des descripteurs JSON Schema
   (`name` / `description` / `inputSchema`), source unique partagée par les quatre
   consommateurs — serveur MCP de la sandbox (`handle_tools_list`, qui concatène 8 tools
-  ici + 8 `lsp_tools` locaux = 16), CLI (définitions d'outils du harnais rig via
+  ici + 8 `lsp_tools` locaux + `code_health` (./../sandbox/src/health.sdd) = 17 —
+  16→17 aligné 2026-10-10), CLI (définitions d'outils du harnais rig via
   @tool_definition et réponse RPC `config/localTools` verbatim), `app`
   (`GET /api/local-tools`, aplati en paires name/description). Le module ne porte ni
   exécution ni validation : les comportements annoncés dans les descriptions sont
@@ -27,7 +28,7 @@ References:
   ../../cli/src/tools.rs — @tool_definition (lookup par nom, panique si absent — contrat du CLI, pas d'ici) et @local_tools_map (mêmes 8 noms)
   ../../cli/src/rpc/handlers.rs — gestionnaire `config/localTools` (descripteurs verbatim, même ordre de concaténation)
   ../../app/src/api/local_tools.rs — @flatten_local_tools (noms + descriptions seulement)
-  ../../sandbox/tests/http.rs — couverture indirecte `tools/list` (16 tools dont les 8 d'ici)
+  ../../sandbox/tests/http.rs — couverture indirecte `tools/list` (17 tools dont les 8 d'ici)
 
 Must:
   @filesystem_tools rend exactement 5 descripteurs dans cet ordre : `read_file`,
@@ -130,7 +131,7 @@ Tasks:
     `search_tools_surface`, `command_tools_surface`, `edit_file_required_fields`,
     `read_file_required_fields`, `no_create_directory_schema`. Couverture indirecte :
     `tools_list_advertises_filesystem_tools` / `tools_list_advertises_search_tools`
-    (../../sandbox/tests/http.rs, 16 tools), tests de @flatten_local_tools
+    (../../sandbox/tests/http.rs, 17 tools), tests de @flatten_local_tools
     (../../app/src/api/local_tools.rs, 8 tools aplatis).
   [?] Valeur par défaut de `timeout_secs` : le schéma annonce `default 30`, le CLI
     applique 30, mais la sandbox mappe une absence en @ExecuteCommandOptions::timeout_secs

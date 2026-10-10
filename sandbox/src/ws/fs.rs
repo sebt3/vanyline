@@ -197,7 +197,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
                 content,
             };
             match vanyline_tools::filesystem::write_file(opts).await {
-                Ok(()) => serde_json::json!({ "ok": true, "wrote": resolved }),
+                Ok(()) => {
+                    // health.sdd `Handles` — op d'écriture réussie = déclencheur.
+                    state.health.notify_modified();
+                    serde_json::json!({ "ok": true, "wrote": resolved })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }
@@ -218,7 +222,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
                 replace_all,
             };
             match vanyline_tools::filesystem::edit_file(opts).await {
-                Ok(text) => serde_json::json!({ "ok": true, "content": text }),
+                Ok(text) => {
+                    // health.sdd `Handles` — op d'écriture réussie = déclencheur.
+                    state.health.notify_modified();
+                    serde_json::json!({ "ok": true, "content": text })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }
@@ -227,7 +235,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
                 path: resolved.clone(),
             };
             match vanyline_tools::filesystem::delete_file(opts).await {
-                Ok(()) => serde_json::json!({ "ok": true, "deleted": resolved }),
+                Ok(()) => {
+                    // health.sdd `Handles` — op d'écriture réussie = déclencheur.
+                    state.health.notify_modified();
+                    serde_json::json!({ "ok": true, "deleted": resolved })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }
@@ -236,7 +248,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
                 path: resolved.clone(),
             };
             match vanyline_tools::filesystem::mkdir(opts).await {
-                Ok(()) => serde_json::json!({ "ok": true, "mkdir": resolved }),
+                Ok(()) => {
+                    // health.sdd `Handles` — op d'écriture réussie = déclencheur.
+                    state.health.notify_modified();
+                    serde_json::json!({ "ok": true, "mkdir": resolved })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }
@@ -254,7 +270,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
                 to: resolved_to.clone(),
             };
             match vanyline_tools::filesystem::rename_file(opts).await {
-                Ok(()) => serde_json::json!({ "ok": true, "renamed": resolved_to }),
+                Ok(()) => {
+                    // health.sdd `Handles` — op d'écriture réussie = déclencheur.
+                    state.health.notify_modified();
+                    serde_json::json!({ "ok": true, "renamed": resolved_to })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }

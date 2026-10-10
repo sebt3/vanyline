@@ -15,9 +15,11 @@
 //! détectés sont ceux du crate ; `check_timeout`/`tail_bytes`/`max_parallel`
 //! sont les valeurs usuelles contractées par `./health.sdd` `Handles`).
 //!
-//! En attente du lot H2 (Tasks de `./health.sdd`) : l'outil MCP `code_health`
-//! et le câblage de `notify_modified` dans les dispatchs d'écriture
-//! `./tools_impl.rs`, `./ws/fs.rs` et les handlers git. Les diagnostics LSP
+//! Outil MCP `code_health` : déclaration et dispatch dans `./tools_impl.rs`
+//! (branchés par `./mcp.rs`, lecture pure du snapshot — jamais de refresh).
+//! Le câblage de `notify_modified` est fait dans les dispatchs d'écriture
+//! `./tools_impl.rs`, les ops d'écriture `./ws/fs.rs` et les handlers git
+//! (`checkout`, `merge`, `merge/abort`, succès seulement). Les diagnostics LSP
 //! (`preliminary_issues`) sont transmis vides tant que `./lsp.rs` n'expose pas
 //! de collecte globale — l'accroche est le champ `preliminary_issues` de
 //! [`vanyline_health::runner::RunOptions`].
