@@ -26,6 +26,12 @@ Owns:
 Can modify:
   ./lib.rs
   ./config.rs
+  ./main.rs (ratifié validation S6a 2026-10-10 — LA LIGNE du champ `jobs:` dans la
+    construction d'@AppState, rien d'autre ; précédent health.sdd).
+  ./mcp.rs, ./tools_impl.rs, ./ws/fs.rs, ./ws/lsp.rs, ./ws/terminal.rs,
+    ./ws/ticket.rs (mêmes lignes de champ dans les `mod tests` seulement).
+  ./tests/jobs.rs (fichier de tests d'intégration de CE fichier).
+  ./tests/auth.rs, ./tests/health.rs, ./tests/http.rs (lignes de champ seulement).
 
 Can read:
   ./auth.sdd
@@ -41,22 +47,37 @@ Exposes:
       201 + @JobStatus pour un nouveau job ; 200 + @JobStatus pour un `job_id` déjà connu
       (IDEMPOTENT : un rejeu après crash du worker ne lance jamais un second processus) ; 400
       si `script` vide, `cwd` hors confinement, `job_id` invalide ; 429 si le plafond de jobs
-      simultanés est atteint.
+      simultanés est atteint. Ratifiés validation S6a 2026-10-10 : un `timeout_secs` excédant
+      24 h est ÉCRASÉ à 24 h (jamais un refus — la liste 400 ne nomme que `script`, `cwd`,
+      `job_id`) ; `job_id` valide = charset `[A-Za-z0-9._:-]` (les identifiants
+      `<run_id>:<step>` passent), non vide, différent de `.` et `..`, ≤ 128 octets ;
+      l'idempotence PRIME sur le plafond (le rejeu d'un `job_id` connu répond 200 même au
+      plafond — le 429 est réservé aux `job_id` inconnus) ; `cwd` doit désigner un
+      répertoire EXISTANT sous `sandbox_root` (l'inexistence est un 400, comme l'évasion).
     `GET /jobs/{job_id}` — 200 + @JobStatus ; 404 si inconnu (jamais lancé, évincé, ou perdu à un
       redémarrage du pod).
     `GET /jobs/{job_id}/logs?offset=<octets>&limit=<octets>` — 200, texte (stdout et stderr
       entrelacés, UTF-8 lossy) à partir de `offset`, au plus `limit` octets (défaut et plafond
-      64 KiB) ; l'en-tête `X-Log-Size` donne la taille totale pour la lecture incrémentale.
+      64 KiB) ; l'en-tête `X-Log-Size` donne la taille totale pour la lecture incrémentale ;
+      404 sur un job inconnu, comme `GET /jobs/{job_id}`.
     `DELETE /jobs?prefix=<préfixe>` — annule tous les jobs `running` dont l'identifiant commence par
       le préfixe (annulation d'un run de workflow : `<run_id>:`) ; 200 + la liste des @JobStatus
-      annulés ; un préfixe vide est refusé (400).
+      annulés ; un préfixe vide est refusé (400) — préfixe ABSENT = préfixe vide (ratifié S6a).
     `DELETE /jobs/{job_id}` — annule : le GROUPE de processus est tué (SIGTERM puis SIGKILL après
-      5 s) ; 200 + @JobStatus (`cancelled`) ; idempotent sur un job déjà terminé.
+      5 s) ; 200 + @JobStatus (`cancelled`) ; idempotent sur un job déjà terminé ; 404 sur un
+      job jamais lancé ou évincé (ratifié S6a — l'idempotence 200 ne vaut que pour un terminal).
   @JobStatus — `{ job_id, state: "running" | "succeeded" | "failed" | "timed_out" | "cancelled",
     exit_code: Option<i32>, started_at, ended_at: Option<…>, log_size: u64, log_tail: String }`,
     `log_tail` borné à 4 KiB. `succeeded` = code de sortie 0 ; `failed` = code ≠ 0 ou mort par
-    signal.
+    signal. Ratifié S6a : `log_tail` = derniers 4 KiB d'OCTETS BRUTS convertis UTF-8 lossy (un
+    caractère de remplacement peut apparaître en tête si la coupe tombe en milieu de
+    caractère) ; `started_at`/`ended_at` en secondes POSIX depuis l'epoch (@u64).
   @Jobs — registre en mémoire du pod, dans @AppState (comme @CodeHealth, ./health.sdd).
+    @Jobs::new(config) — constructeur de production ; @Jobs::with_callback_timing(config,
+    base, max, window) — seam d'injection de la chronologie de callback (précédent
+    @CodeHealth::with_timing de ./health.sdd, contracté comme lui) ; @Jobs::log_path(job_id),
+    @Jobs::status(job_id) — accès de test/diagnostic ; @CallbackTiming { base, max, window }
+    — défauts 250 ms / 30 s / 10 min.
 
 Handles:
   Exécution : `sh -c <script>` dans un groupe de processus dédié, `cwd` = `sandbox_root` ou le
@@ -65,7 +86,9 @@ Handles:
   dans UN fichier de log sous `<tmp>/vanyline-jobs/<job_id>.log`, jamais bornés à l'écriture.
   `timeout_secs` absent = 3 600 s (plafond configurable à 24 h) : à l'échéance le groupe est tué
   (SIGTERM puis SIGKILL) et l'état est `timed_out`.
-  Plafonds : au plus 4 jobs `running` simultanés ; les 20 derniers jobs terminés sont conservés
+  Plafonds : au plus 4 jobs `running` simultanés — la vérification du plafond et l'insertion
+  s'exécutent sous une SEULE acquisition du verrou du registre : aucune course concurrente
+  ne peut dépasser le plafond (invariant structurel, ratifié S6a) ; les 20 derniers jobs terminés sont conservés
   (le plus ancien est évincé avec son fichier de log). L'état est EN MÉMOIRE seulement : un
   redémarrage du pod tue de toute façon les processus ; le worker voit alors un 404 et fait
   échouer le nœud.
@@ -110,7 +133,10 @@ Tasks:
     si des jobs détachés du pod deviennent un besoin.
   [?] Plafonds (4 simultanés, 20 conservés, 3 600 s, 24 h) : valeurs de départ, à ajuster à
     l'usage ; les rendre configurables seulement si un besoin réel apparaît.
-  [ ] Convertir chaque Scenario en test taggé par son titre.
+  [x] Convertir chaque Scenario en test taggé par son titre — FAIT 2026-10-10
+    (validation S6a : ./tests/jobs.rs, 14/14 Scenario taggés + 4 appoints = 18,
+    stables ×4, assertions d'effets réels — kill du groupe prouvé par /proc du
+    descendant, backoff horodaté, byte-à-byte des logs).
 
 Scenario: demarrage_puis_lecture_de_l_etat
   Given une sandbox de test et `POST /jobs` avec `{"job_id": "j1", "script": "echo hi; exit 0"}`
@@ -179,5 +205,6 @@ Scenario: job_perdu_apres_redemarrage
 
 Scenario: auth_exigee
   Given aucune en-tête d'autorisation
-  When n'importe laquelle des quatre routes est appelée
+  When n'importe laquelle des cinq routes est appelée (corrigé S6a — POST, GET statut,
+    GET logs, DELETE préfixe, DELETE id)
   Then 401 ; avec le jeton d'un autre Owner : 403

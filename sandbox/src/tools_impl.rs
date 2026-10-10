@@ -3807,6 +3807,7 @@ mod tests {
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
             health: crate::health::CodeHealth::new(config.clone()),
+            jobs: Arc::new(crate::jobs::Jobs::new(Arc::clone(&config))),
             config,
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
@@ -3831,6 +3832,7 @@ mod tests {
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
             health: crate::health::CodeHealth::new(config.clone()),
+            jobs: Arc::new(crate::jobs::Jobs::new(Arc::clone(&config))),
             config,
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
@@ -4839,6 +4841,7 @@ mod tests {
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
             health: crate::health::CodeHealth::new(config.clone()),
+            jobs: Arc::new(crate::jobs::Jobs::new(Arc::clone(&config))),
             config,
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
@@ -6213,6 +6216,7 @@ mod tests {
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
             health: crate::health::CodeHealth::new(config.clone()),
+            jobs: Arc::new(crate::jobs::Jobs::new(Arc::clone(&config))),
             config,
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),

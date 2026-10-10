@@ -51,6 +51,7 @@ fn app_state_with(auth: AuthState, root: &std::path::Path) -> AppState {
     let (fs_events, fs_flush) = fs_push_channels();
     AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: Arc::new(vanyline_sandbox::jobs::Jobs::new(Arc::clone(&config))),
         config,
         auth: Arc::new(auth),
         tickets: TicketStore::new(),

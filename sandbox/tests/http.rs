@@ -39,6 +39,9 @@ fn test_state(root: &std::path::Path) -> AppState {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1486,6 +1489,9 @@ async fn git_status_endpoint_nominal() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1533,6 +1539,9 @@ async fn git_status_endpoint_clean() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1577,6 +1586,9 @@ async fn git_status_endpoint_not_a_repo() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1712,6 +1724,9 @@ async fn git_unpushed_endpoint_with_upstream() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1766,6 +1781,9 @@ async fn git_unpushed_endpoint_without_upstream() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1814,6 +1832,9 @@ async fn git_unpushed_endpoint_no_local_commits() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1862,6 +1883,9 @@ async fn git_unpushed_endpoint_detached_head() {
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
         health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(vanyline_sandbox::jobs::Jobs::new(std::sync::Arc::clone(
+            &config,
+        ))),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),

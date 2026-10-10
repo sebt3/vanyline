@@ -320,6 +320,7 @@ fn make_state(test_name: &str) -> AppState {
     let (fs_events, fs_flush) = crate::fs_push_channels();
     AppState {
         health: crate::health::CodeHealth::new(config.clone()),
+        jobs: std::sync::Arc::new(crate::jobs::Jobs::new(std::sync::Arc::clone(&config))),
         config,
         auth: std::sync::Arc::new(auth),
         tickets: crate::ws::ticket::TicketStore::new(),

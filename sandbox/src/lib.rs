@@ -14,6 +14,9 @@ pub mod git;
 /// État de santé du code du pod : machine `CodeHealth`, routes `/code-health/*`
 /// (spec : `./health.sdd`).
 pub mod health;
+/// API de jobs shell durables : registre `Jobs` en mémoire, routes `/jobs*`
+/// sur le routeur protégé (spec : `./jobs.sdd`).
+pub mod jobs;
 pub mod lsp;
 pub mod lsp_client;
 pub mod maint;
@@ -79,6 +82,10 @@ pub struct AppState {
     /// l'outil MCP `code_health`. Décision SOLDÉ 2026-10-09 : champ `Arc` dans
     /// `AppState`, pas de registre statique.
     pub health: Arc<health::CodeHealth>,
+    /// Registre en mémoire des jobs shell durables (spec `./jobs.sdd`) : même
+    /// forme que `health` (décision 2026-10-10), champ `Arc` partagé par les
+    /// routes `/jobs*` du port principal protégé.
+    pub jobs: Arc<jobs::Jobs>,
 }
 
 /// Capacité du canal `fs_events` (frames de push /ws/fs, tâche 08b).
@@ -233,6 +240,13 @@ pub fn build_app(state: AppState) -> Router {
         .route("/git/ssh-key", post(git::handle_ssh_key_create))
         .route("/git/merge", post(git::handle_merge))
         .route("/git/merge/abort", post(git::handle_merge_abort))
+        .route("/jobs", post(jobs::handle_create))
+        .route("/jobs", delete(jobs::handle_cancel_prefix))
+        .route(
+            "/jobs/{job_id}",
+            get(jobs::handle_get).delete(jobs::handle_cancel),
+        )
+        .route("/jobs/{job_id}/logs", get(jobs::handle_logs))
         .route("/ws/ticket", post(handle_ws_ticket))
         .layer(middleware::from_fn_with_state(
             state.clone(),

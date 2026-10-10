@@ -29,9 +29,11 @@ async fn main() -> Result<()> {
     let auth = Arc::new(AuthState::new(config.clone())?);
     let lsp = Arc::new(LspManager::from_env(config.sandbox_root.clone())?);
     let (fs_events, fs_flush) = fs_push_channels();
+    let jobs = Arc::new(vanyline_sandbox::jobs::Jobs::new(Arc::clone(&config)));
     let state = AppState {
         health: vanyline_sandbox::health::CodeHealth::with_lsp(config.clone(), Arc::clone(&lsp)),
         config: config.clone(),
+        jobs,
         auth,
         tickets: TicketStore::new(),
         lsp,

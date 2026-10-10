@@ -224,6 +224,7 @@ fn health_on_base(
     let auth = Arc::new(test_support::auth_state(Arc::clone(&config)));
     let (fs_events, fs_flush) = fs_push_channels();
     let state = AppState {
+        jobs: Arc::new(vanyline_sandbox::jobs::Jobs::new(Arc::clone(&config))),
         config,
         auth,
         tickets: TicketStore::new(),
