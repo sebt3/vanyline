@@ -27,6 +27,14 @@
 //! URI→`Issue` elle-même (URI non-`file://`, hors racine, sévérités) est
 //! verrouillée par les tests unitaires de `src/health.rs`.
 //!
+//! Base initiale « code neuf » (task sandbox.sdd) : les tests
+//! `base_de_config_*` et `refresh_sans_base_ne_efface_pas_la_base_de_config`
+//! verrouillent la base de `config.health_base_ref` (fournie par le
+//! controller) comme sticky posée avant le premier calcul, son écrasement par
+//! `/refresh {"base": …}`, son maintien sur `/refresh {}`, et sa non-fatalité
+//! quand elle ne résout pas (check `new-code` `errored`, délégation au
+//! runner).
+//!
 //! Hors périmètre (Tasks de `./health.sdd`) : la vue `new_code` du worktree
 //! non commité (mécanique du runner, couverte par `health/src/runner.rs` —
 //! cf. le test `code_neuf`).
@@ -190,7 +198,22 @@ fn health_on(
     cooldown: u64,
     poll: u64,
 ) -> (AppState, Arc<CodeHealth>) {
-    let config = Arc::new(test_support::test_config(root));
+    health_on_base(root, source, cooldown, poll, None)
+}
+
+/// Comme [`health_on`], avec la base initiale de la vue « code neuf »
+/// (`config.health_base_ref`, task sandbox.sdd : branche par défaut du Project
+/// fournie par le controller) posée avant tout `/refresh`.
+fn health_on_base(
+    root: &Path,
+    source: CheckSource,
+    cooldown: u64,
+    poll: u64,
+    base: Option<&str>,
+) -> (AppState, Arc<CodeHealth>) {
+    let mut config = test_support::test_config(root);
+    config.health_base_ref = base.map(str::to_string);
+    let config = Arc::new(config);
     let health = CodeHealth::with_timing(
         Arc::clone(&config),
         source,
@@ -851,6 +874,213 @@ async fn base_sticky_pour_les_recalculs() {
         .as_ref()
         .expect("vue new_code du recalcul automatique");
     assert_eq!(new_code.base, "origin/main", "base sticky conservée");
+}
+
+/// Base de config (`config.health_base_ref`, task sandbox.sdd) : posée par le
+/// controller comme branche par défaut du Project, elle agit comme une base
+/// sticky posée AVANT le premier calcul — le premier rapport porte une vue
+/// `new_code` relative à cette base, sans aucun `/refresh`.
+#[tokio::test]
+async fn base_de_config_base_initiale_sans_refresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (_state, health) =
+        health_on_base(&root, echo_source(&counter), 150, 0, Some("origin/main"));
+    // La base est connue dès la naissance de l'état (comme sticky posée avant
+    // le premier calcul).
+    assert_eq!(
+        health.snapshot().base.as_deref(),
+        Some("origin/main"),
+        "base de config visible avant tout calcul"
+    );
+    health.spawn_background();
+    wait_until(
+        "premier rapport avec new_code sur la base de config",
+        || {
+            let snap = health.snapshot();
+            snap.phase == vanyline_sandbox::health::Phase::Fresh
+                && snap
+                    .report
+                    .as_ref()
+                    .is_some_and(|r| r.new_code.as_ref().is_some_and(|n| n.base == "origin/main"))
+        },
+    )
+    .await;
+    assert_eq!(
+        health.snapshot().base.as_deref(),
+        Some("origin/main"),
+        "aucun /refresh n'a été nécessaire"
+    );
+}
+
+/// Base de config + `POST /code-health/refresh {"base": …}` : le refresh
+/// écrase la base de config (sticky classique).
+#[tokio::test]
+async fn base_de_config_ecrasee_par_refresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+    git(&root, &["branch", "second"]);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on_base(&root, echo_source(&counter), 150, 0, Some("origin/main"));
+    health.spawn_background();
+    wait_until("new_code sur la base de config", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap
+                .report
+                .as_ref()
+                .is_some_and(|r| r.new_code.as_ref().is_some_and(|n| n.base == "origin/main"))
+    })
+    .await;
+
+    let app = build_app(state);
+    let (status, _) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        r#"{"base": "second"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_until("new_code sur la base du refresh", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap
+                .report
+                .as_ref()
+                .is_some_and(|r| r.new_code.as_ref().is_some_and(|n| n.base == "second"))
+    })
+    .await;
+    assert_eq!(
+        health.snapshot().base.as_deref(),
+        Some("second"),
+        "le refresh a écrasé la base de config"
+    );
+}
+
+/// `/refresh {}` (sans `base`) sur une base de config : la base de config
+/// n'est PAS effacée (le contrat ne prévoit son effacement nulle part ; seule
+/// une base invalide est refusée, une base absente du corps ne dit rien).
+#[tokio::test]
+async fn refresh_sans_base_ne_efface_pas_la_base_de_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on_base(&root, echo_source(&counter), 150, 0, Some("origin/main"));
+    health.spawn_background();
+    wait_until("premier rapport", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+
+    let app = build_app(state);
+    let (status, _) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    // Laisse au recalcul forcé le temps de se terminer sur l'empreinte en place.
+    wait_until("recalcul du refresh sans base publié", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap.report.as_ref().is_some_and(|r| r.new_code.is_some())
+    })
+    .await;
+    assert_eq!(
+        health.snapshot().base.as_deref(),
+        Some("origin/main"),
+        "le refresh sans base laisse la base de config en place"
+    );
+}
+
+/// Config sans base : comportement actuel inchangé — aucun `new_code` au
+/// premier calcul (vue calculée seulement si une base est connue).
+#[tokio::test]
+async fn config_sans_base_aucun_new_code_au_premier_calcul() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (_state, health) = health_on(&root, echo_source(&counter), 150, 0);
+    assert_eq!(health.snapshot().base, None, "aucune base connue");
+    health.spawn_background();
+    wait_until("premier rapport", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh && snap.report.is_some()
+    })
+    .await;
+    let snap = health.snapshot();
+    assert!(
+        snap.report.as_ref().is_some_and(|r| r.new_code.is_none()),
+        "pas de base ⇒ pas de vue new_code"
+    );
+    assert_eq!(snap.base, None, "aucune base inventée");
+}
+
+/// Base de config qui ne résout pas dans le worktree : non fatale — le calcul
+/// complet a lieu, la vue `new_code` est rendue par un check `new-code`
+/// `errored` (délégation au runner, Scenario `echec_du_diff`), le reste du
+/// rapport est intact.
+#[tokio::test]
+async fn base_de_config_inexistante_calcule_quand_meme() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (_state, health) =
+        health_on_base(&root, echo_source(&counter), 150, 0, Some("origin/ghost"));
+    health.spawn_background();
+    wait_until(
+        "premier rapport publié malgré la base inexistante",
+        || {
+            let snap = health.snapshot();
+            snap.phase == vanyline_sandbox::health::Phase::Fresh && snap.report.is_some()
+        },
+    )
+    .await;
+    let snap = health.snapshot();
+    let report = snap.report.as_ref().expect("rapport publié");
+    assert!(
+        report.new_code.is_none(),
+        "la base ne résout pas ⇒ pas de vue"
+    );
+    let new_code_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "new-code")
+        .expect("check new-code errored ajouté par le runner");
+    assert_eq!(new_code_check.status, CheckStatus::Errored);
+    assert_eq!(new_code_check.kind, CheckKind::NewCode);
+    let echo = report
+        .checks
+        .iter()
+        .find(|c| c.id == "echo")
+        .expect("le reste du rapport est intact");
+    assert_eq!(echo.status, CheckStatus::Passed);
+    assert_eq!(
+        snap.base.as_deref(),
+        Some("origin/ghost"),
+        "la base non résolue reste en place (non fatale)"
+    );
 }
 
 /// Scenario `langage_sans_preset_rapporte` : un langage sélectionné sans preset

@@ -36,7 +36,7 @@ Can read:
 Exposes:
   @Config — struct publique, derives @Parser, @Debug, @Clone, nom de commande
     `vanyline-sandbox`, `about` « Sandbox server — MCP, git, editor WebSocket, Owner-token secured ».
-    Seize champs `pub` :
+    Dix-sept champs `pub` (17ᵉ : `health_base_ref`, H3b 2026-10-10) :
     - @Config::listen : `--listen` / `MCP_LISTEN` / `0.0.0.0:3000` — adresse du port principal
       (MCP, git, éditeur, `/code-health`), parsée en @SocketAddr par ./main.rs
     - @Config::tls_cert, @Config::tls_key : `--tls-cert`/`MCP_TLS_CERT`, `--tls-key`/`MCP_TLS_KEY` /
@@ -68,6 +68,13 @@ Exposes:
       (./health.sdd) ; `0` = recalcul immédiat ; refusé si non numérique (clap)
     - @Config::health_poll_secs : `--health-poll-secs` / `VNL_HEALTH_POLL_SECS` / `60` — période du
       sondage de l'empreinte du worktree (./health.sdd) ; `0` = sondage désactivé
+    - @Config::health_base_ref : `--health-base-ref` / `VNL_HEALTH_BASE_REF` / absent —
+      base initiale de la vue « code neuf » (./health.sdd `Handles` : la branche par
+      défaut du Project, posée par le controller en env du pod —
+      ../../controller/src/sandbox.sdd) ; seed de la base sticky, écrasée par le
+      `base` d'un `/code-health/refresh` ; `Some("")` traité comme absent ; non validée
+      au seed (le runner rend la base qui ne résout pas en check `new-code` `errored`,
+      ./runner.sdd `echec_du_diff`)
     - @Config::restate_ingress_url : `--restate-ingress-url` / `VNL_RESTATE_INGRESS_URL` / absent — URL
       d'ingress du Restate de l'application, seule destination des callbacks d'awakeable de
       ./jobs.sdd ; absente ⇒ les jobs fonctionnent sans callback (le worker interroge)

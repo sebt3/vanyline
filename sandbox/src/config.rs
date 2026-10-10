@@ -107,6 +107,12 @@ pub struct Config {
     #[arg(long, default_value = "60", env = "VNL_HEALTH_POLL_SECS")]
     pub health_poll_secs: u64,
 
+    /// Base initiale de la vue « code neuf » : la branche par défaut du Project
+    /// fournie par le controller (`VNL_HEALTH_BASE_REF`) ; absent = aucune base
+    /// connue au démarrage (le `/refresh {"base": …}` reste le chemin classique)
+    #[arg(long, env = "VNL_HEALTH_BASE_REF")]
+    pub health_base_ref: Option<String>,
+
     /// URL d'ingress du Restate de l'application, seule destination des
     /// callbacks d'awakeable des jobs ; absente ⇒ jobs sans callback
     #[arg(long, env = "VNL_RESTATE_INGRESS_URL")]
@@ -210,6 +216,7 @@ mod tests {
             sandbox_root: Path::new("/home/vanyline/workspace").into(),
             health_cooldown_secs: 30,
             health_poll_secs: 60,
+            health_base_ref: None,
             restate_ingress_url: None,
         }
     }
@@ -353,6 +360,40 @@ mod tests {
         let c = Config::try_parse_from(["vanyline-sandbox"]).unwrap();
         assert_eq!(c.health_cooldown_secs, 30);
         assert_eq!(c.health_poll_secs, 60);
+    }
+
+    // Base initiale « code neuf » (task sandbox.sdd / health.sdd) : absente par
+    // défaut (None), posée par le flag ou par l'env.
+    #[test]
+    fn health_base_ref_par_defaut_absente() {
+        let c = Config::try_parse_from(["vanyline-sandbox"]).unwrap();
+        assert_eq!(c.health_base_ref, None);
+    }
+
+    #[test]
+    fn health_base_ref_flag() {
+        let c =
+            Config::try_parse_from(["vanyline-sandbox", "--health-base-ref", "develop"]).unwrap();
+        assert_eq!(c.health_base_ref.as_deref(), Some("develop"));
+    }
+
+    // Le câblage env (VNL_HEALTH_BASE_REF) est vérifié sur la déclaration clap :
+    // `set_var` serait une mutation globale en conflit avec les autres tests du
+    // binaire (parses concurrentes) ; aucune dépendance d'injection d'env n'est
+    // au périmètre de la spec.
+    #[test]
+    fn health_base_ref_env_cable() {
+        use clap::CommandFactory;
+        let cmd = Config::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "health_base_ref")
+            .expect("champ health_base_ref déclaré");
+        assert_eq!(arg.get_long(), Some("health-base-ref"));
+        assert_eq!(
+            arg.get_env(),
+            Some(std::ffi::OsStr::new("VNL_HEALTH_BASE_REF"))
+        );
     }
 
     #[test]

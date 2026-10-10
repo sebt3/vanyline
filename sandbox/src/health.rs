@@ -6,7 +6,10 @@
 //! (debounce `health_cooldown_secs`), empreinte du worktree (HEAD + `git diff
 //! HEAD` + non suivis), sondage périodique (`health_poll_secs`), un-seul-calcul
 //! (jamais deux calculs concurrents, jamais d'annulation), refresh forcé et
-//! base sticky — et ses deux routes HTTP (`GET /code-health`,
+//! base sticky — initialisée depuis `config.health_base_ref` (branche par
+//! défaut du Project fournie par le controller, task sandbox.sdd) quand elle
+//! est non vide, puis écrasée par `POST /code-health/refresh {"base": …}` —
+//! et ses deux routes HTTP (`GET /code-health`,
 //! `POST /code-health/refresh`), montées par `./lib.rs` sur le routeur protégé
 //! par le jeton de l'Owner.
 //!
@@ -152,7 +155,8 @@ struct Fields {
     report: Option<HealthReport>,
     computed_at: Option<u64>,
     stale_since: Option<u64>,
-    /// Base sticky des recalculs.
+    /// Base sticky des recalculs, amorcée par `config.health_base_ref`
+    /// (branche par défaut du Project fournie par le controller) si non vide.
     base: Option<String>,
     /// Sélection de langages fournie à `/refresh` (`None` = détection).
     languages_override: Option<Vec<String>>,
@@ -253,6 +257,18 @@ impl CodeHealth {
         preliminary: PreliminarySource,
     ) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
+        // Base initiale de la vue « code neuf » (spec `Handles`, task
+        // sandbox.sdd) : la branche par défaut du Project fournie par le
+        // controller (`config.health_base_ref`) agit comme une base sticky
+        // posée avant le premier calcul ; vide = absente (même règle de
+        // vacuité que le controller). Elle n'est PAS validée ici : une base
+        // qui ne résout pas n'est pas fatale (le runner rend le check
+        // `new-code` `errored`, Scenario `echec_du_diff` de runner.sdd).
+        let initial_base = config
+            .health_base_ref
+            .as_deref()
+            .filter(|base| !base.is_empty())
+            .map(str::to_string);
         Arc::new(Self {
             inner: Arc::new(Inner {
                 config,
@@ -269,7 +285,7 @@ impl CodeHealth {
                     report: None,
                     computed_at: None,
                     stale_since: None,
-                    base: None,
+                    base: initial_base,
                     languages_override: None,
                     last_fingerprint: None,
                     computing: false,

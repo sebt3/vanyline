@@ -165,7 +165,10 @@ Must:
     nature du source image ; deux montages de la MÊME image par défaut — redondance
     documentée inoffensive, décision lsp-integration).
   Poser l'env du Pod dans cet ordre : `VNL_SANDBOX_ROOT` = `HOME_MOUNT_PATH/workspace`,
-    puis les env de caches dans l'ordre d'@effective_caches, puis
+    puis `VNL_HEALTH_BASE_REF` = `project.spec.default_branch` seulement si `Some` et
+    non vide (même règle de vacuité que le `--default-branch` du Job checkout, plus
+    haut ; absente sinon — vue « code neuf » initiale, ../sandbox/src/health.sdd
+    `Handles`, H3b 2026-10-10), puis les env de caches dans l'ordre d'@effective_caches, puis
     @aggregate_toolchain_env (`PATH`, éventuellement `LD_LIBRARY_PATH`, autres clés
     triées), puis `VNL_LSP_TOOLCHAINS` si au moins une toolchain a un LSP résolu.
   Construire les Jobs git (@build_checkout_job, @build_worktree_remove_job) en argv de
@@ -433,6 +436,13 @@ Handles:
     (suppression de la CR jamais bloquée éternellement par un prérequis manquant).
 
 Tasks:
+  [ ] Passer la branche par défaut du Project au pod de la sandbox (var d'environnement
+    `VNL_HEALTH_BASE_REF`, valeur `project.spec.default_branch` seulement, absente si
+    `None`/vide — même règle de vacuité que le `--default-branch` du Job checkout,
+    l.414) : le Handles de ../sandbox/src/health.sdd contracte « la branche par défaut
+    du Project quand elle est fournie par le controller » comme base initiale de la vue
+    « code neuf ». Côté sandbox : champ @Config + @CodeHealth (lot H3, ../sandbox/src/
+    health.sdd).
   [ ] RETRAIT DE `existing_pvc` du Project (2026-10-04) : supprimer @combine_sub_path et les
     `subPath` de projet des montages (worktree, repo.git, caches) ; renommer/retirer les tests
     `*_with_existing_pvc_subpath` et `*_no_existing_pvc`.

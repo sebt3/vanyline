@@ -494,6 +494,19 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         ..Default::default()
     }];
 
+    // Base initiale de la vue « code neuf » de la sandbox (task sandbox.sdd) :
+    // la branche par défaut du Project, même règle de vacuité que le
+    // `--default-branch` du Job checkout — `None` ou vide ⇒ env absente.
+    if let Some(db) = &project.spec.default_branch
+        && !db.is_empty()
+    {
+        env.push(EnvVar {
+            name: "VNL_HEALTH_BASE_REF".to_string(),
+            value: Some(db.clone()),
+            ..Default::default()
+        });
+    }
+
     for cache in effective_caches(project) {
         mounts.push(VolumeMount {
             name: "workspace".to_string(),
@@ -2094,6 +2107,63 @@ mod tests {
             .as_ref()
             .expect("VNL_SANDBOX_ROOT should have value");
         assert_eq!(val, &format!("{HOME_MOUNT_PATH}/workspace"));
+    }
+
+    /// Task sandbox.sdd « Passer la branche par défaut du Project au pod » :
+    /// `default_branch = Some("develop")` ⇒ env `VNL_HEALTH_BASE_REF=develop`.
+    #[test]
+    fn vnl_health_base_ref_env_with_default_branch() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut project = make_project(None);
+        project.spec.default_branch = Some("develop".to_string());
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        let vnl = env
+            .iter()
+            .find(|e| e.name == "VNL_HEALTH_BASE_REF")
+            .expect("should have VNL_HEALTH_BASE_REF");
+        let val = vnl
+            .value
+            .as_ref()
+            .expect("VNL_HEALTH_BASE_REF should have value");
+        assert_eq!(val, "develop");
+    }
+
+    /// Même task : `default_branch = None` ⇒ env absente (pas de valeur vide).
+    #[test]
+    fn vnl_health_base_ref_env_absent_without_default_branch() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        assert!(
+            !env.iter().any(|e| e.name == "VNL_HEALTH_BASE_REF"),
+            "VNL_HEALTH_BASE_REF must be absent when default_branch is None"
+        );
+    }
+
+    /// Même task : `default_branch = Some("")` ⇒ traité comme absent
+    /// (même règle de vacuité que le `--default-branch` du Job checkout).
+    #[test]
+    fn vnl_health_base_ref_env_absent_when_default_branch_empty() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut project = make_project(None);
+        project.spec.default_branch = Some(String::new());
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        assert!(
+            !env.iter().any(|e| e.name == "VNL_HEALTH_BASE_REF"),
+            "VNL_HEALTH_BASE_REF must be absent when default_branch is empty"
+        );
     }
 
     #[test]

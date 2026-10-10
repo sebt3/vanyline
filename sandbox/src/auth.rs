@@ -722,6 +722,7 @@ pub mod test_support {
             sandbox_root: sandbox_root.to_path_buf(),
             health_cooldown_secs: 30,
             health_poll_secs: 60,
+            health_base_ref: None,
             restate_ingress_url: None,
         }
     }
