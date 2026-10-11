@@ -25,8 +25,9 @@ Owns:
   ./mod.rs
 
 Exposes:
-  - Déclarations `pub mod` (8) : ./conversations.rs, ./llm_providers.rs, ./local_tools.rs,
-    ./mcp_servers.rs, ./me.rs, ./owners.rs, ./projects.rs, ./sandboxes.rs — dans cet ordre
+  - Déclarations `pub mod` (9) : ./conversations.rs, ./llm_providers.rs, ./local_tools.rs,
+    ./mcp_servers.rs, ./me.rs, ./owners.rs, ./projects.rs, ./sandboxes.rs, ./workflows.rs —
+    dans cet ordre
     alphabétique. `pub` est nécessaire y compris pour les modules sans route montée ici :
     @resolve_owner_name / @ensure_owner / @sanitize_owner_name de ./owners.rs sont appelés
     en-dehors du module via `crate::api::owners` (./me.rs, ./projects.rs, ./sandboxes.rs,
@@ -62,6 +63,10 @@ Structure:
   - `GET` + `DELETE` `/projects/{name}` → @get_project / @delete_project
   - `GET` + `POST` `/sandboxes` → ./sandboxes.rs @list_sandboxes / @create_sandbox
   - `GET` + `DELETE` `/sandboxes/{name}` → @get_sandbox / @delete_sandbox
+  - `GET` + `POST` `/projects/{project}/workflows` → ./workflows.rs @list_workflows /
+    @create_workflow (monté W4a 2026-10-11)
+  - `GET` + `PUT` + `DELETE` `/projects/{project}/workflows/{id}` → @get_workflow /
+    @update_workflow / @delete_workflow (monté W4a 2026-10-11)
   - `POST` `/sandboxes/{name}/suspend` → @set_sandbox_suspended
   - `POST` `/sandboxes/{name}/ws-ticket` → @ws_ticket
   - TOUTES méthodes (@any) `/sandboxes/{name}/git/{*path}` → @git_proxy — seul chemin
@@ -283,9 +288,11 @@ Depends on:
     `../../../tooling.sdd` (aucun `println!`/log ici — fichier sans corps d'exécution).
 
 Tasks:
-  [ ] Workflows (2026-10-04) : déclarer `pub mod workflows` et monter, dans @api_router, les neuf
-    routes de ./workflows.sdd ; le MCP de domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est monté
-    par ../main.rs à côté du MCP générique de miryad-core, pas ici.
+  [x] Workflows (2026-10-04) — FAIT POUR LE CRUD 2026-10-11 (validation W4a) : `pub mod
+    workflows` déclaré, les 5 routes de définitions montées dans @api_router (table
+    ci-dessus) ; RESTE les routes runs/lancement de ./workflows.sdd (W4b). Le MCP de
+    domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est monté par ../main.rs à côté du
+    MCP générique de miryad-core, pas ici.
   [!] ./mod.rs ne contient AUCUN test (pas de `@mod tests`) et aucun test du dépôt ne
       passe par @api_router() / @api_v1_router() (grep : les deux fonctions ne sont
       appelées que par `../main.rs`) — la table de routage n'est vérifiée aujourd'hui

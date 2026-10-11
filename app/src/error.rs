@@ -40,6 +40,29 @@ pub enum AppError {
     SandboxBranchEmpty,
     #[error("VNL-SBX-003: invalid git path segment")]
     GitPathInvalid,
+    /// Workflow inexistant OU appartenant à un autre utilisateur (404, aucune distinction —
+    /// `./api/workflows.sdd`).
+    #[error("VNL-WFA-002: workflow not found")]
+    WorkflowNotFound,
+    /// Nom de workflow déjà pris dans le projet (409) — payload = nom rendu par l'API.
+    #[error("VNL-WFA-003: workflow name already taken: {0}")]
+    WorkflowNameTaken(String),
+    /// DAG rejeté par `validate_dag` de miryad-core (400) — le marqueur `MRD-WORKFLOW-004`
+    /// est volontairement imbriqué dans le corps.
+    #[error("VNL-WFA-004: MRD-WORKFLOW-004: {0}")]
+    WorkflowDagInvalid(String),
+    /// Kind de step non autorisé pour la portée (422) — le payload nomme le step et le kind.
+    #[error("VNL-WFA-005: {0}")]
+    WorkflowKindForbidden(String),
+    /// Moteur de workflow non configuré (503) — garde commune des routes workflows.
+    #[error("VNL-WFA-006: workflow engine not configured")]
+    WorkflowEngineNotConfigured,
+    /// Portée textuelle inconnue (400).
+    #[error("VNL-WFA-007: unknown scope: {0}")]
+    WorkflowUnknownScope(String),
+    /// La portée d'un workflow existant n'est pas modifiable (400).
+    #[error("VNL-WFA-008: scope is not editable; create a new workflow instead")]
+    WorkflowScopeNotEditable,
 }
 
 /// Remplace le `fn db_err` dupliqué verbatim dans 9 modules (`api/{conversations,llm_providers,
@@ -87,15 +110,26 @@ impl IntoResponse for AppError {
             Self::LlmProviderNotFound
             | Self::AgentNotFound
             | Self::ConversationNotFound
-            | Self::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::UnprocessableReference(_) | Self::SandboxBranchEmpty => {
+            | Self::K8sNotFound(_)
+            | Self::WorkflowNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::UnprocessableReference(_)
+            | Self::SandboxBranchEmpty
+            | Self::WorkflowKindForbidden(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
             }
             Self::InternalError(_) | Self::K8sApiError(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
             }
-            Self::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
-            Self::GitPathInvalid => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::SandboxNotExposed | Self::WorkflowNameTaken(_) => {
+                (StatusCode::CONFLICT, self.to_string())
+            }
+            Self::GitPathInvalid
+            | Self::WorkflowDagInvalid(_)
+            | Self::WorkflowUnknownScope(_)
+            | Self::WorkflowScopeNotEditable => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::WorkflowEngineNotConfigured => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
         };
 
         let body = Json(json!({ "error": message }));

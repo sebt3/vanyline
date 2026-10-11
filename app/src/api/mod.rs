@@ -6,6 +6,7 @@ pub mod me;
 pub mod owners;
 pub mod projects;
 pub mod sandboxes;
+pub mod workflows;
 
 use axum::{
     Router,
@@ -57,6 +58,18 @@ pub fn api_router() -> Router<AppState> {
         .route(
             "/projects/{name}",
             get(projects::get_project).delete(projects::delete_project),
+        )
+        // Workflows (OIDC) — mêmes chemins non versionnés sous `/api` que projects/sandboxes
+        // (api/workflows.sdd ; montée ratifiée W4 2026-10-10).
+        .route(
+            "/projects/{project}/workflows",
+            get(workflows::list_workflows).post(workflows::create_workflow),
+        )
+        .route(
+            "/projects/{project}/workflows/{id}",
+            get(workflows::get_workflow)
+                .put(workflows::update_workflow)
+                .delete(workflows::delete_workflow),
         )
         // Sandboxes (OIDC)
         .route(

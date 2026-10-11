@@ -18,6 +18,11 @@ Purpose:
 Owns:
   ./workflows.rs
 
+Can modify:
+  ./mod.rs (ratifié W4 2026-10-10 — LA MONTÉE des routes de CE fichier : déclaration
+    `mod workflows;` + montages dans @api_router/@api_v1_router, rien d'autre ;
+    ./mod.sdd sera ressynchronisé par la spec-dd).
+
 Can read:
   ./mod.sdd
   ./projects.sdd
