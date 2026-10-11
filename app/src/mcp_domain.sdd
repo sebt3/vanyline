@@ -15,6 +15,12 @@ Purpose:
 Owns:
   ./mcp_domain.rs
 
+Can modify:
+  ./../main.rs (ratifié M1 2026-10-11 — la MONTÉE seule : @route(`"/mcp/domain"`,
+    @post(mcp_domain::handle)) à la table du router racine, déclaration `mod
+    mcp_domain;`, rien d'autre ; ./main.sdd sera ressynchronisé par la spec-dd).
+
+
 Can read:
   ./api/projects.sdd
   ./api/sandboxes.sdd
@@ -26,17 +32,25 @@ Can read:
 Exposes:
   @mcp_domain_router() -> Router<AppState> — une route `POST /mcp/domain` ; méthodes JSON-RPC
     `initialize`, `tools/list`, `tools/call` (même forme que le MCP de la sandbox) ; auth par
-    l'extracteur `AuthUser` de miryad-core (cookie OU jeton d'API).
+    l'extracteur @AuthPrincipal de miryad-core (cookie OU jeton d'API — ratifié
+    validation M1 2026-10-11 : @AuthUser est cookie-seul, @AuthPrincipal est le seul
+    extracteur double-source ; le comportement promis n'a jamais bougé).
   Outils (noms, arguments → effet) :
     projets — `list_projects()` ; `get_project(name)` ; `create_project(name, repo_url,
       default_branch?)` ; `delete_project(name)` (destructif).
-    sandboxes — `list_sandboxes(project?)` ; `get_sandbox(name)` ; `create_sandbox(project, branch,
-      toolchains?)` ; `delete_sandbox(name)` (destructif) ; `suspend_sandbox(name)` ;
+    sandboxes — `list_sandboxes(project?)` (le filtre `project` est appliqué APRÈS la
+      sortie autorisée de la fonction REST partagée — pas une logique d'accès) ;
+      `get_sandbox(name)` ; `create_sandbox(name, project, branch, toolchains?)` (`name`
+      REQUIS ratifié validation M1 : la route REST l'exige, `CreateSandboxBody`) ;
+      `delete_sandbox(name)` (destructif) ; `suspend_sandbox(name)` ;
       `resume_sandbox(name)`.
     santé du code — `code_health(sandbox, detail?, path?, limit?)` (relais de `GET /code-health`
       de la sandbox, texte borné comme l'outil de la sandbox) ; `refresh_code_health(sandbox,
       base?)` (relais de `POST /code-health/refresh`).
-    workflows — `list_workflows(project)` ; `get_workflow(project, workflow)` ;
+    workflows — `list_workflows(project)` ; `get_workflow(project, workflow)` (le
+      paramètre `workflow` des quatre outils ciblés est l'@id NUMÉRIQUE de la définition
+      (les routes REST sont indexées par id ; entier ou chaîne numérique acceptés —
+      ratifié validation M1) ;
       `create_workflow(project, name, scope, steps, description?)` ;
       `update_workflow(project, workflow, steps?, description?)` ; `delete_workflow(project,
       workflow)` (destructif) ; `launch_workflow(project, workflow, sandbox?)` ;
@@ -52,7 +66,11 @@ Handles:
   avec un marqueur, jamais rendue entière. Les outils destructifs portent la mention
   « destructif » dans leur description, à titre d'information : aucune confirmation n'est exigée
   (mode « yolo », ./system_agents.sdd). Une erreur d'outil rend un résultat
-  `isError: true` avec un message, jamais un code JSON-RPC (même convention que la sandbox).
+  `isError: true` avec un message, jamais un code JSON-RPC (même convention que la
+  sandbox — clarification validation M1 : la clause porte sur l'EXÉCUTION d'un outil
+  nommé ; l'enveloppe garde ses codes protocolaires, exactement la convention sandbox :
+  `-32601` méthode inconnue, `-32602` nom d'outil inconnu ou argument `name` absent —
+  /sandbox/src/mcp.rs l.104, 143, 178).
 
 Must:
   Appeler les mêmes fonctions de service que les routes REST.
@@ -65,7 +83,23 @@ Must not:
   Accepter un nom d'Owner ou de namespace du client.
 
 Tasks:
-  [ ] Convertir chaque Scenario en test taggé par son titre.
+  [!] Le relais REST `code-health` n'existe dans AUCUNE route de l'app (grep
+    api/ + main.sdd 2026-10-11) : les deux outils santé portent le relais EN
+    INTERNE via @SandboxAccess (../workflow/steps/mod.sdd), texte borné 8 KiB ;
+    si une route REST de relais est demandée plus tard (frontend), elle devra
+    consommer CES fonctions, pas les dupliquer.
+  [ ] Rattraper à la passe cluster : les outils projets/sandboxes dont le
+    dernier maillon est @VnlK8sClient (liste/création/suppression/lecture CR,
+    création de projet `meme_logique_que_rest`) ne sont pas verrouillables hors
+    cluster (convention anti-mock kube, ../../../lib/src/k8s.sdd) — les tests
+    M1 verrouillent dispatch, schémas, troncature, triggered_by, isError, 401
+    et mapping des erreurs ; l'appel bout-en-bout REST↔MCP sur CR réelle reste
+    à prouver sur le cluster.
+  [x] Convertir chaque Scenario en test taggé par son titre — FAIT 2026-10-11
+    (validation M1) : les 7 Scenario ont tous leur test au titre exact ; les volets
+    hors cluster de `liste_de_ses_projets_seulement`, `objet_d_autrui` et
+    `meme_logique_que_rest` sont le contenu de la tâche `[ ]` passe cluster, qui
+    reste ouverte.
 
 Scenario: tools_list
   Given un client authentifié

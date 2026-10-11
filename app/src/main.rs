@@ -10,6 +10,7 @@ mod config_store;
 mod db;
 mod error;
 mod k8s;
+mod mcp_domain;
 mod migration;
 mod workflow;
 mod ws;
@@ -195,6 +196,7 @@ async fn main() {
         >())
         .merge(resource_router::<db::entities::agents::Entity, AppState>())
         .merge(swagger_ui_router::<AppState>(openapi_spec()))
+        .merge(mcp_domain::mcp_domain_router())
         .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
         .route(

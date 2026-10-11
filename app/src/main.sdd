@@ -202,6 +202,11 @@ Returns:
     mcp_servers, skills, toolsets, model_profiles, agents) — CRUD monté en CHEMINS
     COMPLETS `/api/v1/{resource-kebab}` et `/api/v1/{resource-kebab}/{id}` (chemins
     attestés par le test de @openapi_spec, le frontend les appelle littéralement).
+  - @merge(mcp_domain::@mcp_domain_router()) — monté M1 2026-10-11 (avant les deux
+    @nest) ; le routeur interne porte @route(`"/mcp/domain"`, @post(@handle)) : MCP de
+    domaine JSON-RPC 2.0 POST seul, extracteur @AuthPrincipal (cookie OU jeton), 21
+    outils appelant les MÊMES fonctions REST (./mcp_domain.sdd) ; sans collision de
+    préfixe (/mcp/domain unique à la racine).
   - @merge(@swagger_ui_router::<@AppState>(@openapi_spec())) — sert
     `GET /api/swagger-ui` et `/api/openapi.json` (feature Cargo `swagger-ui` de
     miryad-core activée dans ../Cargo.toml ; routes affirmées par le commentaire de
