@@ -16,6 +16,12 @@ Purpose:
 Owns:
   ./runtime.rs
 
+Can modify:
+  ./../../main.rs et ./mod.rs (ratifié W3 2026-10-10 — LE CÂBLAGE DE DÉMARRAGE et rien
+    d'autre : lecture de @WorkflowConfigApp depuis @Config, appel conditionnel de
+    @start_runtime, champ `workflow` dans l'état de l'app, re-export de @WorkflowRuntime
+    dans ./mod.rs. ./main.sdd sera ressynchronisé par la spec-dd à la passe suivante.)
+
 Can read:
   ./mod.sdd
   ./steps/mod.sdd
@@ -23,24 +29,50 @@ Can read:
   ../main.sdd
   /controller/src/application.sdd
 
+Depends on:
+  `restate-sdk = "0.12", default-features = false, features = ["http_server"]` —
+  dépendance DIRECTE de l'app, ratifiée validation W3 2026-10-10 : miryad-core 0.1.5 ne
+  ré-exporte AUCUN type restate-sdk (grep de sa surface `workflow` : 18 items, rien de
+  `Endpoint`/`IntoServiceDefinition`) ; graphe résolu inchangé (paquet unique 0.12.1,
+  déjà souscrit par miryad-core).
+
 Exposes:
   @WorkflowConfigApp — configuration lue de l'environnement : `VNL_RESTATE_ADMIN_URL` et
     `VNL_RESTATE_INGRESS_URL` (posées par le controller sur le Deployment de l'app quand
     l'Application porte `spec.restate`, /controller/src/application.sdd), `VNL_WORKFLOW_LISTEN`
     (défaut `0.0.0.0:9080`), `VNL_WORKFLOW_DEPLOYMENT_URL` (URL sous laquelle Restate joint cet
     endpoint : le Service Kubernetes de l'app + port d'endpoint ; défaut dérivé du nom de
-    l'Application) ; absentes ⇒ moteur non configuré.
+    l'Application — @derive_deployment_url, forme `http://<application_name>.<k8s_namespace>.svc:<port>`
+    motivée par deploy/web/configmap.yaml) ; absentes ⇒ moteur non configuré.
+    Contracté validation W3 2026-10-10 : @from_config rend @None (moteur éteint, avec
+    @tracing::warn!) sur config PARTIELLE (les trois URL non toutes présentes et non
+    vides) comme sur deployment URL non dérivable (nom d'application ou namespace
+    absents/vide) — jamais de port à moitié ouvert ni de moteur à moitié vivant. Un `[?]`
+    Tasks porte le niveau : warn ou fail-fast.
   @WorkflowRuntime — handle `Clone` dans @AppState : `trigger(dag) -> RunHandle` (délègue à
-    `miryad_core::workflow::client::trigger_run`), l'URL d'admin et d'ingress (pour ./status.sdd),
-    le client HTTP partagé.
+    `miryad_core::workflow::client::trigger_run` — @RunHandle porte `invocation_id`, la
+    liaison persistée par ./../db/entities/workflow_runs.sdd), l'URL d'admin et d'ingress
+    (pour ./status.sdd), le client HTTP partagé. @WorkflowRuntime IMPLÉMENTE @RestateAdmin
+    de ./status.sdd (W3 2026-10-10).
   @start_runtime(state, config) -> Result<WorkflowRuntime, AppError> (async) — séquence : valider
     la config (`WorkflowConfig::validate` de miryad-core), poser la `WorkflowPolicy`, construire le
     registre, lier `DagInterpreter` + `StepDispatcher` à l'`Endpoint`, démarrer le serveur en
     tâche de fond, puis enregistrer le déploiement ; un échec d'enregistrement est loggé et
     RÉESSAYÉ en arrière-plan (backoff plafonné à 30 s) sans empêcher l'app de démarrer.
+    Contracté validation W3 2026-10-10 : @start_runtime fait @VnlK8sClient::discover sur
+    son chemin de démarrage (seul chemin configuré ; découverte impossible ⇒
+    `VNL-WF-006`, l'app ne démarre pas — moteur configuré = déploiement cluster).
+    Séams d'injection `pub(crate)` (jurisprudence @assemble_registry / @with_timing,
+    `pub` par nécessité, hors surface publique) : @start_with(cfg, registre,
+    backoff_initial, backoff_cap) — les Scenario passent un @StepRegistry de test et des
+    millisecondes de backoff ; @derive_deployment_url ; @miryad_config.
 
 Handles:
-  Politique d'accès : `WorkflowPolicy` posée une fois au démarrage pour que les définitions soient
+  Politique d'accès : `WorkflowPolicy` posée AU PLUS UNE FOIS PAR PROCESSUS (la
+    @configure_policy de miryad-core est une @OnceLock globale ; dans le binaire
+    @start_runtime n'est appelé qu'une fois par ./../../main.rs) — re-pose identique
+    `OwnerOnly` = no-op vérifié, politique déjà posée DIFFÉRENTE ⇒ erreur `VNL-WF-005`
+    et pas de démarrage. La politique est posée AVANT le bind du socket. Elle fait que les définitions soient
   `OwnerOnly` en lecture et écriture (miryad-core `configure_policy`) — chaque utilisateur ne voit
   que ses workflows. Le contrôle fin (portée projet/sandbox) est dans les entités de ../db/entities/.
   Options de service Restate : le service `StepDispatcher` est enregistré avec
@@ -60,9 +92,24 @@ Must:
 Must not:
   Journaliser les `config`/`inputs` d'un step (ils peuvent porter des prompts et des secrets de workflow).
 
+Raises:
+  Identifiants émis par CE fichier (une ligne @tracing::error! chacun, jamais de print) :
+  `VNL-WF-002` (config invalide au @validate de miryad-core — la cause `MRD-WORKFLOW-007`
+  est imbriquée dans le message), `VNL-WF-003` (`workflow_listen` non parseable en
+  @SocketAddr), `VNL-WF-004` (bind du port d'endpoint refusé), `VNL-WF-005` (politique
+  déjà posée différente), `VNL-WF-006` (@VnlK8sClient::discover impossible).
+  `VNL-WF-001` (moteur incapable de démarrer, cause 002..006 imbriquée) est émis par
+  ./../../main.rs (exit(1)) — cf. ./main.sdd `Raises`.
+
 Tasks:
-  [?] Les valeurs de timeout (25 h) : à ajuster si Restate expose des plafonds par service plus
-    fins (vérifier les options exactes du SDK `restate-sdk` à l'implémentation).
+  [?] Niveau d'alerte du moteur inerte malgré `VNL_RESTATE_*` posées (config partielle
+    ou déploiement non dérivable ⇒ warn + moteur éteint, validation W3) : warn suffisant
+    — le controller pose ces variables de façon fiable — ou fail-fast exit(1) ? Le cas
+    réel est « workflows morts sans bruit » au déploiement. Trancher.
+  [x] Les valeurs de timeout (25 h) — RÉSOLU W3 2026-10-10 : restate-sdk 0.12.1 expose
+    exactement @ServiceOptions::inactivity_timeout + @abort_timeout (endpoint/builder.rs
+    de la lib), 25 h acceptées telles quelles, rien de plus fin par service ; posées sur
+    @StepDispatcher seul, @recommended_options() conservé (retry borné à 5).
   [?] Plusieurs réplicas de l'app : Restate répartit les invocations sur l'URL de déploiement
     (Service) — vérifier qu'un step déjà journalisé reprend correctement sur un autre réplica
     (garanti par Restate), et que `register_deployment` concurrent est idempotent.
@@ -83,6 +130,11 @@ Scenario: enregistrement_reessaye
   Then l'app est démarrée, l'enregistrement est réessayé en arrière-plan jusqu'au succès
 
 Scenario: politique_proprietaire_seul
-  Given deux utilisateurs
-  When le premier crée une définition
-  Then le second ne la voit pas (liste et lecture)
+  Given un @start_with réussi (faux Restate, port écouté)
+  When la politique effective est lue (@read_policy / @write_policy / @owner_column)
+  Then `OwnerOnly` en lecture ET en écriture, `owner_column()` déclarée — le couple qui,
+    appliqué par le CRUD de miryad-core, fait que le second utilisateur ne voit ni ne
+    liste la définition du premier (mécanisme de filtrage verrouillé par les tests
+    `workflow_policy`/`resource` de miryad-core ; réécrit au niveau verrouillable hors
+    cluster à la validation W3 2026-10-10 — la preuve deux utilisateurs sur `real_db()`
+    est planifiable quand ./api/workflows.rs branche les définitions)

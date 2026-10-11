@@ -49,6 +49,10 @@ pub struct AppState {
     pub auth: MiryadAuthState,
     /// Hub de push des phases de sandbox (`ws/sandbox_state.sdd`).
     pub shared_sandbox_state: ws::sandbox_state::SharedState,
+    /// Handle du moteur de workflow (`workflow/runtime.sdd`) — `None` quand l'app n'est
+    /// pas configurée pour un moteur (aucune `VNL_RESTATE_*`) : aucun port d'endpoint
+    /// ouvert, les routes de workflow répondent `503` (W4, `api/workflows.sdd`).
+    pub workflow: Option<workflow::WorkflowRuntime>,
 }
 
 impl FromRef<AppState> for MiryadAuthState {
@@ -149,14 +153,31 @@ async fn main() {
     };
 
     let static_dir = config.static_dir.clone();
-    let state = AppState {
+    let mut state = AppState {
         config,
         cookie_key,
         busy: Arc::new(Mutex::new(HashSet::new())),
         k8s: Arc::new(tokio::sync::Mutex::new(None)),
         auth: auth_state,
         shared_sandbox_state: ws::sandbox_state::SharedState::new(),
+        workflow: None,
     };
+
+    // Moteur de workflow (workflow/runtime.sdd) — appel CONDITIONNEL : sans configuration
+    // complète (`VNL_RESTATE_*` absentes ou vides), `from_config` rend `None`, l'app tourne
+    // sans workflows et aucun port d'endpoint n'est ouvert. Configurée mais invalide ⇒ le
+    // moteur refuse de démarrer : erreur de déploiement, fail-fast comme les autres
+    // étapes (le réessai d'enregistrement lui — runtime.sdd — ne bloque pas le démarrage).
+    if let Some(wf_config) = workflow::WorkflowConfigApp::from_config(&state.config) {
+        state.workflow = Some(
+            workflow::runtime::start_runtime(&state, &wf_config)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("VNL-WF-001: moteur de workflow incapable de démarrer: {e}");
+                    std::process::exit(1);
+                }),
+        );
+    }
 
     let app = Router::new()
         .route("/health", get(health))

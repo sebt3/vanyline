@@ -34,7 +34,8 @@ Structure:
   ./steps/ — un fichier par kind (`agent`, `rhai`, `shell`, `gate`) et le constructeur du registre
 
 Exposes:
-  Les quatre sous-modules et @WorkflowRuntime (voir ./runtime.sdd), consommés par ../main.rs
+  Les quatre sous-modules et @WorkflowRuntime (voir ./runtime.sdd), re-exportés ici avec
+    @WorkflowConfigApp (ajout W3 2026-10-10), consommés par ../main.rs
   (démarrage), ../api/workflows.rs (lancement, runs) et le MCP de domaine (../mcp_domain.sdd).
 
 Must:

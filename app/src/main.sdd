@@ -51,7 +51,7 @@ Structure:
   Déclarations de modules (9, toutes privées, sans `pub`) : `mod api; mod auth;
   mod config; mod config_store; mod db; mod error; mod k8s; mod migration; mod ws;` —
   tout module du crate doit être déclaré ici pour exister.
-  @AppState — struct `#[derive(Clone)] pub` à 6 champs (table en Exposes).
+  @AppState — struct `#[derive(Clone)] pub` à 7 champs (table en Exposes).
   impl @FromRef<@AppState> for @MiryadAuthState — clone du champ `auth`.
   @main — `#[tokio::main] async fn main() -> ()`, sans arguments ni parser CLI, séquence
   contractuelle (voir Returns/Handles), chaque étape fatale = exactement une ligne
@@ -84,6 +84,10 @@ Exposes:
   - `busy: @Arc<@std::sync::Mutex<@HashSet<i32>>>` — initialisé vide ; les vrais
     consommateurs sont ./ws/chat.rs (@try_acquire_busy + garde de @Drop) : verrou de tour
     de chat par `conversation_id` (i32 = PK des conversations).
+  - `workflow: @Option<@workflow::@WorkflowRuntime>` — @None au moteur non configuré,
+    @Some après @start_runtime réussi (étape 10bis) ; @Clone — le handle porte l'URL
+    d'admin, l'ingress et le client HTTP partagés (./workflow/runtime.sdd) ; consommateurs
+    ./api/workflows.rs et le MCP de domaine (W4).
   - `k8s: @Arc<@tokio::sync::Mutex<@Option<@VnlK8sClient>>>` — initialisé `None` ;
     découverte lazy à la première requête, jamais au démarrage (contrat ./k8s.sdd).
   - `auth: @MiryadAuthState` — état miryad-core construit au démarrage (champs en
@@ -164,7 +168,18 @@ Returns:
     nouvelle ; l'entropie ≥ 64 octets est contrôlée à l'étape 5 ; effet accepté par
     Sébastien 2026-10-05 : une rotation de `COOKIE_SECRET` invalide toutes les empreintes
     de tokens API existantes — les tokens sont à réémettre après rotation) } puis @AppState
-    (champs en Exposes, `busy` vide, `k8s` à `None`).
+    (champs en Exposes, `busy` vide, `k8s` à `None`). Le champ `workflow` est encore
+    @None à ce point.
+  10bis. Moteur de workflow (ajouté W3 2026-10-10, ./workflow/runtime.sdd) —
+    @workflow::@WorkflowConfigApp::from_config(`&config`) : @None (moteur non configuré,
+    ou config partielle/déploiement non dérivable — warn émis par ./workflow/runtime.sdd)
+    ⇒ `state.workflow` reste @None, AUCUN port ouvert, aucune requête vers Restate ;
+    @Some ⇒ @workflow::@start_runtime (await — @VnlK8sClient::discover, registre,
+    endpoint, enregistrement) : succès ⇒ `state.workflow = @Some(runtime)` ; échec ⇒ log
+    une ligne `"VNL-WF-001: {cause}"` + exit(1) (l'échec d'ENREGISTREMENT du déploiement
+    ne remonte jamais ici : réessayé en arrière-plan par ./workflow/runtime.sdd).
+    L'étape est insérée APRÈS les migrations (les tables `miryad_workflow_definitions`
+    doivent exister) et AVANT l'assemblage.
   11. Assemblage du router racine (table ci-dessous, sans I/O).
   12. @tokio::net::TcpListener::bind(listen_addr) — échec : log
     `"VNL-NET-001: failed to bind {addr}: {e}"` + exit(1).
@@ -223,7 +238,7 @@ Raises:
   (LISTEN_ADDR invalide — la numérotation des variables vient de ./config.rs),
   `VNL-CFG-005` (COOKIE_SECRET < 64 octets après décodage — même identifiant que le
   « COOKIE_SECRET is required » de ./config.rs, cf. Tasks `[?]`), `VNL-DB-003` (pool DB),
-  `VNL-DB-004` (migrations miryad-core), `VNL-DB-005` (migrations app), `VNL-AUTH-004`
+  `VNL-DB-004` (migrations miryad-core), `VNL-DB-005` (migrations app), `VNL-WF-001` (moteur de workflow incapable de demarrer, cause `VNL-WF-002..006` ou `MRD-*` imbriquee — W3 2026-10-10, ./workflow/runtime.sdd), `VNL-AUTH-004`
   (client OIDC — même identifiant que la variante @AppError::Forbidden de ./error.rs,
   cf. Tasks `[?]`), `VNL-NET-001` (bind), `VNL-NET-002` (`axum::serve` en erreur —
   log `"VNL-NET-002: server error: {e}"` + exit(1)).

@@ -47,6 +47,11 @@ miryad-core = { version = "0.1.5", default-features = false, features = [
     "workflow",
     "mcp",
 ] }
+# W3 `app/src/workflow/runtime.rs` (runtime.sdd, Platform `restate-sdk`) : liaison des services
+# `DagInterpreter`/`StepDispatcher` à l'`Endpoint` et serveur HTTP/2 interne. Même déclaration que
+# miryad-core 0.1.5 (`default-features = false`, `http_server`) — aucune dérive de graphe,
+# restate-sdk 0.12.1 est déjà résolu dans `Cargo.lock`.
+restate-sdk = { version = "0.12", default-features = false, features = ["http_server"] }
 utoipa = "5"
 sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "mock"] }
 sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }

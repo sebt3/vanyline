@@ -93,6 +93,7 @@ mod tests {
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state(),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+            workflow: None,
         };
 
         Router::new()
