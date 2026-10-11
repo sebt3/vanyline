@@ -196,3 +196,43 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
 - **Séquence suite** : étape 6 couche workflow `app/src/workflow/` (specs gelées,
   zéro code : mod/runtime/run_context/status/steps//api/workflows.sdd) → 7 TUI cli
   → 8 agents système → 9 llm-config.
+
+
+## Séance 2026-10-10/11 — étape 6 COUCHE WORKFLOW CLOSE (code), W0→M1
+
+- **W0** `6bbd2d1`+`dce318e` : migrations m20261005_000001/2 (project_workflows,
+  workflow_runs) + entités + 4 variables moteur config + features workflow/mcp.
+  133 app. V0 validator : DDL conforme colonne par colonne.
+- **W1** `92d5ade` : run_context.rs (materialize pur, _run injectée/écrasée,
+  validation portée MRD-WORKFLOW-004) + status.rs (admin Restate doc 1.7 —
+  format NON CONTRACTÉ, [?] ouvert : aucun Restate réel déployé). 156.
+- **W2** `dda1083` : steps/ registre + agent/rhai/shell/gate. FAIL validator :
+  défaut timeout 780 inventé → aligné 600. **LEÇON : un implementer a rendu un
+  micro-lot ENTIEREMENT FAUX (212 tests, rouges et mutations cités — rien dans
+  l'arbre). Le validator l'a attrapé ; arbre = seule vérité, diff exigé dans
+  tous les prompts depuis.** #27 levé (with_setup 0.1.5). 211→212.
+- **W3** `332501f` : runtime.rs — start_runtime séquence exacte, politique
+  OwnerOnly OnceLock (VNL-WF-005), réessai enregistrement fond (1s→30s),
+  VNL-WF-001..006 contractés, dep directe restate-sdk (miryad ne ré-exporte
+  RIEN), main.rs étape 10bis. 219.
+- **W4a** `8956b67` : api/workflows.rs CRUD. FAIL validator : type d'erreur
+  LOCAL → conversion AppError (contrat error.sdd « type unique », motif
+  VNL-SBX-*), VNL-WFA-002..008. 235.
+- **W4b** `3650a25` : routes runs — séquence Handles 1-6, jamais lancer sans
+  index (VNL-WFA-018 + annulation), listes bornées clamp silencieux, UNE
+  lecture groupée, Unknown purgé, annulation cancel→DELETE /jobs?prefix=
+  best-effort. VNL-WFA-011..017. error.sdd à 30 variantes, scénarios
+  exhaustifs DÉ-FIGURÉS (le chiffre du jour ne vit plus dans les titres). 253.
+- **M1** `a780807` : mcp_domain.rs — 21 outils POST /mcp/domain, appels DIRECTS
+  des handlers REST (AuthPrincipal champs pub → constructible), relais
+  code-health INTERNE (aucune route REST n'existe — [!]), 8 KiB marqueur
+  inclus, triggered_by agent:. 270.
+- **Restes tracés** : `/mcp` générique miryad-core JAMAIS MONTÉ (tâche main.sdd
+  moitié faite) ; [ ] cluster W2 (registre_exact), M1 (bout-en-bout CR),
+  format admin Restate (W1), StepLimit spy-only/autonomous.rs (agent [!]),
+  Mcp-Session-Id hors portée (rhai [!]), subworkflow refusé ([?] run_context),
+  [?] niveau alerte moteur inerte (runtime.sdd) ; flaky known
+  hadolint_lsp did_save_immediate.
+- **Suite** : S6c (écrire RestateSpec dans crds/src/lib.sdd — tâche SPEC-DD,
+  puis delegate crds+controller, décommenter wiring S6b) → étape 7 TUI cli →
+  8 agents système → 9 llm-config. Rien poussé (~25 commits locaux).

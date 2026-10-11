@@ -100,11 +100,13 @@ Tasks:
   [ ] Un Owner = un namespace (décision 2026-10-04) : `controller/src/namespace.sdd` et les specs
     amendées (crds, controller, lib/k8s, app) ; AGENTS.md et docs/architecture.md décrivent encore un
     namespace unique.
-  [ ] Couche workflow (2026-10-04) : `app/src/workflow/`, entités `project_workflows` et
-    `workflow_runs`, API `app/src/api/workflows.sdd`, MCP de domaine `app/src/mcp_domain.sdd`, API de
-    jobs `sandbox/src/jobs.sdd` ; prérequis amont : sebt3/miryad-core#26 (kinds durables, non
-    bloquant) et #27 (`RhaiStep::with_setup`, bloquant pour le kind `rhai`) ; Restate comme
-    sous-ressource de l'Application (`controller/src/application.sdd`).
+  [ ] Couche workflow (2026-10-04) — FAITE 2026-10-11 côté app/sandbox (W0-W4b + M1 :
+    `app/src/workflow/` complet runtime+steps+status+run_context, entités
+    `project_workflows`/`workflow_runs`, API `app/src/api/workflows.sdd` 10 routes, MCP de
+    domaine `app/src/mcp_domain.sdd` 21 outils, API de jobs `sandbox/src/jobs.sdd` ; #27
+    LEVÉ — with_setup livré 0.1.5) ; RESTE « Restate comme sous-ressource de
+    l'Application » = S6c : écrire le contrat RestateSpec dans `crds/src/lib.sdd` puis
+    builders controller + activer le wiring commenté de S6b (bloc « BLOQUÉE CRDS »).
   [ ] Agents système (`app/src/system_agents.sdd`) et écrans (`frontend/frontend.sdd` et specs liées).
   [ ] Autonomie des agents (`lib/src/autonomous.sdd`) et, sur décision, extraction de la
     config LLM (`llm-config/src/lib.sdd`, membre `llm-config` à ajouter au workspace).
