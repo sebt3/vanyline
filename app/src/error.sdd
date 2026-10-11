@@ -66,7 +66,7 @@ Depends on:
 Exposes:
   @AppError — `pub enum` à portée crate (./main.rs déclare `mod error;` sans `pub` : le
     binaire n'expose rien hors de lui-même ; les modules du crate l'importent par
-    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 23 variantes,
+    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 30 variantes,
     aucun gating de feature. Le @Display de chaque variante commence par son marqueur suivi
     de `": "` SAUF @AppError::UnprocessableReference qui n'a pas de marqueur propre (gabarit
     `"{0}"`, marqueur hérité du @VnyError embarqué — voir `Tasks`). Rendus exacts, caractère
@@ -106,6 +106,23 @@ Exposes:
       @AppError::WorkflowUnknownScope(String) — `"VNL-WFA-007: unknown scope: {0}"`
       @AppError::WorkflowScopeNotEditable —
         `"VNL-WFA-008: scope is not editable; create a new workflow instead"`
+      @AppError::WorkflowSandboxNotFound — `"VNL-WFA-011: sandbox not found"`
+      @AppError::WorkflowRunNotFound — `"VNL-WFA-012: run not found"`
+      @AppError::WorkflowSandboxForeignProject(String) —
+        `"VNL-WFA-013: sandbox does not belong to the project: {0}"`
+      @AppError::WorkflowSandboxNotRunning(String) —
+        `"VNL-WFA-014: sandbox not running: {0}"`
+      @AppError::WorkflowSandboxRequired —
+        `"VNL-WFA-015: sandbox-scoped workflow requires a sandbox"`
+      @AppError::WorkflowSandboxNotAllowed —
+        `"VNL-WFA-016: sandbox is not allowed for a project-scoped workflow"`
+      @AppError::WorkflowEngineUnavailable(String) —
+        `"VNL-WFA-017: workflow engine unavailable: {0}"` (Restate injoignable/refusant au
+        trigger, au statut ou à l'annulation — distinct de @WorkflowEngineNotConfigured qui
+        est le 503 « pas de moteur du tout », moteur jamais démarré)
+    Famille `VNL-WFA-*` complétée W4b 2026-10-11 (011..017, routes runs de
+    ./api/workflows.sdd) ; `VNL-WFA-009` n'a jamais existé (la conversion W4a a réutilisé
+    @InternalError).
     Famille `VNL-WFA-*` ajoutée post-validation W4a 2026-10-11 (décision tranchée par la
     spec-dd) : ./api/workflows.sdd avait d'abord rendu un type d'erreur LOCAL, en rupture
     du contrat « type unique » de ce fichier (seul `impl @IntoResponse` hors ./error.rs de
@@ -173,15 +190,23 @@ Exposes:
       @AppError::WorkflowEngineNotConfigured → 503 `SERVICE_UNAVAILABLE`
       @AppError::WorkflowUnknownScope → 400 `BAD_REQUEST`
       @AppError::WorkflowScopeNotEditable → 400 `BAD_REQUEST`
+      @AppError::WorkflowSandboxNotFound → 404 `NOT_FOUND`
+      @AppError::WorkflowRunNotFound → 404 `NOT_FOUND`
+      @AppError::WorkflowSandboxForeignProject → 409 `CONFLICT`
+      @AppError::WorkflowSandboxNotRunning → 409 `CONFLICT`
+      @AppError::WorkflowSandboxRequired → 409 `CONFLICT`
+      @AppError::WorkflowSandboxNotAllowed → 400 `BAD_REQUEST`
+      @AppError::WorkflowEngineUnavailable → 503 `SERVICE_UNAVAILABLE`
     Le match est exhaustif (compilateur) : toute nouvelle variante impose une ligne ici.
   @std::error::Error — implémenté par la derive : `source()` rend `Some` du @reqwest::Error
-    d'origine pour @AppError::RequestError uniquement, `None` pour les 22 autres variantes.
+    d'origine pour @AppError::RequestError uniquement, `None` pour les 29 autres variantes.
   Module de test `tests` — 5 tests existants, couverture partielle :
     `unprocessable_reference_maps_to_422`, `k8s_config_error_maps_to_502`,
     `k8s_api_error_maps_to_500`, `k8s_not_found_maps_to_404`,
     `sandbox_branch_empty_maps_to_422` — uniquement des assertions de statut sur 5 des 23
-    variantes ; les 18 autres statuts (dont les 7 `VNL-WFA-*` ajoutées 2026-10-11, couvertes
-    de bout en bout par ./api/workflows.rs mais AUCUNEMENT gabarit par gabarit ici), les 3
+    variantes ; les 25 autres statuts (dont les 14 `VNL-WFA-*` des passes W4a/W4b
+    2026-10-11, couvertes de bout en bout par ./api/workflows.rs mais AUCUNEMENT gabarit
+    par gabarit ici), les 3
     conversions @From et le corps JSON ne sont
     testés nulle part dans ce fichier (dette tracée en `Tasks`).
 
@@ -255,7 +280,18 @@ Handles:
     `"VNL-WFA-010: rattachement {id} référence la définition absente {}"` dans
     @AppError::InternalError (./api/workflows.rs ×2 — intégrité rattachement→définition,
     rendu 500 ; marqueur de diagnostic en dur, PAS une variante — tranche spec-dd
-    2026-10-11, même motif que `VNL-DB-007`), et
+    2026-10-11, même motif que `VNL-DB-007`),
+    `"VNL-WFA-018: …"` (./api/workflows.rs — échec d'indexation d'un run lancé, avec la
+    tentative d'annulation de secours quand elle aussi échoue), `"VNL-WFA-019: …"`
+    (fenêtre de liste invalide — sites DÉFENSIFS de @list_runs `pub` pour les appelants
+    non-REST de ./api/workflows.sdd : les routes clampent `since` avant, ils sont
+    inatteignables par HTTP — ratification validation W4b) et `"VNL-WFA-020: …"`
+    (best-effort jobs de l'annulation : run sans sandbox, contexte non sérialisable,
+    erreurs du DELETE de jobs — remontées en VALEUR @AppError::InternalError jusqu'à
+    l'appelant qui les JOURNALISE @tracing::warn! et rend 202 : jamais rendues en HTTP,
+    le 500 du barème ne s'applique jamais à ces payloads — contrat best-effort de
+    ../workflow/status.sdd) — les trois en @AppError::InternalError, motifs W4b
+    2026-10-11, et
     `"VNL-SBX-002: sandbox ticket response missing 'ticket'"` dans @AppError::InternalError
     (./api/sandboxes.rs::ws_ticket — COLLISION : le marqueur `VNL-SBX-002` désigne aussi
     @AppError::SandboxBranchEmpty, `VNL-SBX-002: branch must not be empty` — voir `Tasks`).
@@ -284,8 +320,8 @@ Handles:
 Must:
   Préfixer le @Display de chaque variante (sauf @AppError::UnprocessableReference, seul
     exception assumée) par son marqueur `VNL-<DOM>-<NNN>` exact suivi de `": "`, selon les
-    23 gabarits d'`Exposes`, et les verrouiller par test caractère par caractère.
-  Appliquer le barème d'`Exposes` variante → statut HTTP sur les 23 variantes, match
+    30 gabarits d'`Exposes`, et les verrouiller par test caractère par caractère.
+  Appliquer le barème d'`Exposes` variante → statut HTTP sur les 30 variantes, match
     exhaustif, corps `{"error": "<@Display complet>"}` en `application/json` pour toutes.
   Préserver les 5 gabarits byte-identiques à leurs jumeaux @VnyError (`VNL-LLM-001`,
     `VNL-LLM-002`, `VNL-MCP-001`, `VNL-AGT-001`, `VNL-INT-001`) : les messages circulent
@@ -364,8 +400,8 @@ Tasks:
   [?] @From<@reqwest::Error> généré par `#[from]` : aucun call-site ne l'utilise par `?`
     (les appelants `.map_err(AppError::RequestError)` explicitement) — le `#[from]` reste
     pour @std::error::Error::source() ou est-il de la dette ?
-  [ ] Combler les tests du module : les 5 tests existants ne couvrent que 5 des 23 statuts ;
-    ajouter un test par Scenario taggé par son titre (18 statuts manquants dont les 7 WFA,
+  [ ] Combler les tests du module : les 5 tests existants ne couvrent que 5 des 30 statuts ;
+    ajouter un test par Scenario taggé par son titre (25 statuts manquants dont les 14 WFA,
     corps JSON +
     @Content-Type, les 3 @From manuels avec rendus complets, @std::error::Error::source(),
     unicité des marqueurs, chemin WS log-only).
@@ -375,7 +411,7 @@ Tasks:
 
 Done when:
   Chaque Scenario a son test dédié taggé par son titre et passe.
-  Les 23 gabarits @Display et le barème complet variante → statut → corps JSON sont
+  Les 30 gabarits @Display et le barème complet variante → statut → corps JSON sont
     verrouillés par test (les 5 tests existants conservés ou absorbés sans régression).
   Les rendus finaux des 3 @From manuels (doubles marqueurs inclus, caractère par caractère)
     sont assertés, et la cohérence avec ../../cfgstore/src/error.sdd (« From → HTTP 500,
@@ -383,36 +419,43 @@ Done when:
   Sébastien a tranché tous les `[?]` et le `[!]` de `Tasks` — la collision `VNL-CFG-*` est
     résolue en coordination avec ../../cfgstore/src/error.sdd.
 
-Scenario: display_exhaustif_des_vingt_trois_variantes_apperror
-  # Redimensionné « seize »→« vingt-trois » le 2026-10-11 (famille VNL-WFA-002..008
-  # ajoutée ; le test taggé reste à écrire — voir Tasks dette 18 statuts).
-  Given une instance de chaque variante de @AppError avec payloads fixés (`LlmError("boom")`,
+Scenario: display_exhaustif_des_variantes_apperror
+  # Titre dé-figé 2026-10-11 (was « seize » puis « vingt-trois ») : l'énumération est
+  # l'Exposes, plus le chiffre du jour — l'ensemble des variantes, c'est « chaque
+  # variante d'Exposes » point. Le test taggé reste à écrire (dette Tasks).
+  Given une instance de CHAQUE variante d'@AppError (l'ensemble d'`Exposes`, 30 au
+    moment de l'écriture) avec payloads fixés (`LlmError("boom")`,
     `McpError("boom")`, `InternalError("boom")`, `K8sConfigError("x")`, `K8sApiError("x")`,
     `K8sNotFound("x")`, `UnprocessableReference(VnyError::UnknownReference("agent", "ghost"))`,
     `RequestError` fabriquée comme dans `conversion_reqwest_generee_source_std_error_et_502`,
     `WorkflowNameTaken("x")`, `WorkflowDagInvalid("x")`, `WorkflowKindForbidden("x")`,
-    `WorkflowUnknownScope("x")`,
-    et les 11 variantes sans payload : Forbidden, LlmProviderNotFound, AgentNotFound,
+    `WorkflowUnknownScope("x")`, `WorkflowSandboxForeignProject("x")`,
+    `WorkflowSandboxNotRunning("x")`, `WorkflowEngineUnavailable("x")`,
+    et les variantes sans payload : Forbidden, LlmProviderNotFound, AgentNotFound,
     ConversationNotFound, ConversationAccessDenied, SandboxNotExposed, SandboxBranchEmpty,
-    GitPathInvalid, WorkflowNotFound, WorkflowEngineNotConfigured, WorkflowScopeNotEditable)
+    GitPathInvalid, WorkflowNotFound, WorkflowEngineNotConfigured, WorkflowScopeNotEditable,
+    WorkflowSandboxNotFound, WorkflowRunNotFound, WorkflowSandboxRequired,
+    WorkflowSandboxNotAllowed)
   When chacune est rendue par @Display
   Then chaque rendu est exactement le gabarit d'`Exposes`, chaque marqueur suivi de `": "`,
     et le rendu de @AppError::UnprocessableReference est exactement
     `VNL-CFG-003: Unknown agent reference: 'ghost'` sans préfixe propre à l'app
 
-Scenario: bareme_exhaustif_statuts_http_des_vingt_trois_variantes
-  # Redimensionné « seize »→« vingt-trois » le 2026-10-11 (même motif que le Scenario
-  # display ; le test taggé reste à écrire).
+Scenario: bareme_exhaustif_statuts_http_des_variantes
+  # Titre dé-figé 2026-10-11 (même motif que display_exhaustif_des_variantes_apperror).
   Given une instance de chaque variante de @AppError (mêmes payloads fixés que
-    `display_exhaustif_des_vingt_trois_variantes_apperror`)
+    `display_exhaustif_des_variantes_apperror`)
   When chacune est passée à @IntoResponse::into_response
   Then les statuts sont exactement le barème d'`Exposes` : 403 (Forbidden,
     ConversationAccessDenied), 502 (LlmError, McpError, RequestError, K8sConfigError), 404
     (LlmProviderNotFound, AgentNotFound, ConversationNotFound, K8sNotFound,
-    WorkflowNotFound), 422 (UnprocessableReference, SandboxBranchEmpty,
-    WorkflowKindForbidden), 500 (InternalError, K8sApiError), 409 (SandboxNotExposed,
-    WorkflowNameTaken), 400 (GitPathInvalid, WorkflowDagInvalid, WorkflowUnknownScope,
-    WorkflowScopeNotEditable), 503 (WorkflowEngineNotConfigured)
+    WorkflowNotFound, WorkflowSandboxNotFound, WorkflowRunNotFound), 422
+    (UnprocessableReference, SandboxBranchEmpty, WorkflowKindForbidden), 500
+    (InternalError, K8sApiError), 409 (SandboxNotExposed, WorkflowNameTaken,
+    WorkflowSandboxForeignProject, WorkflowSandboxNotRunning, WorkflowSandboxRequired),
+    400 (GitPathInvalid, WorkflowDagInvalid, WorkflowUnknownScope,
+    WorkflowScopeNotEditable, WorkflowSandboxNotAllowed), 503
+    (WorkflowEngineNotConfigured, WorkflowEngineUnavailable)
 
 Scenario: corps_json_error_unique_et_content_type
   Given @AppError::Forbidden rendu par @IntoResponse::into_response
@@ -509,7 +552,9 @@ Scenario: marqueurs_propres_de_apperror_uniques_dans_le_fichier
     `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001`, `VNL-CNV-002`, `VNL-REQ-001`, `VNL-INT-001`,
     `VNL-K8S-001`, `VNL-K8S-002`, `VNL-K8S-003`, `VNL-SBX-001`, `VNL-SBX-002`,
     `VNL-SBX-003`, `VNL-WFA-002`, `VNL-WFA-003`, `VNL-WFA-004`, `VNL-WFA-005`,
-    `VNL-WFA-006`, `VNL-WFA-007`, `VNL-WFA-008`) est dénombré hors du module de tests
+    `VNL-WFA-006`, `VNL-WFA-007`, `VNL-WFA-008`, `VNL-WFA-011`, `VNL-WFA-012`,
+    `VNL-WFA-013`, `VNL-WFA-014`, `VNL-WFA-015`, `VNL-WFA-016`,
+    `VNL-WFA-017`) est dénombré hors du module de tests
   Then chacun apparaît exactement une fois, dans son gabarit `#[error(...)]`, et deux
     variantes n'y partagent jamais le même marqueur ; le seul marqueur compté deux fois est
     `VNL-DB-006` (une fois dans le commentaire d'@doc du @From, une fois dans le `format!`)

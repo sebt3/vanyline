@@ -38,7 +38,10 @@ Exposes:
     une requête par run.
   @fetch_status(runtime, invocation_id) -> Result<RunStatus, WorkflowError> (async) — avec le
     détail des steps.
-  @RestateAdmin — trait local (déclaré ICI, ce fichier ne dépend pas de ./runtime.rs) :
+  @RestateAdmin — trait local (déclaré ICI, ce fichier ne dépend pas de ./runtime.rs),
+    @Send + @Sync (supertraits ratifiés W4b 2026-10-11 : sans eux, `&dyn @RestateAdmin`
+    rend les futures des handlers axum non-@Send — @fetch_* et l'annulation seraient
+    inconsommables depuis ./api/workflows.rs ; @WorkflowRuntime les satisfait déjà) :
     `admin_url() -> &@str` + `http() -> &@reqwest::Client` (client partagé). Implémenté
     par @WorkflowRuntime en W2 (runtime.sdd expose déjà « l'URL d'admin et le client
     HTTP partagé ») ; le type du paramètre `runtime` des deux @fetch_* est ce trait.

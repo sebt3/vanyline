@@ -173,6 +173,13 @@ Tasks:
     avec changement de contrat à rédiger d'abord). — purge au fil
     des étapes de la migration qui les touchent (interleaved). Les 2 `unnecessary_wraps`
     imputables à 4a (`controller/src/{owner,project}.rs::build_*_pvc`) SOLDÉS en 4b.
+    Exemptions § couche workflow ( Migration 2026-10, W1-W4b — 5, toutes d'une ligne
+    citant CE fichier) : `dead_code` ×1 sur le squelette `steps/mod.rs` (consommateurs
+    W3+), `double_must_use` ×3 (`steps/mod.rs`, `steps/agent.rs`,
+    `api/workflows.rs::SandboxLookup` — async_trait pose `must_use` sur le @BoxFuture
+    déjà must_use, précédent `trait EventSink`), `dead_code` ×1 sur les
+    `#[allow]` du `workflow/mod.rs` squelette retirés à consommation. Le compteur
+    validator « 4 → 5 » (W4b) couvre les mêmes sites + le `SandboxLookup` neuf.
     Exemptions pedantic restantes en `lib` (2, les seules) : `too_many_lines` sur
     `run_agent_turn_at_depth` (justifié `session.sdd`) et `double_must_use` sur
     `trait EventSink` (`event.rs`, justification in-ligne citant CE fichier — la prescription

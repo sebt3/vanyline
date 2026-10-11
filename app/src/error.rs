@@ -63,6 +63,30 @@ pub enum AppError {
     /// La portée d'un workflow existant n'est pas modifiable (400).
     #[error("VNL-WFA-008: scope is not editable; create a new workflow instead")]
     WorkflowScopeNotEditable,
+    /// Sandbox référencée par un lancement, absente OU appartenant à un autre utilisateur
+    /// (404, aucune distinction — `./api/workflows.sdd`).
+    #[error("VNL-WFA-011: sandbox not found")]
+    WorkflowSandboxNotFound,
+    /// Run absent OU appartenant à un autre utilisateur (404, aucune distinction —
+    /// `./api/workflows.sdd`).
+    #[error("VNL-WFA-012: run not found")]
+    WorkflowRunNotFound,
+    /// Sandbox hors du projet visé au lancement (409) — payload = nom de la sandbox.
+    #[error("VNL-WFA-013: sandbox does not belong to the project: {0}")]
+    WorkflowSandboxForeignProject(String),
+    /// Sandbox non démarrée, phase ≠ `Running` (409) — payload = « sandbox : phase ».
+    #[error("VNL-WFA-014: sandbox not running: {0}")]
+    WorkflowSandboxNotRunning(String),
+    /// Lancement d'un workflow de portée sandbox sans `sandbox` fournie (409).
+    #[error("VNL-WFA-015: sandbox-scoped workflow requires a sandbox")]
+    WorkflowSandboxRequired,
+    /// `sandbox` fournie pour un workflow de portée projet (400).
+    #[error("VNL-WFA-016: sandbox is not allowed for a project-scoped workflow")]
+    WorkflowSandboxNotAllowed,
+    /// Moteur configuré mais Restate injoignable ou en refus (503, `Raises` de
+    /// `./api/workflows.sdd`) — payload = l'erreur miryad-core (`MRD-WORKFLOW-*`).
+    #[error("VNL-WFA-017: workflow engine unavailable: {0}")]
+    WorkflowEngineUnavailable(String),
 }
 
 /// Remplace le `fn db_err` dupliqué verbatim dans 9 modules (`api/{conversations,llm_providers,
@@ -111,6 +135,8 @@ impl IntoResponse for AppError {
             | Self::AgentNotFound
             | Self::ConversationNotFound
             | Self::K8sNotFound(_)
+            | Self::WorkflowSandboxNotFound
+            | Self::WorkflowRunNotFound
             | Self::WorkflowNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::UnprocessableReference(_)
             | Self::SandboxBranchEmpty
@@ -120,14 +146,17 @@ impl IntoResponse for AppError {
             Self::InternalError(_) | Self::K8sApiError(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
             }
-            Self::SandboxNotExposed | Self::WorkflowNameTaken(_) => {
-                (StatusCode::CONFLICT, self.to_string())
-            }
+            Self::SandboxNotExposed
+            | Self::WorkflowNameTaken(_)
+            | Self::WorkflowSandboxForeignProject(_)
+            | Self::WorkflowSandboxNotRunning(_)
+            | Self::WorkflowSandboxRequired => (StatusCode::CONFLICT, self.to_string()),
             Self::GitPathInvalid
             | Self::WorkflowDagInvalid(_)
             | Self::WorkflowUnknownScope(_)
+            | Self::WorkflowSandboxNotAllowed
             | Self::WorkflowScopeNotEditable => (StatusCode::BAD_REQUEST, self.to_string()),
-            Self::WorkflowEngineNotConfigured => {
+            Self::WorkflowEngineNotConfigured | Self::WorkflowEngineUnavailable(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
         };

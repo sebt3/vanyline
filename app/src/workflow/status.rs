@@ -30,7 +30,7 @@ const MAX_IDS_PER_QUERY: usize = 50;
 /// Ce que `status.rs` attend du runtime (interface minimale définie localement en W1 ;
 /// `@WorkflowRuntime` de runtime.sdd l'implémentera en W2) : l'URL d'admin et le client HTTP
 /// partagé de l'app.
-pub trait RestateAdmin {
+pub trait RestateAdmin: Send + Sync {
     /// URL de base de l'admin API Restate (sans `/` final imposé).
     fn admin_url(&self) -> &str;
     /// Client HTTP partagé de l'app (pool de connexions réutilisé).

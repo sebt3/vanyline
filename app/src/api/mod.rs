@@ -71,6 +71,17 @@ pub fn api_router() -> Router<AppState> {
                 .put(workflows::update_workflow)
                 .delete(workflows::delete_workflow),
         )
+        // Runs de workflows (api/workflows.sdd, lot W4b — montées seules).
+        .route(
+            "/projects/{project}/workflows/{id}/runs",
+            post(workflows::create_run),
+        )
+        .route(
+            "/projects/{project}/runs",
+            get(workflows::list_project_runs),
+        )
+        .route("/runs/{run_id}", get(workflows::get_run))
+        .route("/runs/{run_id}/cancel", post(workflows::cancel_run))
         // Sandboxes (OIDC)
         .route(
             "/sandboxes",
@@ -86,4 +97,8 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/sandboxes/{name}/ws-ticket", post(sandboxes::ws_ticket))
         .route("/sandboxes/{name}/git/{*path}", any(sandboxes::git_proxy))
+        .route(
+            "/sandboxes/{sandbox}/runs",
+            get(workflows::list_sandbox_runs),
+        )
 }

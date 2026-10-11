@@ -67,6 +67,12 @@ Structure:
     @create_workflow (monté W4a 2026-10-11)
   - `GET` + `PUT` + `DELETE` `/projects/{project}/workflows/{id}` → @get_workflow /
     @update_workflow / @delete_workflow (monté W4a 2026-10-11)
+  - `POST` `/projects/{project}/workflows/{id}/runs` → @create_run — lancement, 202
+    (monté W4b 2026-10-11)
+  - `GET` `/projects/{project}/runs` → @list_project_runs (monté W4b 2026-10-11)
+  - `GET` `/sandboxes/{sandbox}/runs` → @list_sandbox_runs (monté W4b 2026-10-11)
+  - `GET` `/runs/{run_id}` → @get_run — détail avec steps (monté W4b 2026-10-11)
+  - `POST` `/runs/{run_id}/cancel` → @cancel_run — 202 (monté W4b 2026-10-11)
   - `POST` `/sandboxes/{name}/suspend` → @set_sandbox_suspended
   - `POST` `/sandboxes/{name}/ws-ticket` → @ws_ticket
   - TOUTES méthodes (@any) `/sandboxes/{name}/git/{*path}` → @git_proxy — seul chemin
@@ -288,11 +294,10 @@ Depends on:
     `../../../tooling.sdd` (aucun `println!`/log ici — fichier sans corps d'exécution).
 
 Tasks:
-  [x] Workflows (2026-10-04) — FAIT POUR LE CRUD 2026-10-11 (validation W4a) : `pub mod
-    workflows` déclaré, les 5 routes de définitions montées dans @api_router (table
-    ci-dessus) ; RESTE les routes runs/lancement de ./workflows.sdd (W4b). Le MCP de
-    domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est monté par ../main.rs à côté du
-    MCP générique de miryad-core, pas ici.
+  [x] Workflows (2026-10-04) — FAIT 2026-10-11 (validations W4a + W4b) : `pub mod
+    workflows` déclaré, les DIX routes de ./workflows.sdd montées dans @api_router
+    (table ci-dessus). Le MCP de domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est
+    monté par ../main.rs à côté du MCP générique de miryad-core, pas ici.
   [!] ./mod.rs ne contient AUCUN test (pas de `@mod tests`) et aucun test du dépôt ne
       passe par @api_router() / @api_v1_router() (grep : les deux fonctions ne sont
       appelées que par `../main.rs`) — la table de routage n'est vérifiée aujourd'hui

@@ -54,6 +54,12 @@ Exposes:
       Les deux listes : paramètres `limit` (≤ 50, défaut 50) et `since` (défaut : 14 jours, au plus
       14 jours) ; `[{ run_id, workflow: definition_name, scope, sandbox?, triggered_by, started_at,
       status: RunStatus (sans le détail des steps) }]`, du plus récent au plus ancien.
+      Ratifications validation W4b 2026-10-11 : `workflow` rend le `definition_name`
+      COMPLET stocké (`alice/demo/ci` — l'instantané figé au lancement, qui survit à la
+      suppression de la définition ; la phrase de `Handles` « l'utilisateur ne voit que
+      la partie {name} » ne porte que sur l'API des définitions) ; `limit`/`since`
+      hors bornes sont CLAMPÉS silencieusement (`[1, 50]`, `[1, 14]` j — jamais 400,
+      verrouillé par test) ; `since` est un entier de JOURS.
     `GET /runs/{run_id}` — détail avec le statut des steps.
     `POST /runs/{run_id}/cancel` — 202.
   @launch_workflow(state, user, project, workflow_id, sandbox: Option<String>, triggered_by) ->
@@ -83,7 +89,13 @@ Handles:
   Listes de runs : lecture de l'index (fenêtre et limite), puis UNE lecture groupée des statuts
   (../workflow/status.sdd) ; un run absent de Restate rend `status.state == "Unknown"`.
   Annulation : annule l'invocation, puis les jobs shell du run (best-effort,
-  `DELETE /jobs?prefix={run_id}:` sur la sandbox du run si elle existe).
+  `DELETE /jobs?prefix={run_id}:` sur la sandbox du run si elle existe). L'échec du
+  DELETE est journalisé (`VNL-WFA-020`) SANS faire échouer l'annulation : 202 quand
+  l'invocation est annulée (../workflow/status.sdd) ; un run de portée projet n'émet
+  AUCUNE requête sandbox.
+  Ordre de validation au lancement (raffinement de l'étape 2, ratifié W4b) : portée/
+  sandbox (400/409) → kinds re-faits (422) → CR sandbox (404/409/409) — tout 4xx est
+  rendu AVANT tout déclenchement Restate.
 
 Must:
   Valider portée et kinds à la création ET à chaque lancement (une définition éditée par un autre
@@ -98,13 +110,18 @@ Must not:
   Exécuter quoi que ce soit si le moteur n'est pas configuré.
 
 Tasks:
-  [ ] Déclarer le module dans ./mod.sdd et monter les routes (table de routage).
+  [x] Déclarer le module dans ./mod.sdd et monter les routes (table de routage) — FAIT
+    2026-10-11 (validations W4a + W4b : 10 routes, table d'./mod.sdd ressynchronisée).
   [ ] Unicité du `name` global côté miryad-core : le préfixe `{owner}/{project}/` est un contournement ;
     la demande d'unicité par propriétaire est l'issue sebt3/miryad-core#28 — une fois résolue, le
     préfixe pourra être réduit à `{project}/` (nom unique par propriétaire).
   [?] Édition d'un workflow pendant qu'un de ses runs tourne : les runs gardent le DAG copié à leur
     lancement (aucun impact) ; confirmer que l'interface le dit.
-  [ ] Convertir chaque Scenario en test taggé par son titre.
+  [x] Convertir chaque Scenario en test taggé par son titre — FAIT 2026-10-11
+    (validation W4b) : les 14 Scenario ont leur test au titre exact, sauf
+    `workflow_d_un_autre_utilisateur` et `moteur_non_configure`, doublés par volet
+    (lecture+suppression / lancement ; 5 routes CRUD / 5 routes runs) en préfixe du
+    titre.
 
 Scenario: creation_atomique
   Given un corps valide de portée `sandbox`
