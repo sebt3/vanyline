@@ -33,18 +33,35 @@ Exposes:
     puis obtient le jeton de l'Owner par `VnlK8sClient::owner_token`. Méthodes `get_json`,
     `post_json`, `delete` vers `http://sandbox-{name}.{ns}.svc:3000{chemin}` avec
     `Authorization: Bearer <jeton>` et un timeout de 10 s ; le jeton n'apparaît dans aucune erreur.
+    @get_json_status (pub(crate), micro-lot W2 2026-10-10) — même accès mais REND le
+    status HTTP en `Ok((u16, Option<Value>))` au lieu d'erreur sur tout hors 2xx : la
+    détection d'état par status (ex. « job perdu » sur 404 dans ./shell.sdd) est
+    STRUCTURELLE, jamais une sous-chaîne du message d'erreur.
   @build_registry(env: StepEnv) -> StepRegistry — enregistre exactement `agent`, `rhai`, `shell`,
     `gate` (jamais d'autre kind, jamais deux fois le même).
 
 Must:
   Redemander le jeton de l'Owner à chaque utilisation de @SandboxAccess (le cache de
-    `owner_token` le rafraîchit à 120 s de l'expiration) : un step long ne garde pas un jeton périmé.
+    `owner_token` le rafraîchit à 300 s de l'expiration — marge réelle contractée par
+    ../../../lib/src/k8s.sdd (décision 2026-10-08, `OWNER_TOKEN_REFRESH_MARGIN_SECS`) : un
+    step long ne garde pas un jeton périmé.
   Ne jamais journaliser le jeton, ni `config`/`inputs` d'un step.
   Rendre des @StepError `retryable: false` pour toute erreur de configuration ou de contexte, et
     `retryable: true` seulement pour les pannes de transport transitoires.
 
 Must not:
   Accepter un `kind` hors de la liste : un kind inconnu est une erreur du DAG (404, miryad-core).
+
+Tasks:
+  [x] Dépendances du module, ratifiées au Cargo.toml de l'app W2 2026-10-10 :
+    `handlebars` 6.4 (./agent.sdd), `rhai` 1.26 (./rhai.sdd — MÊME paquet que celui du
+    graphe miryad-core, zéro doublon dans le lock), `vanyline-health` (./gate.sdd —
+    membre du workspace).
+  [ ] Rattraper à la passe d'intégration cluster : @build_registry réel jamais exécuté
+    hors cluster (convention anti-mock kube de ../../../lib/src/k8s.sdd) —
+    `registre_exact` verrouille la mécanique d'assemblage sur stubs + les constantes
+    `KIND` ; l'enregistrement bout-en-bout des 4 kinds réels reste à prouver sur un
+    @StepDispatcher vivant.
 
 Scenario: registre_exact
   Given @build_registry

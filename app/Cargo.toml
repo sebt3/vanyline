@@ -50,6 +50,13 @@ miryad-core = { version = "0.1.5", default-features = false, features = [
 utoipa = "5"
 sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "mock"] }
 sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+# W2 `app/src/workflow/steps/` : `agent.sdd` contracte le gabarit `prompt` « Handlebars en mode
+# strict » ; `rhai.sdd` enregistre des fonctions sur le moteur Rhai de `RhaiStep` (types
+# `Engine`/`Dynamic`/`Map`) ; `gate.sdd` (`Platform: …/vanyline-health`) évalue le rapport via
+# `HealthReport::status` et `CoverageTotals::percent` sans le réinterpréter.
+handlebars = "6.4"
+rhai = "1.26"
+vanyline-health = { path = "../health" }
 
 # `sqlx-sqlite` n'est nécessaire qu'aux tests (base sqlite en mémoire avec migrations réelles
 # appliquées, cf. `db::test_support::real_db` — même pattern que les tests internes de

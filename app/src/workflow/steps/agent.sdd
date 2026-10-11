@@ -48,7 +48,9 @@ Handles:
   `…/mcp`, en-tête `Authorization: Bearer <jeton de l'Owner>`, tous les outils) est ajouté
   (`extra_mcp`). Le jeton de l'Owner vit au plus 15 minutes : `timeout_secs` est PLAFONNÉ à
   780 s quand la sandbox est injectée (3 600 s sinon), pour qu'aucun appel d'outil de la
-  sandbox ne se fasse avec un jeton expiré. Défaut 600 s.
+  sandbox ne se fasse avec un jeton expiré. Défaut 600 s, dans les DEUX portées
+  (le plafond 780 s ne change pas le défaut — validation W2 2026-10-10 a puni
+  l'invention « défaut 780 en portée sandbox », code aligné sur le contrat).
   Les limites par défaut viennent de `TaskLimits` ; `max_steps` le surcharge.
 
 Must:
@@ -61,6 +63,16 @@ Must:
 Must not:
   Imposer un format de sortie : le JSON est optionnel et demandé par la config.
   Appliquer un budget de tokens (hors v1, modèles locaux).
+
+Tasks:
+  [!] `autonomous::run_agent_task` (cité plus haut) n'est PAS livré (./../autonomous.rs =
+    spec de conception, étape 8). L'enveloppe W2 s'appuie sur
+    @vanyline_lib::session::run_agent_turn (fidélité de signature vérifiée validation
+    W2 2026-10-10). Conséquences tracées : `max_steps` INERTE en production (aucun
+    exécuteur ne l'applique — la variante `step_limit` n'est atteignable que par spy),
+    et @LibTaskRunner (timeout, sink de collecte, classification des pannes) verrouillé
+    par spy seulement — premier niveau de confiance : compilation + fidélité de
+    branchement. Livrer ./../autonomous.rs puis basculer l'enveloppe.
 
 Scenario: sortie_texte
   Given un agent de test qui répond « ok » et un prompt sans variable

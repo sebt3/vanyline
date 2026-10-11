@@ -31,6 +31,8 @@ Returns:
   `{ "passed": <bool>, "reasons": [<texte>], "status": "passed"|"failed"|"errored",
   "coverage_percent": <nombre|null>, "new_code_percent": <nombre|null>, "issues": { "error": <n>,
   "warning": <n> }, "unchecked_languages": [..], "checks": [{ "id", "status" }] }`.
+    Précision W2 2026-10-10 : `status` rendu est le status ÉVALUÉ (les `ignore_checks`
+    retirés du calcul), `checks` rend la liste COMPLÈTE des vérifications.
 
 Raises:
   @StepError `retryable: false` quand la gate échoue et `enforce` est vrai (le message liste les
@@ -39,7 +41,9 @@ Raises:
 
 Handles:
   Séquence : `POST /code-health/refresh` (avec `base` si fourni) ; interrogation de
-  `GET /code-health` jusqu'à `phase == "fresh"` ET `computed_at` postérieur à la demande ;
+  `GET /code-health` jusqu'à `phase == "fresh"` ET `computed_at` postérieur à la demande
+  (interrogation toutes les 2 s fixes — fixé W2 2026-10-10, borné par
+  `wait_timeout_secs`) ;
   évaluation. Évaluation : (1) `status` du rapport, calculé SANS les vérifications de
   `ignore_checks`, doit valoir `passed` ; (2) `coverage_percent` ≥ `min_coverage` si défini ;
   (3) `new_code_percent` ≥ `min_new_code_coverage` si défini (exige `base` : sans `base`, une

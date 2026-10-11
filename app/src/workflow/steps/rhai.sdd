@@ -54,7 +54,14 @@ Must not:
   Donner le serveur `sandbox` à un run de portée projet.
 
 Tasks:
-  [ ] BLOQUÉ par sebt3/miryad-core#27 (`RhaiStep::with_setup`, 0.1.5).
+  [x] BLOQUÉ par sebt3/miryad-core#27 (`RhaiStep::with_setup`, 0.1.5) — LEVÉ :
+    `with_setup` est livré en miryad-core 0.1.5 (source du registre vérifiée, tests
+    inclus ; validation W2 2026-10-10) — kind implémenté et testé
+    (`kind_rhai_via_le_rhaistep_de_miryad`).
+  [!] Pont MCP POST-only SANS ÉTAT : les serveurs externes à session (`Mcp-Session-Id`,
+    handshake `initialize`) sont hors de portée du pont rhai — seul le profil du serveur
+    MCP de la sandbox (strictement sans état, ../../sandbox/src/mcp.sdd) est atteint
+    (borné W2 2026-10-10 ; séam `prefixed_mcp` privé).
 
 Scenario: lister_les_serveurs
   Given deux serveurs MCP configurés pour l'utilisateur

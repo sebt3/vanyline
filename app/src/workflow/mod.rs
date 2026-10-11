@@ -6,3 +6,5 @@
 pub mod run_context;
 #[allow(dead_code)] // W2 consommateur à venir — tooling.sdd
 pub mod status;
+#[allow(dead_code)] // W3 consommateur (`runtime.rs` : `build_registry`) — tooling.sdd
+pub mod steps;
