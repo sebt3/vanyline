@@ -552,6 +552,22 @@ Tasks:
     la gestion de Ctrl-C par défaut du terminal (le TUI la gère, annulation du tour) et les
     Scenario du prompt `> `/EOF ; ajouter la vérification de TTY. Les `[?]` du REPL (erreurs
     silencieuses, `-c` sans pointeur, `AGENTS.md` relatif au cwd) restent ouverts pour le one-shot.
+  [?] Stream du message d'usage sans terminal (S7, 2026-10-13) : le §Must ne nomme pas le
+    flux — l'implémentation écrit `vanyline: interactive chat needs a terminal; …` sur
+    STDERR avec code de sortie 2. Confirmer stderr (ou contracter stdout) ?
+  [?] Scenario `repl_*` devenus stale (S7, 2026-10-13) : trois Scenario décrivent le REPL
+    texte supprimé par le §Must « REPL INTERACTIF = TUI » de la même spec (prompt `> `,
+    lecture de lignes). Les réécrire en Scenario TUI (couverts par ./tui/mod.sdd), les
+    retirer, ou les marquer caducs ? À trancher avec la tâche ALIGNEMENT TUI ci-dessus.
+  [?] Motif du message d'erreur one-shot sur échec de résolution TUI (S7, 2026-10-13) :
+    `try_build_turn_context` reprend le motif `VNL-CFG-*` existant du one-shot — valider
+    que c'est le bon espace de codes pour cette erreur d'usage.
+  [ ] Scenarios one-shot sans test homonyme, constatés non annoncés par la revue S7
+    (validator 2026-10-14 ; dette préexistante, hors TUI) : `timeout_zero_desactive_la_limite`,
+    `tour_reussi_persiste_deux_messages_et_le_todo`, `tool_calls_persistes_sans_id_et_absents_si_vides`,
+    `historique_filtre_roles_et_perd_les_tool_calls`, `lecture_todo_sur_mutex_empoisonne_garde_la_valeur`.
+    Les convertir en tests taggés (les deux premiers et le dernier sont testables en
+    process ; `timeout_zero` contre le parsing/résolution de limite).
   [?] Erreurs de tour invisibles : le bras @Err(_) du one-shot et le @break du REPL
     jettent l'@VnyError sans l'afficher. Un échec de résolution config
     (`VNL-CFG-003` — modèle/provider/toolset inconnu) ne produit AUCUNE sortie, seul

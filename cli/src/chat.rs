@@ -48,10 +48,10 @@ pub async fn run(
     model: Option<String>,
 ) {
     config::ensure_config_dir();
-    if !json {
-        print_workspace_sources().await;
-    }
     if let Some(msg) = message {
+        if !json {
+            print_workspace_sources().await;
+        }
         run_one_shot(
             &msg,
             agent,
@@ -64,7 +64,79 @@ pub async fn run(
         .await;
         return;
     }
-    run_repl(agent, continue_active, toolbox).await;
+    run_interactive(agent, continue_active, toolbox).await;
+}
+
+/// Mode interactif = TUI ratatui (`chat.sdd` §Must « REPL INTERACTIF = TUI »,
+/// `tui/mod.sdd`) : exige stdin ET stdout terminaux, sinon message exact et
+/// sortie code 2 (le one-shot `run <message>` reste le mode scriptable).
+/// L'ancien REPL texte (bannière, prompt `> `, `StdoutSink` interactif) est
+/// supprimé ; sources du workspace, agent et conversation passent au TUI
+/// (en-tête et première `Notice`), le `git diff` de clôture devient la barre
+/// d'état du TUI.
+async fn run_interactive(
+    agent: Option<String>,
+    continue_active: bool,
+    toolbox: Option<crate::ToolboxTarget>,
+) {
+    // tooling.sdd D6a — terminaison contractée : chat.sdd §Must « REPL
+    // INTERACTIF = TUI » — message exact puis exit(2) hors terminal.
+    #[allow(clippy::print_stderr)]
+    if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    {
+        eprintln!(
+            "vanyline: interactive chat needs a terminal; use `vanyline run <message>` for scripts"
+        );
+        std::process::exit(2);
+    }
+    let (conv, agent_name, _) = resolve_context(agent, continue_active).await;
+    let workspace_context = read_workspace_context();
+    let workspace_summary = workspace_summary_lines().await;
+    let git_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| config::discover_workspace_root(&cwd));
+    // Le sink de ce contexte est remplacé par le `TuiSink` à l'entrée de la
+    // boucle (`tui/mod.sdd` Exposes) ; le modèle est `None` et aucun timeout
+    // n'est codé en dur en mode interactif (chat.sdd §Handles).
+    let ctx = build_turn_context(toolbox.as_ref(), false, None, conv.todo.clone()).await;
+    let session = crate::tui::TuiSession {
+        ctx,
+        conversation: conv,
+        agent: agent_name,
+        workspace_context,
+        workspace_summary,
+        git_root,
+        toolbox: toolbox.map(std::sync::Arc::new),
+        // souris (molette) activée par défaut ; `--no-mouse` reste ouvert
+        // (tui/mod.sdd Tasks `[?]`) faute de drapeau dans la grammaire clap.
+        mouse: true,
+    };
+    // tooling.sdd D6a — terminaison contractée : erreur du chemin TUI affichée
+    // APRÈS restauration du terminal (la garde RAII du TUI est tombée), puis
+    // exit(1) comme les autres terminaisons du CLI.
+    #[allow(clippy::print_stderr)]
+    if let Err(e) = crate::tui::run_tui(session).await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+/// Lignes du résumé des sources du workspace pour la première `Notice` du TUI
+/// (`chat.sdd` §Must « sources passées au TUI ») — mêmes filtres et même
+/// en-tête que `print_workspace_sources`, en `Vec<String>` au lieu du rendu.
+async fn workspace_summary_lines() -> Vec<String> {
+    let store = crate::discover_fs_store();
+    let Some(ws_dir) = store.layers().workspace_dir.clone() else {
+        return Vec::new();
+    };
+    let lines = workspace_source_summary(&store).await;
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![format!("Sources workspace ({}):", ws_dir.display())];
+    out.extend(lines);
+    out
 }
 
 async fn run_one_shot(
@@ -134,77 +206,15 @@ async fn run_one_shot(
     }
 }
 
-// tooling.sdd D6a — canal rendu contracté : chat.sdd §Returns « Rendu REPL :
-// bannière exacte » (quatre lignes + ligne vide), prompt `> ` flushé avant
-// chaque lecture (§Must littéraux, Scenario `repl_banniere_exacte_puis_prompt`)
-// et dernier `println!()` nu sur EOF (§Returns « Code 0 »). Le REPL texte reste
-// le chemin vivant ; son remplacement par le TUI est la tâche `[ ]` « ALIGNEMENT
-// TUI » de chat.sdd Tasks, pas une décision de purge.
-#[allow(clippy::print_stdout)]
-async fn run_repl(
-    agent: Option<String>,
-    continue_active: bool,
-    toolbox: Option<crate::ToolboxTarget>,
-) {
-    let (mut conv, agent_name, _) = resolve_context(agent, continue_active).await;
-    println!("vanyline REPL (Ctrl-D to exit)");
-    println!("Agent: {agent_name}");
-    if let Some(title) = &conv.title {
-        println!("Conversation: {} ({})", title, conv.id);
-    } else {
-        println!("Conversation: {}", conv.id);
-    }
-    println!();
-
-    let workspace_context = read_workspace_context();
-
-    loop {
-        let mut input = String::new();
-        print!("> ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-        if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
-            break;
-        }
-        let input = input.trim().to_string();
-        if input.is_empty() {
-            continue;
-        }
-
-        // Contexte reconstruit PAR TOUR (jeton du toolbox rafraîchi à chaque
-        // message, décision 2026-10-08) ; le todo repart de l'état re-persisté
-        // au tour précédent (`conv.todo`), d'où une continuité entre tours.
-        let ctx = build_turn_context(toolbox.as_ref(), false, None, conv.todo.clone()).await;
-
-        match process_turn(
-            &conv,
-            &agent_name,
-            &ctx,
-            workspace_context.as_deref(),
-            &input,
-        )
-        .await
-        {
-            Ok(result) => {
-                conv.messages.push(vanyline_lib::Message {
-                    role: "user".to_string(),
-                    content: input.clone(),
-                    tool_calls: None,
-                });
-                conv.messages.push(result_to_assistant_message(result));
-                conv.todo = read_todo_state(&ctx.todo_state);
-                store::save_conversation(&conv).ok();
-            }
-            Err(_) => break,
-        }
-    }
-    println!();
-}
+// L'ancien REPL texte (run_repl : bannière, prompt `> `, lecture de lignes,
+// @StdoutSink interactif) est supprimé par l'ALIGNEMENT TUI (chat.sdd §Must
+// « REPL INTERACTIF = TUI ratatui », `tui/mod.sdd`) — voir @run_interactive.
 
 /// Lit l'état todo courant du handle partagé — même logique de récupération
 /// sur poison que `lib/src/builtin/todo.rs` (`unwrap_or_else(|e| e.into_inner())`) :
 /// un panic dans un tool call ne doit pas empêcher de persister l'état posé
 /// avant le panic.
-fn read_todo_state(state: &std::sync::Mutex<Option<String>>) -> Option<String> {
+pub(crate) fn read_todo_state(state: &std::sync::Mutex<Option<String>>) -> Option<String> {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -302,6 +312,31 @@ async fn build_turn_context(
     }
 }
 
+/// Variante ouverte au TUI (`tui/mod.rs`) : même construction tour par tour,
+/// mais l'échec de `owner_token` remonte un message au lieu de terminer le
+/// processus — dans l'écran alternatif, seule la garde RAII du TUI parle au
+/// terminal ; c'est la boucle qui rend l'erreur visible (`Notice`), puis
+/// l'appelant qui termine après restauration (`tui/mod.sdd` §Must not).
+pub(crate) async fn try_build_turn_context(
+    toolbox: Option<&crate::ToolboxTarget>,
+    json: bool,
+    model_override: Option<&str>,
+    todo_seed: Option<String>,
+) -> Result<vanyline_lib::session::SessionContext, String> {
+    match toolbox {
+        Some(target) => {
+            let token = owner_token_checked(target).await?;
+            Ok(build_session_context(
+                Some((target.url.as_str(), token.as_str())),
+                json,
+                model_override,
+                todo_seed,
+            ))
+        }
+        None => Ok(build_session_context(None, json, model_override, todo_seed)),
+    }
+}
+
 /// Obtient le jeton d'Owner du tour pour la cible `target` et vérifie sa
 /// fenêtre de vie : `exp` lu dans le JWT décodé SANS vérifier la signature ;
 /// sous `TOOLBOX_TOKEN_MIN_SECS` (ou `exp` absent/illisible — traité comme
@@ -317,14 +352,29 @@ async fn owner_token_for_turn(target: &crate::ToolboxTarget) -> String {
     // §Must « JETON DU TOOLBOX PAR TOUR », doc in-line : message sur stderr
     // puis exit(1) comme les autres terminaisons).
     #[allow(clippy::print_stderr)]
+    match owner_token_checked(target).await {
+        Ok(token) => token,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Obtient le jeton d'Owner du tour pour la cible `target` et vérifie sa
+/// fenêtre de vie : `exp` lu dans le JWT décodé SANS vérifier la signature ;
+/// sous `TOOLBOX_TOKEN_MIN_SECS` (ou `exp` absent/illisible — traité comme
+/// expiré) un `tracing::warn!` factuel est émis puis on poursuit avec ce
+/// jeton. Le jeton et l'en-tête ne sont JAMAIS loggés. Un échec de
+/// `owner_token` (Owner sans SA, cluster injoignable) remonte le message
+/// @Display de l'erreur en `Err` — la terminaison (stderr + exit(1), ou
+/// `Notice` visible dans le TUI) appartient à l'appelant.
+async fn owner_token_checked(target: &crate::ToolboxTarget) -> Result<String, String> {
     let jeton = target
         .client
         .owner_token(&target.owner)
         .await
-        .unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(1);
-        });
+        .map_err(|e| e.to_string())?;
     match jwt_exp_remaining(&jeton.token) {
         Some(remaining) if remaining >= TOOLBOX_TOKEN_MIN_SECS => {}
         Some(remaining) => tracing::warn!(
@@ -337,7 +387,7 @@ async fn owner_token_for_turn(target: &crate::ToolboxTarget) -> String {
              poursuite avec ce jeton"
         ),
     }
-    jeton.token
+    Ok(jeton.token)
 }
 
 /// Décode une chaîne base64url (alphabet URL, rembourrage absent ou
@@ -433,7 +483,10 @@ fn read_workspace_context() -> Option<String> {
     std::fs::read_to_string("AGENTS.md").ok()
 }
 
-async fn process_turn(
+/// Exécute un tour : historique filtré (rôles `user`/`assistant` seuls, texte
+/// seul — `chat.sdd` §Must) puis `run_agent_turn`. Ouvert au TUI, qui lance
+/// chaque tour dans sa tâche dédiée (`tui/mod.sdd` §Handles « Tour »).
+pub(crate) async fn process_turn(
     conv: &vanyline_lib::Conversation,
     agent_name: &str,
     ctx: &vanyline_lib::session::SessionContext,
@@ -461,7 +514,7 @@ async fn process_turn(
 /// `id`) en `types::Message` à persister dans la conversation CLI
 /// (`types::ToolCall`, PAS d'`id` — champ abandonné à la persistance, la
 /// corrélation call/result n'a de sens que pendant le tour lui-même).
-fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message {
+pub(crate) fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message {
     let tool_calls: Vec<vanyline_lib::ToolCall> = result
         .tool_calls
         .iter()

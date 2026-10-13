@@ -40,6 +40,14 @@ Must:
 Must not:
   Insérer des caractères de contrôle autres que `\n` (les ignorer).
 
+Tasks:
+  [?] Position du curseur sur les lignes trop larges (signalée S7, 2026-10-13) :
+    @display_cursor est rendu par ligne logique (`Cursor::position()` de crossterm, sans
+    wrap) ; quand une ligne dépasse la zone de saisie, `Editor::insert` avance le curseur
+    jusqu'au bord et le clipping est déterministe mais non contracté, et `width()` (largeur
+    Unicode) n'est pas comparé aux lignes affichées. Contracter le comportement de wrap du
+    curseur dans cette spec, ou assumer la ligne logique sans wrap ?
+
 Scenario: insertion_et_curseur
   Given une saisie vide
   When `Insert('a')`, `Insert('é')`

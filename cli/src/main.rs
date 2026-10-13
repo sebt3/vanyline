@@ -24,6 +24,7 @@ mod skill_cmd;
 mod toolset_cmd;
 
 mod rpc;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::prelude::*;

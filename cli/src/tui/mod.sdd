@@ -76,7 +76,8 @@ Must not:
 
 Tasks:
   [ ] Dépendances du crate `cli` : `ratatui`, `crossterm` (feature `event-stream`), `futures`,
-    `unicode-width`, `textwrap`, `pulldown-cmark` (rendu markdown) ; vérifier le harnais clippy sur ces
+    `unicode-width`, `pulldown-cmark` (rendu markdown) — `textwrap` RETIRÉ 2026-10-14
+    (validateur S7 : 0 usage dans le code, dépendance fantôme) ; vérifier le harnais clippy sur ces
     usages (casts de coordonnées, `arithmetic_side_effects`).
   [?] Écran alternatif contre vue « inline » (`Viewport::Inline`) : l'écran alternatif perd le
     défilement natif du terminal à la sortie (compensé par la ligne finale et `vanyline -c`) ; une
@@ -85,6 +86,24 @@ Tasks:
   [?] Support de la souris (défilement à la molette) : activé par défaut ? La capture de la souris
     empêche la sélection native du terminal (Maj+clic la rétablit). Départ : molette activée,
     `--no-mouse` pour la désactiver.
+  [?] Le drapeau `--no-mouse` n'est PAS posé (S7, 2026-10-13) : la grammaire clap est
+    figée par chat.sdd/main.sdd (aucun flag TUI) et le défaut « molette activée » est en
+    dur. Élargir la grammaire d'un flag global `--no-mouse`, ou retirer le drapeau du
+    départ et assumer la molette toujours active ?
+  [?] Panique dans la tâche de tour (S7, 2026-10-13) : non détectée par la boucle — le
+    `JoinHandle` n'est pas pollé, le canal mpsc fermé par la chute de la tâche se traduit
+    par une fin de flux mais l'état reste `Running` si la panique n'a pas rendu de
+    résultat. Contracter la détection (poll du handle, effet « tour interrompu ») dans
+    §Tour, ou assumer (le cas est une bug de notre code, pas un événement utilisateur) ?
+  [?] @TuiSession hors §Exposes (revue S7, 2026-10-14) : la struct réelle porte
+    `toolbox` (requis par le §Must « jeton du toolbox par tour » de `../chat.sdd` — le
+    §Exposes est inachevé sur ce point) et `mouse` (départ du `[?]` souris, en dur à
+    `true`). Ratifier ces deux champs dans §Exposes ?
+  [?] Ligne finale de sortie « par le backend » (§Handles Sortie vs code, revue S7,
+    2026-10-14) : le code l'écrit via `std::io::Write` APRÈS restauration de l'écran
+    (commentaire « hors backend » assumé — le harnais `print_stdout` interdit d'écrire
+    dans le backend après sa chute). Reformuler §Sortie en « une ligne finale écrite après
+    restauration, hors écran alternatif », ou exiger le backend ?
   [ ] Convertir chaque Scenario en test (`TestBackend` pour la vue, tests unitaires purs pour
     l'état).
 
