@@ -3,18 +3,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::ByteString;
-use k8s_openapi::api::apps::v1::{Deployment, DeploymentCondition, DeploymentSpec};
+use k8s_openapi::api::apps::v1::{
+    Deployment, DeploymentCondition, DeploymentSpec, StatefulSet, StatefulSetSpec,
+};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
-    Secret, SecretKeySelector, Service, ServiceAccount, ServicePort, ServiceSpec,
+    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PersistentVolumeClaim,
+    PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Secret, SecretKeySelector, Service,
+    ServiceAccount, ServicePort, ServiceSpec, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
-    IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
+    IngressServiceBackend, IngressSpec, IngressTLS, NetworkPolicy, NetworkPolicyIngressRule,
+    NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec, ServiceBackendPort,
 };
 use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
-    Condition, LabelSelector, ObjectMeta, OwnerReference,
+    Condition, LabelSelector, LabelSelectorRequirement, ObjectMeta, OwnerReference,
 };
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, Patch, PatchParams, PostParams};
@@ -22,7 +27,11 @@ use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
 
 use crate::error::ControllerError;
+use crate::namespace::APP_NAMESPACE_LABEL;
 use crate::owner::FIELD_MANAGER;
+use crate::sandbox::{
+    RESTATE_INGRESS_PORT, RESTATE_LABEL, restate_ingress_url, restate_service_name,
+};
 use vanyline_crds::{Application, ApplicationStatus};
 
 /// Port HTTP du Deployment `app` — défaut de `LISTEN_ADDR` côté
@@ -32,6 +41,23 @@ pub const APP_PORT: i32 = 8080;
 /// Label unique porté par le Deployment `app` et utilisé comme sélecteur du
 /// Service — même patron que `build_sandbox_service`.
 pub const APP_LABEL: &str = "vanyline.solidite.fr/application";
+
+/// Port d'admin HTTP du moteur Restate (enregistrement des services, statut
+/// des runs) — exposé par le Service `<application>-restate` et joignable par
+/// le pod `app` (`application.sdd` « Moteur de workflow »).
+pub const RESTATE_ADMIN_PORT: i32 = 9070;
+
+/// Port de nœud (socket worker) du moteur Restate — troisième port du Service
+/// `<application>-restate`.
+pub const RESTATE_WORKER_PORT: i32 = 5122;
+
+/// Taille par défaut du `volumeClaimTemplate` de données de Restate quand
+/// `spec.restate.storageSize` est absent (repli appliqué par ce reconciler,
+/// jamais par `vanyline-crds`).
+const RESTATE_DEFAULT_STORAGE_SIZE: &str = "5Gi";
+
+/// Point de montage du volume de données dans le pod Restate (`RESTATE_DATA_DIR`).
+const RESTATE_DATA_DIR: &str = "/var/restate";
 
 /// Nom commun des objets créés pour une Application : Deployment, Service et
 /// Ingress — `application-<name>` (même convention que `sandbox-<name>`).
@@ -95,10 +121,14 @@ pub fn build_application_service_account(app: &Application) -> ServiceAccount {
 }
 
 /// `Role` (namespaced, jamais `ClusterRole` — `app` ne gère que les CRs de son
-/// propre namespace) donnant à `app` exactement les verbes utilisés par
-/// `vanyline_lib::k8s::VnlK8sClient` : CRUD sur owners/projects, CRUD + patch
-/// (suspension) sur sandboxes, lecture seule sur applications (`app` ne
-/// modifie jamais sa propre CR).
+/// propre namespace) à DEUX règles sur l'unique apiGroup
+/// `vanyline.solidite.fr` (`app` ne modifie jamais sa propre CR) :
+/// `owners` (get/list/create/delete) et `applications` (get seul). Les droits
+/// sur `projects`, `sandboxes` et `serviceaccounts/token` ne sont PLUS ici :
+/// ils vivent dans les namespaces d'Owner, par le `RoleBinding`
+/// `vanyline-app` que le controller y crée (`namespace.sdd`, `ClusterRole`
+/// `vanyline-app-owner-scope`), donc limités aux Owners que l'app sert
+/// (UN OWNER = UN NAMESPACE, décision 2026-10-04).
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_application_role(app: &Application) -> Role {
     Role {
@@ -111,26 +141,12 @@ pub fn build_application_role(app: &Application) -> Role {
         rules: Some(vec![
             PolicyRule {
                 api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
-                resources: Some(vec!["owners".to_string(), "projects".to_string()]),
+                resources: Some(vec!["owners".to_string()]),
                 verbs: vec![
                     "get".to_string(),
                     "list".to_string(),
                     "create".to_string(),
                     "delete".to_string(),
-                ],
-                ..Default::default()
-            },
-            PolicyRule {
-                api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
-                resources: Some(vec!["sandboxes".to_string()]),
-                // `watch` : hub WS `/api/ws/sandbox-state` (kube-runtime watcher).
-                verbs: vec![
-                    "get".to_string(),
-                    "list".to_string(),
-                    "watch".to_string(),
-                    "create".to_string(),
-                    "delete".to_string(),
-                    "patch".to_string(),
                 ],
                 ..Default::default()
             },
@@ -300,6 +316,26 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
         }),
         ..Default::default()
     });
+    // Moteur de workflow (« Moteur de workflow », S6c) : URL internes du
+    // Service `<nom CR>-restate` seulement quand `spec.restate` est Some —
+    // sinon l'app démarre sans moteur (aucune variable `VNL_RESTATE_*`).
+    if app.spec.restate.is_some() {
+        let ns_for_url = app.namespace().unwrap_or_else(|| "default".to_string());
+        env.push(EnvVar {
+            name: "VNL_RESTATE_ADMIN_URL".to_string(),
+            value: Some(format!(
+                "http://{}.{}.svc:{RESTATE_ADMIN_PORT}",
+                restate_service_name(&app.name_any()),
+                ns_for_url
+            )),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: "VNL_RESTATE_INGRESS_URL".to_string(),
+            value: Some(restate_ingress_url(&app.name_any(), &ns_for_url)),
+            ..Default::default()
+        });
+    }
 
     let probe = Probe {
         http_get: Some(HTTPGetAction {
@@ -486,11 +522,267 @@ pub fn build_cookie_secret(app: &Application, cookie_data_value: String) -> Secr
     }
 }
 
+/// `StatefulSet` Restate de l'Application (`<nom CR>-restate`, UN réplica) —
+/// sous-ressource contractée par `application.sdd` « Moteur de workflow »,
+/// créée seulement quand `spec.restate` est présent (le gate est à l'appelant,
+/// `reconcile`). OBLIGATION S6b : le label `vanyline.solidite.fr/restate:
+/// <nom CR nu>` (`RESTATE_LABEL` de `./sandbox.rs`) est posé sur le POD
+/// TEMPLATE (et le selector) — cible des règles egress des sandboxes et de la
+/// `NetworkPolicy` ci-dessous ; sans lui les règles ne matchent rien.
+/// Image : `spec.restate.image` sinon `default_image` (flag `--restate-image`
+/// / env `RESTATE_IMAGE` du controller). `volumeClaimTemplate` « data » :
+/// taille `spec.restate.storageSize` (défaut `"5Gi"`), `storageClass`
+/// optionnelle (classe par défaut du cluster).
+// tooling.sdd D4 — application.sdd §« Moteur de workflow » : le StatefulSet
+// Restate est contracté d'un seul tenant (labels/ports/env/volumeClaimTemplate
+// du pod unique) — la scinder diluerait le motif de construction.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_restate_statefulset(app: &Application, default_image: &str) -> StatefulSet {
+    let name = restate_service_name(&app.name_any());
+    let restate = app.spec.restate.clone().unwrap_or_default();
+    let image = restate.image.unwrap_or_else(|| default_image.to_string());
+    let storage_size = restate
+        .storage_size
+        .unwrap_or_else(|| RESTATE_DEFAULT_STORAGE_SIZE.to_string());
+
+    let mut labels = BTreeMap::new();
+    labels.insert(RESTATE_LABEL.to_string(), app.name_any());
+
+    let mut requests = BTreeMap::new();
+    requests.insert("storage".to_string(), Quantity(storage_size));
+
+    StatefulSet {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            namespace: app.namespace(),
+            owner_references: Some(vec![app_owner_ref(app)]),
+            ..Default::default()
+        },
+        spec: Some(StatefulSetSpec {
+            replicas: Some(1),
+            service_name: Some(name.clone()),
+            selector: LabelSelector {
+                match_labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        name: "restate".to_string(),
+                        image: Some(image),
+                        ports: Some(vec![
+                            ContainerPort {
+                                name: Some("ingress".to_string()),
+                                container_port: RESTATE_INGRESS_PORT,
+                                ..Default::default()
+                            },
+                            ContainerPort {
+                                name: Some("admin".to_string()),
+                                container_port: RESTATE_ADMIN_PORT,
+                                ..Default::default()
+                            },
+                            ContainerPort {
+                                name: Some("worker".to_string()),
+                                container_port: RESTATE_WORKER_PORT,
+                                ..Default::default()
+                            },
+                        ]),
+                        env: Some(vec![
+                            EnvVar {
+                                name: "RESTATE_CLUSTER_NAME".to_string(),
+                                value: Some(app.name_any()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "RESTATE_BOOTSTRAP_CLUSTER".to_string(),
+                                value: Some("true".to_string()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "RESTATE_INGRESS_SOCKET".to_string(),
+                                value: Some(format!("0.0.0.0:{RESTATE_INGRESS_PORT}")),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "RESTATE_ADMIN_SOCKET".to_string(),
+                                value: Some(format!("0.0.0.0:{RESTATE_ADMIN_PORT}")),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "RESTATE_WORKER_SOCKET".to_string(),
+                                value: Some(format!("0.0.0.0:{RESTATE_WORKER_PORT}")),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "RESTATE_DATA_DIR".to_string(),
+                                value: Some(RESTATE_DATA_DIR.to_string()),
+                                ..Default::default()
+                            },
+                        ]),
+                        volume_mounts: Some(vec![VolumeMount {
+                            name: "data".to_string(),
+                            mount_path: RESTATE_DATA_DIR.to_string(),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+            },
+            volume_claim_templates: Some(vec![PersistentVolumeClaim {
+                metadata: ObjectMeta {
+                    name: Some("data".to_string()),
+                    ..Default::default()
+                },
+                spec: Some(PersistentVolumeClaimSpec {
+                    access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                    storage_class_name: restate.storage_class,
+                    resources: Some(VolumeResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
+/// Service Restate de l'Application : `<nom CR>-restate`
+/// (`restate_service_name` de `./sandbox.rs`, PAS `application_name`),
+/// sélecteur `{RESTATE_LABEL: <nom CR nu>}`, trois ports — ingress 8080,
+/// admin 9070, port de nœud (worker) 5122. Type non posé (`ClusterIP`) : ce
+/// Service n'est JAMAIS exposé par un Ingress (`application.sdd` « Moteur de
+/// workflow »).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_restate_service(app: &Application) -> Service {
+    let mut selector = BTreeMap::new();
+    selector.insert(RESTATE_LABEL.to_string(), app.name_any());
+
+    let port = |name: &str, number: i32| ServicePort {
+        name: Some(name.to_string()),
+        port: number,
+        target_port: Some(IntOrString::Int(number)),
+        ..Default::default()
+    };
+
+    Service {
+        metadata: ObjectMeta {
+            name: Some(restate_service_name(&app.name_any())),
+            namespace: app.namespace(),
+            owner_references: Some(vec![app_owner_ref(app)]),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            selector: Some(selector),
+            ports: Some(vec![
+                port("ingress", RESTATE_INGRESS_PORT),
+                port("admin", RESTATE_ADMIN_PORT),
+                port("worker", RESTATE_WORKER_PORT),
+            ]),
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
+/// `NetworkPolicy` du namespace d'application ciblant les pods Restate de
+/// cette Application (label `RESTATE_LABEL`) — tâche S6c : l'ingress (8080) et
+/// l'admin (9070) de Restate sont joignables par le pod `app` (pair même
+/// namespace, label `APP_LABEL`) ; les pods sandbox des namespaces d'Owner
+/// (labels `APP_NAMESPACE_LABEL` sur le Namespace,
+/// `vanyline.solidite.fr/sandbox` sur le pod) n'appellent QUE l'ingress 8080 —
+/// callback d'awakeable des jobs (`../../sandbox/src/jobs.sdd`), miroir de la
+/// règle egress livrée S6b (`sandbox.rs::restate_egress_rule`). La netpol
+/// sélectionnant les pods restate, tout autre trafic ingress vers eux est
+/// fermé par le sémantisme même des `NetworkPolicy` K8s.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_restate_netpol(app: &Application) -> NetworkPolicy {
+    let mut pod_selector_labels = BTreeMap::new();
+    pod_selector_labels.insert(RESTATE_LABEL.to_string(), app.name_any());
+
+    // Pair app : pod `app` du même namespace (le Service/le pod vivent dans le
+    // namespace d'application) — ingress + admin.
+    let app_peer = NetworkPolicyPeer {
+        pod_selector: Some(LabelSelector {
+            match_labels: Some(BTreeMap::from([(APP_LABEL.to_string(), app.name_any())])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Pair sandbox : tous les namespaces d'Owner de CETTE application
+    // (`APP_NAMESPACE_LABEL` posé par `namespace.rs`), pods portant le label
+    // sandbox — ingress seule.
+    let sandbox_peer = NetworkPolicyPeer {
+        namespace_selector: Some(LabelSelector {
+            match_labels: Some(BTreeMap::from([(
+                APP_NAMESPACE_LABEL.to_string(),
+                app.namespace().unwrap_or_else(|| "default".to_string()),
+            )])),
+            ..Default::default()
+        }),
+        pod_selector: Some(LabelSelector {
+            match_labels: None,
+            match_expressions: Some(vec![LabelSelectorRequirement {
+                key: "vanyline.solidite.fr/sandbox".to_string(),
+                operator: "Exists".to_string(),
+                values: None,
+            }]),
+        }),
+        ..Default::default()
+    };
+
+    let port = |number: i32| NetworkPolicyPort {
+        port: Some(IntOrString::Int(number)),
+        protocol: Some("TCP".to_string()),
+        end_port: None,
+    };
+
+    NetworkPolicy {
+        metadata: ObjectMeta {
+            name: Some(format!("{}-netpol", restate_service_name(&app.name_any()))),
+            namespace: app.namespace(),
+            owner_references: Some(vec![app_owner_ref(app)]),
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(pod_selector_labels),
+                ..Default::default()
+            }),
+            policy_types: Some(vec!["Ingress".to_string()]),
+            ingress: Some(vec![
+                NetworkPolicyIngressRule {
+                    from: Some(vec![app_peer]),
+                    ports: Some(vec![port(RESTATE_INGRESS_PORT), port(RESTATE_ADMIN_PORT)]),
+                },
+                NetworkPolicyIngressRule {
+                    from: Some(vec![sandbox_peer]),
+                    ports: Some(vec![port(RESTATE_INGRESS_PORT)]),
+                },
+            ]),
+            ..Default::default()
+        }),
+    }
+}
+
 pub struct Context {
     pub client: Client,
     /// Image `app` par défaut (`--app-image-tag`/`APP_IMAGE_TAG` du
     /// controller), utilisée quand `Application.spec.image` est `None`.
     pub default_image: String,
+    /// Image Restate par défaut (`--restate-image`/`RESTATE_IMAGE` du
+    /// controller), utilisée quand `Application.spec.restate.image` est `None`
+    /// (« Moteur de workflow », `application.sdd`).
+    pub restate_image: String,
 }
 
 /// Génère la valeur de `data["cookieSecret"]` pour le Secret cookie auto-généré :
@@ -649,6 +941,47 @@ pub async fn reconcile(
     let ingress = build_application_ingress(&app);
     ingresses.patch(&name, &pp, &Patch::Apply(&ingress)).await?;
 
+    // Moteur de workflow (« Moteur de workflow », application.sdd) : quand
+    // `spec.restate` est présent, le StatefulSet, le Service et la
+    // NetworkPolicy Restate sont appliqués comme sous-ressources de
+    // l'Application ; sans `spec.restate`, aucune de ces ressources n'existe
+    // (suppression conditionnelle, même patron que la netpol egress de
+    // sandbox.rs).
+    let restate_name = restate_service_name(&app.name_any());
+    let restate_netpol_name = format!("{restate_name}-netpol");
+    let stateful_sets: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
+    let netpols: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
+    if app.spec.restate.is_some() {
+        let sts = build_restate_statefulset(&app, &ctx.restate_image);
+        stateful_sets
+            .patch(&restate_name, &pp, &Patch::Apply(&sts))
+            .await?;
+        let restate_service = build_restate_service(&app);
+        services
+            .patch(&restate_name, &pp, &Patch::Apply(&restate_service))
+            .await?;
+        let restate_netpol = build_restate_netpol(&app);
+        netpols
+            .patch(&restate_netpol_name, &pp, &Patch::Apply(&restate_netpol))
+            .await?;
+    } else {
+        if stateful_sets.get_opt(&restate_name).await?.is_some() {
+            stateful_sets
+                .delete(&restate_name, &kube::api::DeleteParams::default())
+                .await?;
+        }
+        if services.get_opt(&restate_name).await?.is_some() {
+            services
+                .delete(&restate_name, &kube::api::DeleteParams::default())
+                .await?;
+        }
+        if netpols.get_opt(&restate_netpol_name).await?.is_some() {
+            netpols
+                .delete(&restate_netpol_name, &kube::api::DeleteParams::default())
+                .await?;
+        }
+    }
+
     let applications: Api<Application> = Api::namespaced(ctx.client.clone(), &ns);
     let status = compute_status(&app, &phase);
     let patch = serde_json::json!({ "status": status });
@@ -704,6 +1037,7 @@ mod tests {
                 ingress_annotations: BTreeMap::new(),
                 ingress_controller: None,
                 storage_defaults: None,
+                restate: None,
             },
         );
         app.meta_mut().namespace = Some("ns".into());
@@ -1041,6 +1375,70 @@ mod tests {
         );
     }
 
+    // Scenario (Must « Moteur de workflow », S6c) : quand `spec.restate` est
+    // `Some`, l'env du Deployment `app` reçoit `VNL_RESTATE_ADMIN_URL` et
+    // `VNL_RESTATE_INGRESS_URL` (URL internes du Service `<nom CR>-restate`) ;
+    // sans `spec.restate`, aucune de ces deux variables.
+    #[test]
+    fn build_application_deployment_env_restate_urls() {
+        let container_env = |app: &Application| {
+            build_application_deployment(app, TEST_APP_IMAGE)
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .containers
+                .first()
+                .expect("should have 1 container")
+                .env
+                .as_ref()
+                .expect("should have env")
+                .clone()
+        };
+
+        // restate Some ⇒ 12 variables, les deux URL en valeurs littérales.
+        let mut app = make_application("demo");
+        app.spec.restate = Some(vanyline_crds::RestateSpec {
+            image: None,
+            storage_size: None,
+            storage_class: None,
+        });
+        let env = container_env(&app);
+        assert_eq!(
+            env.len(),
+            12,
+            "10 variables de base + 2 URL restate, got {}",
+            env.len()
+        );
+        let find = |name: &str| env.iter().find(|e| e.name == name);
+        let ingress = find("VNL_RESTATE_INGRESS_URL").expect("should have VNL_RESTATE_INGRESS_URL");
+        assert_eq!(
+            ingress.value,
+            Some("http://demo-restate.ns.svc:8080".to_string())
+        );
+        assert!(ingress.value_from.is_none());
+        let admin = find("VNL_RESTATE_ADMIN_URL").expect("should have VNL_RESTATE_ADMIN_URL");
+        assert_eq!(
+            admin.value,
+            Some("http://demo-restate.ns.svc:9070".to_string())
+        );
+        assert!(admin.value_from.is_none());
+
+        // restate None ⇒ aucune de ces deux variables (contrat 10 variables).
+        let app_none = make_application("demo");
+        let env_none = container_env(&app_none);
+        assert_eq!(env_none.len(), 10, "sans restate : exactement 10 variables");
+        assert!(
+            !env_none
+                .iter()
+                .any(|e| e.name == "VNL_RESTATE_INGRESS_URL" || e.name == "VNL_RESTATE_ADMIN_URL"),
+            "aucune URL restate sans spec.restate"
+        );
+    }
+
     // 7. build_application_service_shape
     #[test]
     fn build_application_service_shape() {
@@ -1080,6 +1478,12 @@ mod tests {
         assert_eq!(refs[0].name, "demo");
     }
 
+    // 7bis. Scenario: build_application_role_shape — contrat à DEUX règles
+    // (décision 2026-10-04, S6c) : l'ancien Scenario à trois règles est
+    // remplacé. Les droits sur `projects`, `sandboxes` et
+    // `serviceaccounts/token` ne sont PLUS ici : ils vivent dans les namespaces
+    // d'Owner, par le RoleBinding `vanyline-app` que le controller y crée
+    // (namespace.sdd, ClusterRole `vanyline-app-owner-scope`).
     #[test]
     fn build_application_role_shape() {
         let app = make_application("demo");
@@ -1087,40 +1491,30 @@ mod tests {
 
         assert_eq!(role.metadata.name, Some("application-demo".to_string()));
         let rules = role.rules.as_ref().expect("should have rules");
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 2, "le Role porte exactement DEUX règles");
 
-        let owners_projects = rules
+        for rule in rules {
+            assert_eq!(
+                rule.api_groups,
+                Some(vec!["vanyline.solidite.fr".to_string()]),
+                "unique apiGroup vanyline.solidite.fr par règle"
+            );
+        }
+
+        let owners = rules
             .iter()
             .find(|r| {
                 r.resources
                     .as_ref()
                     .is_some_and(|r| r.contains(&"owners".to_string()))
             })
-            .expect("should have a rule for owners/projects");
-        assert!(
-            owners_projects
-                .resources
-                .as_ref()
-                .unwrap()
-                .contains(&"projects".to_string())
-        );
+            .expect("should have a rule for owners");
         assert_eq!(
-            owners_projects.verbs,
-            vec!["get", "list", "create", "delete"]
+            owners.resources,
+            Some(vec!["owners".to_string()]),
+            "la règle owners ne porte QUE owners (plus projects)"
         );
-        assert!(!owners_projects.verbs.contains(&"patch".to_string()));
-
-        let sandboxes = rules
-            .iter()
-            .find(|r| {
-                r.resources
-                    .as_ref()
-                    .is_some_and(|r| r.contains(&"sandboxes".to_string()))
-            })
-            .expect("should have a rule for sandboxes");
-        assert!(sandboxes.verbs.contains(&"patch".to_string()));
-        // Le hub WS sandbox-state ouvre un watch kube-runtime sur les sandboxes.
-        assert!(sandboxes.verbs.contains(&"watch".to_string()));
+        assert_eq!(owners.verbs, vec!["get", "list", "create", "delete"]);
 
         let applications = rules
             .iter()
@@ -1131,6 +1525,21 @@ mod tests {
             })
             .expect("should have a rule for applications");
         assert_eq!(applications.verbs, vec!["get"]);
+
+        assert!(
+            rules.iter().all(|r| !r
+                .resources
+                .as_ref()
+                .is_some_and(|res| res.contains(&"projects".to_string()))),
+            "projects n'est PLUS dans le Role de l'app (namespace.sdd)"
+        );
+        assert!(
+            rules.iter().all(|r| !r
+                .resources
+                .as_ref()
+                .is_some_and(|res| res.contains(&"sandboxes".to_string()))),
+            "sandboxes n'est PLUS dans le Role de l'app (namespace.sdd)"
+        );
     }
 
     #[test]
@@ -1361,5 +1770,333 @@ mod tests {
         // Two calls should produce different values
         let value2 = generate_cookie_secret_value();
         assert_ne!(value, value2);
+    }
+
+    // ===== S6c — Moteur de workflow (Must « Moteur de workflow ») =====
+
+    fn restate_app() -> Application {
+        let mut app = make_application("demo");
+        app.spec.restate = Some(vanyline_crds::RestateSpec {
+            image: None,
+            storage_size: None,
+            storage_class: None,
+        });
+        app
+    }
+
+    // Scenario (Must) : StatefulSet `<nom CR>-restate` à UN réplica, label
+    // `vanyline.solidite.fr/restate: <nom CR nu>` sur le POD TEMPLATE (obligation
+    // S6b — cible des règles egress), ownerReference de l'Application, image
+    // `spec.restate.image` sinon le défaut de l'appelant, volumeClaimTemplate
+    // (5Gi par défaut, storageClass optionnelle).
+    // tooling.sdd D4 — le test énumère les champs contractés du StatefulSet un
+    // par un (un bloc par champ) ; la taille suit la table du Must.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn build_restate_statefulset_shape() {
+        let app = restate_app();
+        let sts = build_restate_statefulset(&app, "restate:test");
+
+        assert_eq!(sts.metadata.name, Some("demo-restate".to_string()));
+        assert_eq!(sts.metadata.namespace, Some("ns".to_string()));
+        let refs = sts
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "Application");
+        assert_eq!(refs[0].name, "demo");
+        assert_eq!(refs[0].controller, Some(true));
+
+        let spec = sts.spec.as_ref().expect("should have spec");
+        assert_eq!(spec.replicas, Some(1), "StatefulSet mono-réplica");
+        assert_eq!(
+            spec.service_name.as_deref(),
+            Some("demo-restate"),
+            "serviceName = le Service jumeau"
+        );
+        // Label RESTATE_LABEL posé sur le selector ET le pod template.
+        let selector_labels = spec
+            .selector
+            .match_labels
+            .as_ref()
+            .expect("selector match_labels");
+        assert_eq!(
+            selector_labels
+                .get(crate::sandbox::RESTATE_LABEL)
+                .map(String::as_str),
+            Some("demo")
+        );
+        let template_labels = spec
+            .template
+            .metadata
+            .as_ref()
+            .expect("template metadata")
+            .labels
+            .as_ref()
+            .expect("template labels");
+        assert_eq!(
+            template_labels
+                .get(crate::sandbox::RESTATE_LABEL)
+                .map(String::as_str),
+            Some("demo"),
+            "OBLIGATION S6b : label restate sur le pod template"
+        );
+
+        let pod_spec = spec.template.spec.as_ref().expect("template spec").clone();
+        let container = pod_spec
+            .containers
+            .first()
+            .expect("should have 1 container");
+        assert_eq!(container.name, "restate");
+        assert_eq!(container.image, Some("restate:test".to_string()));
+        let ports = container.ports.as_ref().expect("should have ports");
+        let mut by_port: Vec<i32> = ports.iter().map(|p| p.container_port).collect();
+        by_port.sort_unstable();
+        assert_eq!(by_port, vec![5122, 8080, 9070]);
+
+        // volumeClaimTemplate « data » : RWO, 5Gi par défaut, classe absente.
+        let pvcs = spec
+            .volume_claim_templates
+            .as_ref()
+            .expect("should have volumeClaimTemplates");
+        assert_eq!(pvcs.len(), 1);
+        assert_eq!(pvcs[0].metadata.name.as_deref(), Some("data"));
+        let pvc_spec = pvcs[0].spec.as_ref().expect("pvc spec");
+        assert_eq!(
+            pvc_spec.access_modes,
+            Some(vec!["ReadWriteOnce".to_string()])
+        );
+        assert_eq!(pvc_spec.storage_class_name, None);
+        let requests = pvc_spec
+            .resources
+            .as_ref()
+            .expect("resources")
+            .requests
+            .as_ref()
+            .expect("requests");
+        assert_eq!(
+            requests.get("storage"),
+            Some(&k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                "5Gi".to_string()
+            ))
+        );
+
+        // Montage du volume de données sur le conteneur.
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volumeMounts");
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == "data" && !m.mount_path.is_empty()),
+            "le conteneur monte le volumeClaimTemplate « data »"
+        );
+
+        // Image de `spec.restate.image` gagne sur le défaut de l'appelant.
+        let mut app2 = restate_app();
+        app2.spec.restate.as_mut().expect("restate").image = Some("custom/restate:tag".to_string());
+        let sts2 = build_restate_statefulset(&app2, "restate:test");
+        let container2 = sts2
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .first()
+            .unwrap();
+        assert_eq!(container2.image, Some("custom/restate:tag".to_string()));
+    }
+
+    // Scenario (Must) : replis du volumeClaimTemplate — `storageSize` "8Gi" et
+    // `storageClass` "local-path" posés dans la CR traversent le builder.
+    #[test]
+    fn build_restate_statefulset_storage_from_spec() {
+        let mut app = restate_app();
+        app.spec.restate.as_mut().expect("restate").storage_size = Some("8Gi".to_string());
+        app.spec.restate.as_mut().expect("restate").storage_class = Some("local-path".to_string());
+        let sts = build_restate_statefulset(&app, "restate:test");
+        let pvc = &sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .unwrap()[0];
+        let pvc_spec = pvc.spec.as_ref().unwrap();
+        assert_eq!(pvc_spec.storage_class_name.as_deref(), Some("local-path"));
+        assert_eq!(
+            pvc_spec
+                .resources
+                .as_ref()
+                .unwrap()
+                .requests
+                .as_ref()
+                .unwrap()
+                .get("storage"),
+            Some(&k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                "8Gi".to_string()
+            ))
+        );
+    }
+
+    // Scenario (Must) : Service `<nom CR>-restate` (restate_service_name de
+    // ./sandbox.rs, PAS application_name) exposant ingress 8080, admin 9070,
+    // port de nœud 5122 ; sélecteur sur le label restate ; jamais de type
+    // explicite (ClusterIP — le Service n'est jamais exposé par un Ingress).
+    #[test]
+    fn build_restate_service_shape() {
+        let app = restate_app();
+        let svc = build_restate_service(&app);
+
+        assert_eq!(svc.metadata.name, Some("demo-restate".to_string()));
+        assert_eq!(svc.metadata.namespace, Some("ns".to_string()));
+        let refs = svc
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "demo");
+
+        let spec = svc.spec.as_ref().expect("should have spec");
+        assert!(spec.type_.is_none(), "ClusterIP laissé à l'apiserver");
+        let selector = spec.selector.as_ref().expect("selector");
+        assert_eq!(
+            selector
+                .get(crate::sandbox::RESTATE_LABEL)
+                .map(String::as_str),
+            Some("demo")
+        );
+        let ports = spec.ports.as_ref().expect("should have ports");
+        assert_eq!(ports.len(), 3);
+        for (name, port) in [("ingress", 8080), ("admin", 9070), ("worker", 5122)] {
+            let p = ports
+                .iter()
+                .find(|p| p.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("should have port {name}"));
+            assert_eq!(p.port, port);
+            assert_eq!(p.target_port, Some(IntOrString::Int(port)));
+        }
+    }
+
+    // Scenario (tâche S6c) : NetworkPolicy du namespace d'application ciblant
+    // les pods restate — l'ingress (8080) et l'admin (9070) de Restate sont
+    // joignables par le Deployment `app` ; les pods sandbox des namespaces
+    // d'Owner n'appellent QUE l'ingress 8080 (callback d'awakeable).
+    #[test]
+    fn build_restate_netpol_shape() {
+        let app = restate_app();
+        let netpol = build_restate_netpol(&app);
+
+        assert_eq!(
+            netpol.metadata.name,
+            Some("demo-restate-netpol".to_string())
+        );
+        assert_eq!(netpol.metadata.namespace, Some("ns".to_string()));
+        let refs = netpol
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs[0].name, "demo");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        assert_eq!(
+            spec.pod_selector
+                .as_ref()
+                .and_then(|s| s.match_labels.as_ref())
+                .and_then(|m| m.get(crate::sandbox::RESTATE_LABEL))
+                .map(String::as_str),
+            Some("demo"),
+            "la netpol cible les pods restate de cette Application"
+        );
+        assert_eq!(spec.policy_types, Some(vec!["Ingress".to_string()]));
+
+        let rules = spec.ingress.as_ref().expect("should have ingress rules");
+        assert_eq!(rules.len(), 2);
+
+        // Règle 1 : le pod `app` (même namespace) → 8080 + 9070.
+        let app_rule = rules
+            .iter()
+            .find(|r| {
+                r.from.as_ref().is_some_and(|from| {
+                    from.iter().any(|p| {
+                        p.pod_selector
+                            .as_ref()
+                            .and_then(|s| s.match_labels.as_ref())
+                            .is_some_and(|m| m.contains_key(APP_LABEL))
+                    })
+                })
+            })
+            .expect("règle depuis le pod app");
+        assert!(
+            app_rule
+                .from
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|p| p.namespace_selector.is_none()),
+            "pair même namespace (le pod app vit dans le namespace d'application)"
+        );
+        let mut app_ports: Vec<i32> = app_rule
+            .ports
+            .as_ref()
+            .expect("ports")
+            .iter()
+            .map(|p| match p.port {
+                Some(IntOrString::Int(n)) => n,
+                _ => panic!("port numérique attendu"),
+            })
+            .collect();
+        app_ports.sort_unstable();
+        assert_eq!(app_ports, vec![8080, 9070]);
+
+        // Règle 2 : les pods sandbox des namespaces d'Owner → 8080 seul.
+        let sandbox_rule = rules
+            .iter()
+            .find(|r| {
+                r.from.as_ref().is_some_and(|from| {
+                    from.iter().any(|p| {
+                        p.namespace_selector
+                            .as_ref()
+                            .and_then(|s| s.match_labels.as_ref())
+                            .is_some_and(|m| m.contains_key(crate::namespace::APP_NAMESPACE_LABEL))
+                    })
+                })
+            })
+            .expect("règle depuis les namespaces d'Owner");
+        let peer = sandbox_rule.from.as_ref().unwrap().first().unwrap();
+        assert_eq!(
+            peer.namespace_selector
+                .as_ref()
+                .unwrap()
+                .match_labels
+                .as_ref()
+                .unwrap()
+                .get(crate::namespace::APP_NAMESPACE_LABEL)
+                .map(String::as_str),
+            Some("ns"),
+            "namespaces d'Owner de CETTE application"
+        );
+        let exprs = peer
+            .pod_selector
+            .as_ref()
+            .and_then(|s| s.match_expressions.as_ref())
+            .expect("pod_selector par matchExpressions");
+        assert_eq!(exprs.len(), 1);
+        assert_eq!(exprs[0].key, "vanyline.solidite.fr/sandbox");
+        assert_eq!(exprs[0].operator, "Exists");
+        let sandbox_ports = sandbox_rule.ports.as_ref().expect("ports");
+        assert_eq!(sandbox_ports.len(), 1, "les sandboxes n'appellent QUE 8080");
+        assert!(matches!(
+            sandbox_ports[0].port,
+            Some(IntOrString::Int(8080))
+        ));
     }
 }

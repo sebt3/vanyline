@@ -364,6 +364,12 @@ pub struct ApplicationSpec {
     /// reconcilers Owner/Project retombent sur leurs valeurs historiques
     /// (RWX pour le home, RWO pour le workspace projet).
     pub storage_defaults: Option<ApplicationStorageDefaults>,
+    /// Moteur de workflow comme sous-ressource de l'Application (décision du
+    /// 2026-10-04). L'absence de `restate` EST le contrat « Application sans
+    /// moteur de workflow » ; sa présence commande les sous-ressources Restate
+    /// du reconciler (`controller/src/application.rs`, contrat comportemental :
+    /// `controller/src/application.sdd`).
+    pub restate: Option<RestateSpec>,
 }
 
 /// Défauts de stockage propagés par `app` lors de ses créations lazily
@@ -381,6 +387,29 @@ pub struct ApplicationStorageDefaults {
     pub project_storage_class: Option<String>,
     /// Mode d'accès des PVC workspace de Projects, propagé en env à `app`.
     pub project_access_mode: Option<String>,
+}
+
+/// Spec du moteur de workflow Restate déployé comme sous-ressource de
+/// l'Application (décision du 2026-10-04). Aucun des trois replis n'est
+/// appliqué par ce crate, qui ne transporte que des `Option` : `image` `None`
+/// ⇒ défaut du controller (flag `--restate-image` / env `RESTATE_IMAGE`),
+/// `storageSize` `None` ⇒ `"5Gi"`, `storageClass` `None` ⇒ `StorageClass` par
+/// défaut du cluster — tous trois appliqués par
+/// `controller/src/application.rs`. `storageSize` est une chaîne libre à la
+/// `Quantity` K8s (même convention `homeSize` : c'est l'apiserver qui rejette
+/// une quantité invalide à l'usage, aucune validation ici).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestateSpec {
+    /// Image du `StatefulSet` Restate. None ⇒ défaut du controller (flag
+    /// `--restate-image` / env `RESTATE_IMAGE`).
+    pub image: Option<String>,
+    /// Taille du `volumeClaimTemplate` de données. None ⇒ `"5Gi"` (repli
+    /// appliqué par le controller, jamais ici).
+    pub storage_size: Option<String>,
+    /// `StorageClass` du `volumeClaimTemplate`. None ⇒ classe par défaut du
+    /// cluster.
+    pub storage_class: Option<String>,
 }
 
 /// Status de l'Application, posé par son reconciler.
@@ -695,6 +724,12 @@ mod tests {
             spec_props.contains_key("ingressController"),
             "Application schema should contain 'ingressController', got: {spec_props:?}"
         );
+        // S6c : `restate` doit être une propriété du schéma (extension du test,
+        // Scenario `application_schema_fields`).
+        assert!(
+            spec_props.contains_key("restate"),
+            "Application schema should contain 'restate', got: {spec_props:?}"
+        );
     }
 
     #[test]
@@ -708,6 +743,9 @@ mod tests {
         assert!(spec.ingress_controller.is_none());
         assert!(spec.tls_issuer_kind.is_none());
         assert!(spec.storage_defaults.is_none());
+        // S6c : l'absence de `restate` EST le contrat « Application sans moteur
+        // de workflow » (extension du test, Scenario `application_defaults`).
+        assert!(spec.restate.is_none());
     }
 
     #[test]
@@ -744,6 +782,7 @@ mod tests {
                 project_storage_class: None,
                 project_access_mode: None,
             }),
+            restate: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         for key in [
@@ -1281,5 +1320,117 @@ mod tests {
         let err =
             owner_namespace_name(&"a".repeat(32), &"b".repeat(31)).expect_err("64 caracteres > 63");
         assert!(err.contains("63"), "l'erreur porte la raison, got: {err}");
+    }
+
+    // Scenario: restate_spec_camel_case_roundtrip
+    #[test]
+    fn restate_spec_camel_case_roundtrip() {
+        let spec = ApplicationSpec {
+            image: None,
+            replicas: None,
+            oidc_secret_ref: "oidc".to_string(),
+            database_secret_ref: "db".to_string(),
+            cookie_secret_ref: None,
+            host: "app.example.com".to_string(),
+            ingress_class_name: "nginx".to_string(),
+            tls_issuer_name: "self-sign".to_string(),
+            tls_issuer_kind: None,
+            ingress_annotations: BTreeMap::new(),
+            ingress_controller: None,
+            storage_defaults: None,
+            restate: Some(RestateSpec {
+                image: Some("img".to_string()),
+                storage_size: Some("8Gi".to_string()),
+                storage_class: Some("local-path".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        for key in ["restate", "storageSize", "storageClass"] {
+            assert!(
+                json.contains(key),
+                "should contain {key} (camelCase), got: {json}"
+            );
+        }
+        assert!(
+            !json.contains("storage_size"),
+            "should not contain storage_size (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("storage_class"),
+            "should not contain storage_class (snake_case), got: {json}"
+        );
+        let back: ApplicationSpec = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(
+            json, json2,
+            "image/storageSize/storageClass survivent au roundtrip a l'identique"
+        );
+    }
+
+    // Scenario: restate_spec_champs_tous_optionnels
+    #[test]
+    fn restate_spec_champs_tous_optionnels() {
+        let spec: RestateSpec =
+            serde_json::from_str("{}").expect("un RestateSpec vide doit se deserialiser");
+        assert!(spec.image.is_none());
+        assert!(spec.storage_size.is_none());
+        assert!(spec.storage_class.is_none());
+        // Aucun skip_serializing_if : le default rend les trois cles a null.
+        let json = serde_json::to_string(&RestateSpec::default()).unwrap();
+        for key in [
+            r#""image":null"#,
+            r#""storageSize":null"#,
+            r#""storageClass":null"#,
+        ] {
+            assert!(
+                json.contains(key),
+                "le RestateSpec par defaut doit emettre {key} (aucun skip_serializing_if), got: {json}"
+            );
+        }
+    }
+
+    // Scenario: restate_schema_proprietes_optionnelles
+    #[test]
+    fn restate_schema_proprietes_optionnelles() {
+        let crd = Application::crd();
+        let oas = &crd.spec.versions[0]
+            .schema
+            .as_ref()
+            .unwrap()
+            .open_api_v3_schema
+            .as_ref()
+            .unwrap();
+        let spec_props_owner = oas.properties.as_ref().unwrap()["spec"]
+            .properties
+            .as_ref()
+            .unwrap();
+        // `restate` absent du `required` de la spec (Option => optionnel).
+        let spec_required = oas.properties.as_ref().unwrap()["spec"]
+            .required
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            !spec_required.contains(&"restate".to_string()),
+            "restate ne doit pas etre requis au niveau spec, got: {spec_required:?}"
+        );
+        // Sous-schema inliné (même forme que `projectDefaults`/`storageDefaults`) :
+        // objet aux trois proprietes, aucune requise (toutes Option).
+        let restate = &spec_props_owner["restate"];
+        assert_eq!(restate.type_.as_deref(), Some("object"));
+        let props = restate
+            .properties
+            .as_ref()
+            .expect("restate doit exposer des proprietes");
+        for key in ["image", "storageSize", "storageClass"] {
+            assert!(
+                props.contains_key(key),
+                "restate doit exposer la propriete {key}, got: {props:?}"
+            );
+        }
+        assert!(
+            restate.required.clone().unwrap_or_default().is_empty(),
+            "aucune sous-proprieté de restate ne doit etre requise (toutes Option), got: {:?}",
+            restate.required
+        );
     }
 }

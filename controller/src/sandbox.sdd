@@ -459,19 +459,34 @@ Handles:
     (suppression de la CR jamais bloquée éternellement par un prérequis manquant).
 
 Tasks:
-  [ ] Activer le wiring restate de @apply (S6b 2026-10-10) : remplacer le `None`
+  [x] Activer le wiring restate de @apply (S6b 2026-10-10) : remplacer le `None`
     marqué « BLOQUÉE CRDS » dans le code par le bloc commenté livré (résolution de
     l'Application via `namespace::app_namespace_of` + @fetch_application, motif Ingress
     cross-namespace) et passer @restate_ingress_url aux builders. Bloquant :
     `ApplicationSpec.restate` dans /crds/src/lib.sdd (tâche ./application.sdd
     l.323 — qui porte aussi l'obligation @RESTATE_LABEL sur le pod template).
-  [ ] Passer la branche par défaut du Project au pod de la sandbox (var d'environnement
+    — FAIT 2026-10-13 (S6c), validator-vert : bloc décommenté mot pour mot, URL passée à
+    @build_sandbox_pod et règle egress à la netpol, zéro occurrence « BLOQUÉE CRDS »
+    restante ; résolution cross-namespace sous la convention tests purs du crate
+    (couverture cluster due). Nuance : `apps.get` inline (comme le bloc livré) plutôt que
+    @fetch_application — vu au `[?]` mutualisation ci-dessous.
+  [x] Passer la branche par défaut du Project au pod de la sandbox (var d'environnement
     `VNL_HEALTH_BASE_REF`, valeur `project.spec.default_branch` seulement, absente si
     `None`/vide — même règle de vacuité que le `--default-branch` du Job checkout,
     l.414) : le Handles de ../sandbox/src/health.sdd contracte « la branche par défaut
     du Project quand elle est fournie par le controller » comme base initiale de la vue
     « code neuf ». Côté sandbox : champ @Config + @CodeHealth (lot H3, ../sandbox/src/
     health.sdd).
+    — FAIT 2026-10-10 (H3b `936a916`), validator-vert 2026-10-13 : position d'env contractée
+    tenue (après `VNL_SANDBOX_ROOT`), vacuité `Some`+non-vide, tests
+    `vnl_health_base_ref_env_with_default_branch`/`_absent_without_default_branch`/
+    `_absent_when_default_branch_empty` + versant sandbox (`Config.health_base_ref`,
+    base sticky dans `../sandbox/src/health.rs`) — chaîne complète vérifiée.
+  [?] Wiring S6c et @fetch_application (S6b 2026-10-13) : le bloc décommenté est le bloc
+    livré, qui fait un `apps.get` inline doublant @fetch_application (déjà consommé par le
+    motif Ingress du même cycle) — un `app_namespace_of` et un `get` d'API en trop par
+    réconciliation. Mutualiser (résoudre l'Application une fois par cycle, réutiliser le
+    résultat pour l'Ingress et le restate), ou assommer le doublon ?
   [ ] RETRAIT DE `existing_pvc` du Project (2026-10-04) : supprimer @combine_sub_path et les
     `subPath` de projet des montages (worktree, repo.git, caches) ; renommer/retirer les tests
     `*_with_existing_pvc_subpath` et `*_no_existing_pvc`.

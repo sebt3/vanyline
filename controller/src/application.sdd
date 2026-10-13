@@ -41,7 +41,7 @@ Structure:
     deployment, service, ingress, cookie secret) ; (3) @Context ; (4) fabrication et garantie
     du cookie (@generate_cookie_secret_value privé, @ensure_cookie_secret privé) ;
     (5) projection de status (@deployment_phase privé, @compute_status public) ; (6) boucle
-    (@reconcile, @error_policy, @build_controller) ; puis le module `#[cfg(test)]` (20 tests
+    (@reconcile, @error_policy, @build_controller) ; puis le module `#[cfg(test)]` (25 tests
     purs, sans cluster ni mock de l'API K8s — convention du crate).
 
 Must:
@@ -182,8 +182,10 @@ Must:
     via `tokio::join!` des quatre reconcilers).
   Documenter @Context : `client` (kube::Client cloné par appel d'API) et `default_image`
     injecté par `./main.rs` (`{APP_IMAGE_REPO}:{APP_IMAGE_TAG}`).
-  Garder le harnais de /tooling.sdd : 8 exemptions `#[allow(clippy::expect_used)]`
-    (@app_owner_ref + les 7 builders qui l'appellent, justification d'une ligne « garanti par
+  Garder le harnais de /tooling.sdd : 11 exemptions `#[allow(clippy::expect_used)]`
+    (@app_owner_ref + les 10 builders qui l'appellent, dont les trois de S6c
+    @build_restate_statefulset/@build_restate_service/@build_restate_netpol, justification
+    d'une ligne « garanti par
     #[derive(CustomResource)] » — l'expect est structurellement inatteignable) et le
     `#![allow(unwrap_used, expect_used)]` du module `#[cfg(test)]` ; en production du fichier,
     aucun `unwrap`/`panic!`/`println!`/`eprintln!` — la seule trace de log est le `warn!` de
@@ -235,7 +237,7 @@ Depends on:
     @error_policy.
   ./sandbox.rs — consommateur aval de @cert_manager_annotation_key et @tls_secret_name (la
     convention TLS est un contrat inter-fichiers ; les modifier casse sa spec sœur).
-  /tooling.sdd — harnais (les 8 exemptions `expect_used` de ce fichier comptent dans la dette
+  /tooling.sdd — harnais (les 11 exemptions `expect_used` de ce fichier comptent dans la dette
     tracée) ; /vanyline.sdd — contrainte « jamais de secret en clair dans une CR ».
 
 Exposes:
@@ -335,6 +337,27 @@ Tasks:
     @application_name).
   [?] Restate en StatefulSet mono-nœud sans réplication : suffisant pour un cluster de
     développement/homelab ; la haute disponibilité (cluster Restate) est hors périmètre.
+  [?] Env interne du conteneur `restated` non contractée (interprétation posée S6c,
+    2026-10-13) : `RESTATE_CLUSTER_NAME`, `RESTATE_BOOTSTRAP_CLUSTER`,
+    `RESTATE_INGRESS_SOCKET`, `RESTATE_ADMIN_SOCKET`, `RESTATE_WORKER_SOCKET`,
+    `RESTATE_DATA_DIR=/var/restate` — la spec ne nomme que l'image, les ports et le volume.
+    Contracter ces variables dans cette spec (elles conditionnent tout changement d'image) ?
+  [?] Noms dérivés non contractés (S6c, 2026-10-13) : la NetworkPolicy s'appelle
+    `<application>-restate-netpol` et les ports du Service sont nommés `ingress` (8080),
+    `admin` (9070), `worker` (5122). À contracter ou à assommer comme détail d'implémentation ?
+  [?] Table d'env du Deployment `app` amendée (S6c, 2026-10-13) : la table contractée
+    (« exactement 10 variables », ordre de construction exact) ne positionnait pas les deux
+    URL internes ; `VNL_RESTATE_ADMIN_URL` et `VNL_RESTATE_INGRESS_URL` sont ajoutées EN FIN
+    de liste (après `COOKIE_SECRET`), soit 12 variables quand `spec.restate` est posée.
+    Position figée où confirmée ?
+  [?] Ordonnancement de @reconcile et deletion (S6c, 2026-10-13) : la séquence contractée
+    (7 étapes) ne plaçait pas le bloc restate — inséré après l'Ingress, avant le status ; et
+    « sans `spec.restate`, aucune de ces ressources n'existe » est rendu par SUPPRESSION
+    conditionnelle des trois ressources (StatefulSet, Service, netpol — patron netpol egress
+    de ./sandbox.sdd), donc un retrait du champ `restate` éteint le moteur et libère les
+    ressources. Confirmer la place et la sémantique destructive du retrait (le PVC du
+    volumeClaimTemplate survit à la suppression du StatefulSet par défaut K8s — trancher
+    aussi son sort) ?
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [?] @deployment_phase filtre reasons `"Failed"`/`"ProgressDeadlineExceeded"` sur la
@@ -384,7 +407,7 @@ Tasks:
     le garantit — une évolution du client côté `app` produit un 403 runtime (`VNL-K8S-002`)
     sans rougir le CI. Ajouter un test de cohérence (liste des verbes du client vs règle du
     Role) ou assumer la révision manuelle ?
-  [ ] Couverture existante (module `tests`, 20 tests purs, sans cluster) :
+  [ ] Couverture existante (module `tests`, 25 tests purs, sans cluster) :
     `application_name_and_cookie_secret_name`, `effective_cookie_secret_ref_some`,
     `effective_cookie_secret_ref_none`, `build_application_deployment_shape`,
     `build_application_deployment_replicas_and_image`, `build_application_deployment_env`,
@@ -467,12 +490,14 @@ Scenario: build_application_service_account_shape
 Scenario: build_application_role_shape
   Given une @Application `"demo"`
   When @build_application_role est appelée
-  Then le Role `"application-demo"` porte exactement trois règles sur l'apiGroup
-    `"vanyline.solidite.fr"` : (`owners` + `projects`) => verbes exactement
-    `["get", "list", "create", "delete"]` (sans `patch` ni `watch`) ; (`sandboxes`) => contient
-    `patch` (suspension) et `watch` (hub WS sandbox-state) parmi get/list/create/delete ;
-    (`applications`) => verbes exactement `["get"]` — et le Role est un Role namespaced,
-    jamais un ClusterRole (test existant `build_application_role_shape`)
+  Then le Role `"application-demo"` porte exactement DEUX règles sur l'unique apiGroup
+    `"vanyline.solidite.fr"` : (`owners`) => verbes exactement `["get", "list", "create",
+    "delete"]` (sans `patch` ni `watch`) ; (`applications`) => verbes exactement `["get"]` —
+    et AUCUNE règle sur `projects`, `sandboxes` ni `serviceaccounts/token` (les droits
+    d'Owner vivent dans les namespaces d'Owner via le RoleBinding de
+    `./namespace.sdd` — UN OWNER = UN NAMESPACE, décision 2026-10-04) — et le Role est un
+    Role namespaced, jamais un ClusterRole (test existant `build_application_role_shape`,
+    réécrit S6c 2026-10-13 : l'ancien Scenario à trois règles est remplacé)
 
 Scenario: build_application_role_binding_shape
   Given une @Application `"demo"` (namespace `"ns"`)

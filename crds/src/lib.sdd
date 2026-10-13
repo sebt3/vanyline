@@ -39,7 +39,7 @@ Structure:
   ./lib.rs — quatre blocs @CustomResource (Owner, Project, Sandbox, Application), types
     partagés entre specs (@EgressRule, @EgressPort), types d'appui par spec
     (@ProjectDefaults, @IngressControllerRef, @Toolchain, @LspSpec,
-    @ApplicationStorageDefaults), quatre structs de status, trois items d'interface publique
+    @ApplicationStorageDefaults, @RestateSpec), quatre structs de status, trois items d'interface publique
     hors types (@crd_manifests, @MCP_PORT + @service_name, @owner_namespace_name), et le
     module `#[cfg(test)]`.
     Ordre physique : Owner (avec ses types annexes) → Project → Sandbox → Application →
@@ -81,9 +81,9 @@ Must:
     `spec.scope` = `Namespaced`, `spec.versions[0].name` = `v1alpha1`, et la version déclare
     le sous-ressource `status` (attribut `status = "..."`).
   Appliquer `#[serde(rename_all = "camelCase")]` à TOUTES les structs sérialisables du
-    fichier : les quatre Spec, les quatre Status, et les sept types d'appui (@ProjectDefaults,
+    fichier : les quatre Spec, les quatre Status, et les huit types d'appui (@ProjectDefaults,
     @IngressControllerRef, @EgressRule, @EgressPort, @Toolchain, @LspSpec,
-    @ApplicationStorageDefaults). Les clés JSON sont donc camelCase (`repoUrl`,
+    @ApplicationStorageDefaults, @RestateSpec). Les clés JSON sont donc camelCase (`repoUrl`,
     `applicationRef`, `podSelector`, `oidcSecretRef`, `detectedAt`, …), jamais snake_case.
   Appliquer @JsonSchema (schemars 1) à toutes ces structs, consommé par kube pour générer le
     schéma structural de chaque CRD ; les champs `Option` et ceux marqués `default` ne sont
@@ -152,10 +152,20 @@ Must:
     optionnels, `conditions` à `#[serde(default)]`.
   Rendre @ApplicationSpec : `oidcSecretRef`, `databaseSecretRef`, `host`, `ingressClassName`
     et `tlsIssuerName` REQUIS ; `image`, `replicas`, `cookieSecretRef`, `tlsIssuerKind`,
-    `ingressController`, `storageDefaults` optionnels ; `ingressAnnotations` à
+    `ingressController`, `storageDefaults`, `restate` optionnels ; `ingressAnnotations` à
     `#[serde(default)]` (absent ⇒ map vide). Le dérivé `redirectUrl` depuis `host`, le secret
     cookie auto-généré (`<name>-cookie`) et le repli d'image sont du ressort du reconciler
-    `controller/src/application.rs`.
+    `controller/src/application.rs`. L'absence de `restate` EST le contrat « Application sans
+    moteur de workflow » ; sa présence commande les sous-ressources Restate du reconciler
+    (contrat comportemental : `controller/src/application.sdd`).
+  Définir @RestateSpec avec @Default et trois champs `Option<String>` (`image`, `storageSize`,
+    `storageClass`) — moteur de workflow comme sous-ressource de l'Application (décision
+    du 2026-10-04). Aucun des trois replis n'est appliqué par ce crate, qui ne transporte que
+    des `Option` : `image` `None` ⇒ défaut du controller (flag `--restate-image` / env
+    `RESTATE_IMAGE`), `storageSize` `None` ⇒ `"5Gi"`, `storageClass` `None` ⇒ `StorageClass`
+    par défaut du cluster — tous trois appliqués par `controller/src/application.rs`.
+    `storageSize` est une chaîne libre à la `Quantity` K8s (same convention `homeSize` :
+    c'est l'apiserver qui rejette une quantité invalide à l'usage, aucune validation ici).
   Définir @ApplicationStorageDefaults avec @Default et quatre champs `Option<String>`
     (`homeStorageClass`, `homeAccessMode`, `projectStorageClass`, `projectAccessMode`) ;
     propagés en env au Deployment `app`, jamais lus par le reconciler Application lui-même.
@@ -230,7 +240,7 @@ Exposes:
   @OwnerSpec, @ProjectDefaults, @IngressControllerRef, @EgressRule, @EgressPort, @OwnerStatus.
   @ProjectSpec, @ProjectStatus.
   @SandboxSpec, @LspSpec, @Toolchain, @SandboxStatus.
-  @ApplicationSpec, @ApplicationStorageDefaults, @ApplicationStatus.
+  @ApplicationSpec, @ApplicationStorageDefaults, @RestateSpec, @ApplicationStatus.
   @crd_manifests — `pub fn () -> String`, @must_use.
   @MCP_PORT — `pub const i32` = `3000`.
   @service_name — `pub fn (&str) -> String`, @must_use.
@@ -293,6 +303,17 @@ Handles:
   Entrée vide de @service_name : retourne exactement `"sandbox-"` (aucun contrôle).
 
 Tasks:
+  [x] S6c (2026-10-13) : ajouter `ApplicationSpec.restate: Option<RestateSpec>` à ./lib.rs
+    (contrat posé ci-dessus — consommation : `controller/src/application.sdd` builders
+    `build_restate_statefulset`/`build_restate_service`, `controller/src/sandbox.sdd`
+    activation du wiring « BLOQUÉE CRDS »). Convertir en tests taggés les Scenarios
+    `restate_spec_camel_case_roundtrip`, `restate_spec_champs_tous_optionnels`,
+    `restate_schema_proprietes_optionnelles` et les extensions de `application_defaults` et
+    `application_schema_fields`, puis régénérer `deploy/controller/crds.yaml` via
+    `deploy/controller/generate-crds.sh` (changement de schéma — autorisé par le `Done when`).
+    — FAIT 2026-10-13, validator-vert : 3 tests neufs + 2 extensions aux assertions réelles,
+    crds.yaml régénéré identique à `--crds` (diff = 28 lignes `restate`, 0 suppression),
+    crate 38 tests, clippy `--all-targets -D warnings` et fmt à 0, specdd 0/0.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [?] Absence de `shortname` dans les quatre blocs `#[kube(...)]` (`owners`, `projects`,
@@ -490,8 +511,8 @@ Scenario: application_defaults
     `{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc",
     "databaseSecretRef":"db","tlsIssuerName":"self-sign"}`
   When il est désérialisé
-  Then `image`, `replicas`, `cookieSecretRef`, `ingressController` et `tlsIssuerKind` sont
-    `None`, `ingressAnnotations` est vide — et `storageDefaults` est `None` (extension du
+  Then `image`, `replicas`, `cookieSecretRef`, `ingressController`, `tlsIssuerKind` et `restate`
+    sont `None`, `ingressAnnotations` est vide — et `storageDefaults` est `None` (extension du
     test existant `application_defaults`, cf. `Tasks`)
 
 Scenario: application_spec_champs_requis
@@ -517,8 +538,30 @@ Scenario: application_schema_fields
   Given @Application::crd et son schéma OpenAPI `spec`
   When on liste les propriétés de `spec`
   Then `host`, `ingressClassName`, `oidcSecretRef`, `databaseSecretRef`, `cookieSecretRef`,
-    `ingressAnnotations`, `tlsIssuerName`, `tlsIssuerKind` et `ingressController` en font
-    partie (test existant `application_schema_fields`)
+    `ingressAnnotations`, `tlsIssuerName`, `tlsIssuerKind`, `ingressController` et `restate` en
+    font partie (test existant `application_schema_fields`, extension `restate`)
+
+Scenario: restate_spec_camel_case_roundtrip
+  Given un @ApplicationSpec dont `restate` porte un @RestateSpec complet (`image` = `"img"`,
+    `storage_size` = `"8Gi"`, `storage_class` = `"local-path"`)
+  When il est sérialisé en JSON puis redésérialisé
+  Then le JSON contient `"restate"`, `"storageSize"` et `"storageClass"`, jamais `storage_size`
+    ni `storage_class`, et les trois champs survivent au roundtrip à l'identique — le crate
+    transporte, il n'interprète pas la `Quantity`
+
+Scenario: restate_spec_champs_tous_optionnels
+  Given un @RestateSpec visé par `serde_json` et le document `{}`
+  When il est désérialisé
+  Then `image`, `storageSize` et `storageClass` sont `None` — les replis (`--restate-image` du
+    controller, `"5Gi"`, `StorageClass` par défaut du cluster) sont appliqués par le reconciler,
+    jamais ici ; @RestateSpec::default() sérialisé rend les trois clés à `null` (aucun
+    `skip_serializing_if`)
+
+Scenario: restate_schema_proprietes_optionnelles
+  Given @Application::crd et son schéma OpenAPI
+  When on inspecte la propriété `restate` de `spec` et ses sous-propriétés
+  Then `restate` est un objet aux propriétés `image`, `storageSize`, `storageClass`, AUCUNE
+    n'étant requise au sens du schéma (toutes `Option`)
 
 Scenario: project_status_languages_default_empty
   Given un @ProjectStatus visé par `serde_json`

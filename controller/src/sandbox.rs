@@ -781,12 +781,8 @@ pub fn netpol_egress_name(sandbox_name: &str) -> String {
 /// sandbox (callbacks d'awakeable des jobs, ../../sandbox/src/jobs.sdd).
 pub const RESTATE_INGRESS_PORT: i32 = 8080;
 
-/// Label portant le nom de l'Application sur les pods Restate de cette
-/// Application — cible de la règle egress de la sandbox vers le Service Restate
-/// (« ce seul Service », sandbox.sdd « UN OWNER = UN NAMESPACE »). ⚠ Ce label
-/// n'est pas encore contracté par `application.sdd` (le builder
-/// `build_restate_statefulset` est une tâche `[ ]`) : il devra être posé sur le
-/// pod template du `StatefulSet` pour que la règle matche réellement.
+/// Label de l'Application sur ses pods Restate (selector et pod template posés par
+/// `build_restate_statefulset`) — cible egress `./sandbox.sdd` et netpol d'application.
 pub const RESTATE_LABEL: &str = "vanyline.solidite.fr/restate";
 
 /// Nom du Service Restate d'une Application : `<application>-restate`
@@ -1378,29 +1374,25 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         false
     };
 
-    // S6b — URL interne du Service Restate pour le Pod et la netpol egress
+    // S6b/S6c — URL interne du Service Restate pour le Pod et la netpol egress
     // (sandbox.sdd « UN OWNER = UN NAMESPACE ») : résolue par l'appelant, les
-    // builders restent purs. ⚠ LA DÉTECTION EST BLOQUÉE CRDS : `ApplicationSpec`
-    // ne porte pas encore `restate` (tâche `[ ]` de application.sdd l.323,
-    // /crds/src/lib.sdd) ; la CRD générée depuis crds émonde ce champ des CR
-    // soumises (pruning du schéma structural) — une lecture brute ne le verrait
-    // pas non plus. Dès que le champ existe, remplacer le `None` ci-dessous par
-    // (motif `fetch_application` / Ingress, cross-namespace) :
-    //   let restate = match owner.spec.application_ref.as_deref() {
-    //       Some(name) => {
-    //           let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
-    //           let apps: Api<Application> =
-    //               Api::namespaced(ctx.client.clone(), &app_ns);
-    //           apps.get(name)
-    //               .await?
-    //               .spec
-    //               .restate
-    //               .as_ref()
-    //               .map(|_| (name.to_string(), app_ns))
-    //       }
-    //       None => None,
-    //   };
-    let restate: Option<(String, String)> = None; // (application, namespace d'application)
+    // builders restent purs. L'Application (et son `spec.restate`, champ livré
+    // par la tâche S6c de /crds/src/lib.sdd) vit dans le namespace
+    // d'application, résolu cross-namespace par le label du Namespace — motif
+    // `fetch_application` / Ingress.
+    let restate: Option<(String, String)> = match owner.spec.application_ref.as_deref() {
+        Some(name) => {
+            let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
+            let apps: Api<Application> = Api::namespaced(ctx.client.clone(), &app_ns);
+            apps.get(name)
+                .await?
+                .spec
+                .restate
+                .as_ref()
+                .map(|_| (name.to_string(), app_ns))
+        }
+        None => None,
+    };
     let restate_url = restate
         .as_ref()
         .map(|(app, app_ns)| restate_ingress_url(app, app_ns));
@@ -3444,6 +3436,7 @@ mod tests {
                 ingress_annotations: BTreeMap::new(),
                 ingress_controller: None,
                 storage_defaults: None,
+                restate: None,
             },
         );
         app.meta_mut().namespace = Some("ns".into());

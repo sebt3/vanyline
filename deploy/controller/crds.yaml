@@ -938,6 +938,34 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              restate:
+                description: |-
+                  Moteur de workflow comme sous-ressource de l'Application (décision du
+                  2026-10-04). L'absence de `restate` EST le contrat « Application sans
+                  moteur de workflow » ; sa présence commande les sous-ressources Restate
+                  du reconciler (`controller/src/application.rs`, contrat comportemental :
+                  `controller/src/application.sdd`).
+                nullable: true
+                properties:
+                  image:
+                    description: |-
+                      Image du `StatefulSet` Restate. None ⇒ défaut du controller (flag
+                      `--restate-image` / env `RESTATE_IMAGE`).
+                    nullable: true
+                    type: string
+                  storageClass:
+                    description: |-
+                      `StorageClass` du `volumeClaimTemplate`. None ⇒ classe par défaut du
+                      cluster.
+                    nullable: true
+                    type: string
+                  storageSize:
+                    description: |-
+                      Taille du `volumeClaimTemplate` de données. None ⇒ `"5Gi"` (repli
+                      appliqué par le controller, jamais ici).
+                    nullable: true
+                    type: string
+                type: object
               storageDefaults:
                 description: |-
                   Défauts de stockage (storageClass + accessMode) posés en env sur le

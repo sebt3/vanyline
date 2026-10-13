@@ -1,6 +1,6 @@
 //! Binaire `vanyline-controller` : point d'entrée unique de l'opérateur —
 //! arbre de modules du crate, parsing de la configuration de démarrage
-//! (@Cli, 13 drapeaux), client kube unique et lancement parallèle des quatre
+//! (@Cli, 14 drapeaux), client kube unique et lancement parallèle des quatre
 //! reconcileurs (Owner, Project, Sandbox, Application) (spec : `./main.sdd` ;
 //! les contrats de reconcile vivent dans les modules respectifs).
 
@@ -141,6 +141,18 @@ struct Cli {
         default_value = "ghcr.io/sebt3/vanyline-app"
     )]
     app_image_repo: String,
+
+    /// Image du moteur de workflow Restate déployée comme sous-ressource d'une
+    /// Application qui porte `spec.restate`, quand `spec.restate.image` est
+    /// absent (flag hors `main.sdd`, implémenté au patron des autres flags —
+    /// cf. tâche S6c de `application.sdd`). Surchargée par l'env
+    /// `RESTATE_IMAGE`.
+    #[arg(
+        long,
+        env = "RESTATE_IMAGE",
+        default_value = "docker.restate.dev/restatedev/restate:latest"
+    )]
+    restate_image: String,
 }
 
 #[tokio::main]
@@ -199,6 +211,7 @@ async fn main() {
     let app_ctx = Arc::new(application::Context {
         client: client.clone(),
         default_image: app_image,
+        restate_image: cli.restate_image.clone(),
     });
 
     let application_run = application::build_controller(client.clone())

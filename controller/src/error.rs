@@ -185,6 +185,7 @@ mod tests {
                 ingress_annotations: std::collections::BTreeMap::new(),
                 ingress_controller: None,
                 storage_defaults: None,
+                restate: None,
             },
         )
     }
@@ -361,6 +362,7 @@ mod tests {
         let app_ctx = Arc::new(application::Context {
             client: offline_client(),
             default_image: "img:tag".to_string(),
+            restate_image: "restate:test".to_string(),
         });
         let owner_cr = Arc::new(dummy_owner());
         let app_cr = Arc::new(dummy_application());
@@ -397,6 +399,7 @@ mod tests {
         let app_ctx = Arc::new(application::Context {
             client: offline_client(),
             default_image: "img:tag".to_string(),
+            restate_image: "restate:test".to_string(),
         });
         let owner_cr = Arc::new(dummy_owner());
         let project_cr = Arc::new(dummy_project());
