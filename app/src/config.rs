@@ -344,4 +344,252 @@ mod tests {
         assert_eq!(config.restate_admin_url.as_deref(), Some(""));
         assert_eq!(config.workflow_listen, "");
     }
+
+    /// Scenario: `from_env_absence_oidc_issuer_url_vnl_cfg_001` — message d'absence exact,
+    /// verrouillé caractère par caractère (préfixe `VNL-CFG-001`, collision d'espace
+    /// app ↔ cfgstore non tranchée : codes testés tels qu'écrits dans la spec).
+    #[test]
+    fn from_env_absence_oidc_issuer_url_vnl_cfg_001() {
+        let mut env = required_env();
+        env.remove("OIDC_ISSUER_URL");
+        // Les cinq autres requises sont présentes (required_env moins celle retirée).
+
+        let Err(err) = Config::from_env_with(env_read(env)) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-001: OIDC_ISSUER_URL is required");
+    }
+
+    /// Scenario: `from_env_absence_oidc_client_id_vnl_cfg_002`
+    #[test]
+    fn from_env_absence_oidc_client_id_vnl_cfg_002() {
+        let mut env = required_env();
+        env.remove("OIDC_CLIENT_ID");
+
+        let Err(err) = Config::from_env_with(env_read(env)) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-002: OIDC_CLIENT_ID is required");
+    }
+
+    /// Scenario: `from_env_absence_oidc_client_secret_vnl_cfg_003`
+    #[test]
+    fn from_env_absence_oidc_client_secret_vnl_cfg_003() {
+        let mut env = required_env();
+        env.remove("OIDC_CLIENT_SECRET");
+
+        let Err(err) = Config::from_env_with(env_read(env)) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-003: OIDC_CLIENT_SECRET is required");
+    }
+
+    /// Scenario: `from_env_absence_oidc_redirect_url_vnl_cfg_004`
+    #[test]
+    fn from_env_absence_oidc_redirect_url_vnl_cfg_004() {
+        let mut env = required_env();
+        env.remove("OIDC_REDIRECT_URL");
+
+        let Err(err) = Config::from_env_with(env_read(env)) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-004: OIDC_REDIRECT_URL is required");
+    }
+
+    /// Scenario: `from_env_absence_cookie_secret_vnl_cfg_005` — message d'ABSENCE
+    /// (`"COOKIE_SECRET is required"`), à distinguer du message de longueur insuffisante
+    /// émis par ./main.rs ; `OIDC_SCOPES` quelconque (ici absente, donc à son défaut).
+    #[test]
+    fn from_env_absence_cookie_secret_vnl_cfg_005() {
+        let mut env = required_env();
+        env.remove("COOKIE_SECRET");
+
+        let Err(err) = Config::from_env_with(env_read(env)) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-005: COOKIE_SECRET is required");
+    }
+
+    /// Scenario: `from_env_absence_database_url_vnl_cfg_006`
+    #[test]
+    fn from_env_absence_database_url_vnl_cfg_006() {
+        let mut env = required_env();
+        env.remove("DATABASE_URL");
+
+        let Err(err) = Config::from_env_with(env_read(env)) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-006: DATABASE_URL is required");
+    }
+
+    /// Scenario: `from_env_premiere_erreur_en_ordre_de_declaration` — aucune des six
+    /// requises posée : un seul message, celui du premier champ déclaré manquant
+    /// (`oidc_issuer_url`), jamais la liste des six absences.
+    #[test]
+    fn from_env_premiere_erreur_en_ordre_de_declaration() {
+        let Err(err) = Config::from_env_with(env_read(HashMap::new())) else {
+            panic!("attendu un Err, obtenu un Ok");
+        };
+
+        assert_eq!(err, "VNL-CFG-001: OIDC_ISSUER_URL is required");
+    }
+
+    /// Scenario: `from_env_requise_vide_acceptee` — la présence seule fait foi :
+    /// requise posée vide ⇒ `@Ok` avec la chaîne vide (validation sémantique différée
+    /// hors du fichier).
+    #[test]
+    fn from_env_requise_vide_acceptee() {
+        let mut env = required_env();
+        env.insert("OIDC_ISSUER_URL", String::new());
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(config.oidc_issuer_url, "");
+    }
+
+    /// Scenario: `from_env_defaut_listen_addr`
+    #[test]
+    fn from_env_defaut_listen_addr() {
+        // `LISTEN_ADDR` absente de required_env.
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+
+        assert_eq!(config.listen_addr, "0.0.0.0:8080");
+    }
+
+    /// Scenario: `from_env_defaut_static_dir`
+    #[test]
+    fn from_env_defaut_static_dir() {
+        // `STATIC_DIR` absente de required_env.
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+
+        assert_eq!(config.static_dir, "./static");
+    }
+
+    /// Scenario: `from_env_defaut_scopes` — défaut `"openid,email,profile"` dans cet ordre.
+    #[test]
+    fn from_env_defaut_scopes() {
+        // `OIDC_SCOPES` absente de required_env.
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+
+        assert_eq!(
+            config.oidc_scopes,
+            vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string()
+            ]
+        );
+    }
+
+    /// Scenario: `from_env_scopes_decoupe_et_trim` — le trim s'applique à la valeur
+    /// fournie, pas seulement au défaut.
+    #[test]
+    fn from_env_scopes_decoupe_et_trim() {
+        let mut env = required_env();
+        env.insert("OIDC_SCOPES", " openid , email ,profile".to_string());
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(
+            config.oidc_scopes,
+            vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string()
+            ]
+        );
+    }
+
+    /// Scenario: `from_env_scopes_vide_donne_un_scope_vide` — présente vide ⇒ `[""]`
+    /// (unique segment vide), PAS le défaut. Verrouille le comportement actuel
+    /// (`[?]` « validité à trancher » dans `Tasks`).
+    #[test]
+    fn from_env_scopes_vide_donne_un_scope_vide() {
+        let mut env = required_env();
+        env.insert("OIDC_SCOPES", String::new());
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(config.oidc_scopes, vec![String::new()]);
+    }
+
+    /// Scenario: `from_env_optionnels_absents_aucun` — les SEPT optionnelles absentes ⇒
+    /// les sept champs `@Option` valent tous `@None` (les reconcilers Owner/Project
+    /// conservent leurs défauts RWX/RWO).
+    #[test]
+    fn from_env_optionnels_absents_aucun() {
+        // required_env ne pose aucune des sept optionnelles (ni les à défaut).
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+
+        assert!(config.oidc_ca_cert.is_none());
+        assert!(config.k8s_namespace.is_none());
+        assert!(config.application_name.is_none());
+        assert!(config.default_home_storage_class.is_none());
+        assert!(config.default_home_access_mode.is_none());
+        assert!(config.default_project_storage_class.is_none());
+        assert!(config.default_project_access_mode.is_none());
+    }
+
+    /// Scenario: `from_env_optionnels_lus_tels_quels` — chaque optionnelle posée vaut
+    /// `@Some` de sa valeur littérale, sans trim ni normalisation (`VNL_K8S_NAMESPACE`
+    /// est posée avec des espaces encadrants pour le prouver).
+    #[test]
+    fn from_env_optionnels_lus_tels_quels() {
+        let mut env = required_env();
+        env.insert("OIDC_CA_CERT", "-----BEGIN CERTIFICATE-----".to_string());
+        env.insert("VNL_K8S_NAMESPACE", " app-ns-alice ".to_string());
+        env.insert("VNL_APPLICATION_NAME", "app-principale".to_string());
+        env.insert("VNL_DEFAULT_HOME_STORAGE_CLASS", "fast-ssd".to_string());
+        env.insert("VNL_DEFAULT_HOME_ACCESS_MODE", "ReadWriteOnce".to_string());
+        env.insert("VNL_DEFAULT_PROJECT_STORAGE_CLASS", "standard".to_string());
+        env.insert(
+            "VNL_DEFAULT_PROJECT_ACCESS_MODE",
+            "ReadWriteMany".to_string(),
+        );
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(
+            config.oidc_ca_cert.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----")
+        );
+        assert_eq!(config.k8s_namespace.as_deref(), Some(" app-ns-alice "));
+        assert_eq!(config.application_name.as_deref(), Some("app-principale"));
+        assert_eq!(
+            config.default_home_storage_class.as_deref(),
+            Some("fast-ssd")
+        );
+        assert_eq!(
+            config.default_home_access_mode.as_deref(),
+            Some("ReadWriteOnce")
+        );
+        assert_eq!(
+            config.default_project_storage_class.as_deref(),
+            Some("standard")
+        );
+        assert_eq!(
+            config.default_project_access_mode.as_deref(),
+            Some("ReadWriteMany")
+        );
+    }
+
+    /// Scenario: `from_env_optionnel_vide_some_vide` — optionnelle posée vide ⇒
+    /// `Some("")` et non `@None`. Verrouille le comportement actuel atteint
+    /// miryad-core (normalisation à trancher via `Tasks`).
+    #[test]
+    fn from_env_optionnel_vide_some_vide() {
+        let mut env = required_env();
+        env.insert("OIDC_CA_CERT", String::new());
+        // Les six autres optionnelles restent absentes.
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(config.oidc_ca_cert.as_deref(), Some(""));
+    }
 }

@@ -316,10 +316,16 @@ Tasks:
     @from_env_with(@std::env::@var) ; les Scenarios @from_env s'écrivent contre le noyau
     (fermeture en mémoire, déterministe, parallèle-sûr, zéro `unsafe`, contrat public de
     @from_env inchangé). Choix d'implémentation, pas de changement de contrat.
-  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+  [x] Convertir chaque Scenario sans test existant en un test taggé par son titre
     (implementer) ; les Scenario timeout sont déjà couverts (voir tâche « Timeouts OIDC
     configurables par env », close). Reste les ~14 Scenario `from_env_*` historiques,
     écrivables contre le noyau @from_env_with. Puis batterie du validator au vert.
+    — **clos 2026-10-14, validator vert** : 16 tests ajoutés (12 `from_env_*` + 4
+    `from_env_optional_*`, total module 33), couvrant 16 Scenario — pas 14, dette soldée
+    au-delà de l'estimation. Batterie locale : `cargo check`/`test`/`clippy --all-targets
+    -D warnings`/`fmt` + `specdd lint` 0/0 sur 162 specs. Couverture 100 % de @from_env
+    atteinte. Reste à nommer (cosmétique, comportements prouvés) : les 3 Scenario
+    `moteur_workflow_*` sont couverts par les tests nommés `from_env_workflow_*`.
 
 Done when:
   Chaque Scenario est couvert par au moins un test taggé par son titre et passe ; les
