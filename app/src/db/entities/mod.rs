@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod app_settings;
 pub mod chat_contexts;
 pub mod conversations;
 pub mod llm_providers;

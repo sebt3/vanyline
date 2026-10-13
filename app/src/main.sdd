@@ -380,6 +380,13 @@ Depends on:
     opérationnels de `GET /health`, `LISTEN_ADDR`, `STATIC_DIR`.
 
 Tasks:
+  [?] Amorçage des agents système (S8, 2026-10-13) : le point d'appel contracté est
+    `ensure_system_agents` à la PREMIÈRE CONNEXION d'un utilisateur, mais `auth_router` de
+    miryad-core ne prête aucun hook de login. L'implémentation branche l'amorçage idempotent
+    dans `ws/chat.rs::resolve_extra_mcp` (contextes système seulement) — la voie
+    `api/conversations.rs` (création de conversation en contexte `settings`) n'est pas
+    couverte. Trancher : hook miryad-core (amont), amorçage aussi à la création de
+    conversation, ou assumption du point actuel ?
   [ ] Moteur de workflow et MCP (2026-10-04) : démarrer `workflow::start_runtime` après les
     migrations quand `VNL_RESTATE_ADMIN_URL` est posée (../workflow/runtime.sdd) ; monter
     `miryad_core::mcp::mcp_router` (`POST /mcp`, CRUD de la configuration + définitions de

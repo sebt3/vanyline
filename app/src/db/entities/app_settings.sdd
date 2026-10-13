@@ -45,6 +45,12 @@ Must not:
   Servir de fourre-tout de configuration par utilisateur : les réglages utilisateur restent
     dans leurs entités (profils, agents).
 
+Tasks:
+  [?] Codes des HookError (S8, 2026-10-13) : non contractés par la spec ; retenus
+    `VNL-SET-001` (clé inconnue) et `VNL-SET-002` (valeur invalide), sur le motif « code
+    applicatif libre du hook » déjà posé par `VNL-WFA-001` (`./project_workflows.sdd`).
+    Contracter ces deux codes ici ?
+
 Scenario: contrat_de_ressource
   Given l'entité
   When ses métadonnées sont lues

@@ -43,6 +43,14 @@ pub struct Model {
     pub skills: serde_json::Value,
     #[serde(default)]
     pub system_prompt: String,
+    // agents.sdd `Must` AGENTS SYSTÈME (2026-10-04, migration m20261005_000003) : clé stable
+    // d'un agent préconfiguré, NULL pour un agent ordinaire.
+    #[serde(default)]
+    pub system_key: Option<String>,
+    // Version du prompt système embarqué dans le code (`crate::system_agents::SYSTEM_VERSION`),
+    // NULL pour un agent ordinaire.
+    #[serde(default)]
+    pub system_version: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -83,7 +91,93 @@ impl MiryadResource for Entity {
                 format!("mode must be 'primary', 'subagent' or 'all', got: {mode}"),
             ));
         }
+        // AGENTS SYSTÈME (`Must` agents.sdd l.191-197, system_agents.sdd) : `system_key` et
+        // `system_version` sont des colonnes serveur — un corps de création client qui en
+        // porte une est refusé. Le CRUD générique ne crée que des agents ordinaires.
+        let carries_system_column = matches!(&active.system_key, ActiveValue::Set(Some(_)))
+            || matches!(&active.system_version, ActiveValue::Set(Some(_)));
+        if carries_system_column {
+            return Err(HookError::with_code(
+                "VNL-AGENT-004",
+                "system_key and system_version are server-owned columns and cannot be set by a client body",
+            ));
+        }
         Ok(active)
+    }
+
+    /// AGENTS SYSTÈME (`Must` agents.sdd l.191-197) : sur une ligne portant `system_key`,
+    /// seul `model_profile_id` est modifiable — tout autre champ qui diverge de la ligne
+    /// relue est refusé (`VNL-AGENT-002`, rendu 422 par miryad-core). Les lignes système
+    /// sont réécrites par `crate::system_agents::ensure_system_agents` directement en
+    /// base, hors de cette voie. `id`/`owner_id` ne sont pas comparés : `rest::core::update`
+    /// les force APRÈS ce hook (ils ne sont donc jamais un changement observable).
+    fn before_update(
+        active: Self::ActiveModel,
+        existing: &Self::Model,
+        _principal: &AuthPrincipal,
+    ) -> Result<Self::ActiveModel, HookError> {
+        if existing.system_key.is_some() {
+            let mut refused: Vec<&str> = Vec::new();
+            if is_changed(&active.name, &existing.name) {
+                refused.push("name");
+            }
+            if is_changed(&active.description, &existing.description) {
+                refused.push("description");
+            }
+            if is_changed(&active.mode, &existing.mode) {
+                refused.push("mode");
+            }
+            if is_changed(&active.toolsets, &existing.toolsets) {
+                refused.push("toolsets");
+            }
+            if is_changed(&active.skills, &existing.skills) {
+                refused.push("skills");
+            }
+            if is_changed(&active.system_prompt, &existing.system_prompt) {
+                refused.push("system_prompt");
+            }
+            if is_changed(&active.system_key, &existing.system_key) {
+                refused.push("system_key");
+            }
+            if is_changed(&active.system_version, &existing.system_version) {
+                refused.push("system_version");
+            }
+            if !refused.is_empty() {
+                return Err(HookError::with_code(
+                    "VNL-AGENT-002",
+                    format!(
+                        "system agents are code-piloted: only model_profile_id is editable, refused change on: {}",
+                        refused.join(", ")
+                    ),
+                ));
+            }
+        }
+        Ok(active)
+    }
+
+    /// AGENTS SYSTÈME (`Must` agents.sdd l.191-197) : un agent système ne se supprime pas
+    /// (`VNL-AGENT-003`) — il est piloté par le code et sa version, pas par le CRUD.
+    fn before_delete(existing: &Self::Model, _principal: &AuthPrincipal) -> Result<(), HookError> {
+        if existing.system_key.is_some() {
+            return Err(HookError::with_code(
+                "VNL-AGENT-003",
+                "system agents cannot be deleted",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Vrai quand `current` porte une valeur explicitement posée (`Set`) différente de la
+/// valeur relue `previous`. `NotSet` (champ absent du body) et `Unchanged` (valeur de la
+/// ligne) ne sont jamais un changement.
+fn is_changed<T>(current: &ActiveValue<T>, previous: &T) -> bool
+where
+    T: PartialEq + Into<sea_orm::Value>,
+{
+    match current {
+        ActiveValue::Set(value) => value != previous,
+        _ => false,
     }
 }
 
@@ -97,7 +191,7 @@ mod tests {
 
     use super::*;
     use miryad_core::resource::AccessPolicy;
-    use sea_orm::IntoActiveModel;
+    use sea_orm::{IntoActiveModel, Set};
 
     #[test]
     fn agent_record_resource_contract() {
@@ -111,7 +205,7 @@ mod tests {
         );
     }
 
-    fn sample(mode: &str) -> ActiveModel {
+    fn sample_model(mode: &str) -> Model {
         Model {
             id: 0,
             owner_id: 0,
@@ -122,8 +216,32 @@ mod tests {
             toolsets: serde_json::json!([]),
             skills: serde_json::json!("auto"),
             system_prompt: String::new(),
+            system_key: None,
+            system_version: None,
         }
-        .into_active_model()
+    }
+
+    fn sample(mode: &str) -> ActiveModel {
+        sample_model(mode).into_active_model()
+    }
+
+    /// Ligne système existante telle que `before_update`/`before_delete` la relèvent :
+    /// `system_key` posée, version embarquée (litéral volontaire — pas de dépendance des
+    /// tests d'entité à la valeur de `SYSTEM_VERSION`).
+    fn existing_system_row() -> Model {
+        Model {
+            id: 5,
+            owner_id: 1,
+            name: "config".to_string(),
+            description: Some("agent de configuration".to_string()),
+            mode: "primary".to_string(),
+            model_profile_id: 2,
+            toolsets: serde_json::json!([]),
+            skills: serde_json::json!([]),
+            system_prompt: "prompt embarque".to_string(),
+            system_key: Some("config".to_string()),
+            system_version: Some(1),
+        }
     }
 
     fn test_principal() -> AuthPrincipal {
@@ -147,6 +265,117 @@ mod tests {
     fn before_create_rejects_unknown_mode() {
         let err = Entity::before_create(sample("bogus"), &test_principal()).unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-001"));
+    }
+
+    // ── AGENTS SYSTÈME (agents.sdd `Must` l.191-197 ; Scenario de system_agents.sdd) ──
+
+    /// Scenario (`system_agents.sdd`) : `creation_client_avec_cle_systeme` — un corps de
+    /// création portant `system_key` est refusé (`VNL-AGENT-004`).
+    #[test]
+    fn before_create_refuse_corps_portant_system_key() {
+        let mut active = sample("primary");
+        active.system_key = Set(Some("config".to_string()));
+        let err = Entity::before_create(active, &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-AGENT-004"));
+    }
+
+    /// Même Scenario, branche `system_version` : un corps portant la version du prompt
+    /// embarqué est refusé aussi.
+    #[test]
+    fn before_create_refuse_corps_portant_system_version() {
+        let mut active = sample("primary");
+        active.system_version = Set(Some(1));
+        let err = Entity::before_create(active, &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-AGENT-004"));
+    }
+
+    /// Le défaut serde des deux champs (clé absente du corps → `Set(None)`) passe
+    /// `before_create` : les agents ordinaires ne sont pas affectés.
+    #[test]
+    fn before_create_accepte_ligne_ordinaire_sans_cle_systeme() {
+        assert!(Entity::before_create(sample("primary"), &test_principal()).is_ok());
+    }
+
+    /// Scenario (`system_agents.sdd`) : `seul_le_modele_est_modifiable` — modifier
+    /// `system_prompt` d'une ligne portant `system_key` est refusé (`VNL-AGENT-002`, 422).
+    #[test]
+    fn before_update_refuse_changement_de_prompt_sur_ligne_systeme() {
+        let existing = existing_system_row();
+        let mut active = existing.clone().into_active_model();
+        active.model_profile_id = Set(9);
+        active.system_prompt = Set("prompt detourne".to_string());
+        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-AGENT-002"));
+    }
+
+    /// Même Scenario, branche succès : un update qui ne change QUE `model_profile_id` passe.
+    #[test]
+    fn before_update_accepte_changement_du_seul_modele() {
+        let existing = existing_system_row();
+        let mut active = existing.clone().into_active_model();
+        active.model_profile_id = Set(9);
+        assert!(Entity::before_update(active, &existing, &test_principal()).is_ok());
+    }
+
+    /// Un update d'une ligne ORDINAIRE (pas de `system_key`) garde son comportement actuel :
+    /// tout changement passe.
+    #[test]
+    fn before_update_accepte_ligne_ordinaire() {
+        let existing = sample_model("primary");
+        let mut active = existing.clone().into_active_model();
+        active.system_prompt = Set("modifie".to_string());
+        assert!(Entity::before_update(active, &existing, &test_principal()).is_ok());
+    }
+
+    /// Scenario (`system_agents.sdd`) : `suppression_refusee` — `before_delete` refuse la
+    /// suppression d'une ligne portant `system_key` (`VNL-AGENT-003`).
+    #[test]
+    fn before_delete_refuse_ligne_systeme() {
+        let err = Entity::before_delete(&existing_system_row(), &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-AGENT-003"));
+    }
+
+    /// La suppression d'un agent ordinaire reste autorisée par les hooks de ce fichier.
+    #[test]
+    fn before_delete_accepte_ligne_ordinaire() {
+        assert!(Entity::before_delete(&sample_model("primary"), &test_principal()).is_ok());
+    }
+
+    /// Scenario : `Sérialisation REST expose la forme ligne complète` — depuis
+    /// `Must` AGENTS SYSTÈME, la forme ligne compte ONZE clés : les neuf d'origine plus
+    /// `system_key` et `system_version` (présentes même à `None`).
+    #[test]
+    fn serialisation_expose_la_forme_ligne_complete() {
+        let row = Model {
+            id: 3,
+            owner_id: 7,
+            name: "x".to_string(),
+            description: None,
+            mode: "primary".to_string(),
+            model_profile_id: 2,
+            toolsets: serde_json::json!(["fs"]),
+            skills: serde_json::json!("auto"),
+            system_prompt: String::new(),
+            system_key: None,
+            system_version: None,
+        };
+        let value = serde_json::to_value(&row).expect("serializes");
+        let object = value.as_object().expect("object");
+        for key in [
+            "id",
+            "owner_id",
+            "name",
+            "description",
+            "mode",
+            "model_profile_id",
+            "toolsets",
+            "skills",
+            "system_prompt",
+            "system_key",
+            "system_version",
+        ] {
+            assert!(object.contains_key(key), "missing key {key}");
+        }
     }
 }
 

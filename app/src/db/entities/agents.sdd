@@ -96,6 +96,12 @@ Structure:
     (`"auto"`, `"none"` ou tableau de noms) — non typé ni validé ici.
   - `system_prompt: String` — SQL `STRING NOT NULL DEFAULT ''` ; @serde(default) :
     clé absente → chaîne vide.
+  - `system_key: Option<String>` — SQL `STRING` NULL (migration
+    ./../migration/m20261005_000003_alter_vanyline_agents_system.sdd) ; NULL pour un agent
+    ordinaire, clé stable (`"config"`/`"home"`/`"project"`/`"sandbox"`) pour un agent
+    système (../system_agents.sdd). Non requis, pas de défaut.
+  - `system_version: Option<i32>` — SQL `INTEGER` NULL (même migration) ; version du
+    prompt système embarqué ; NULL pour un agent ordinaire.
   Aucun champ temporel : la table ne porte ni `created_at` ni `updated_at` (déjà
   possédée par les tables sœurs `vanyline_conversations`, pas par `vanyline_agents`).
 
@@ -198,7 +204,8 @@ Must:
   - @sea_orm(table_name) porter exactement `"vanyline_agents"`, identique à l'@sea_orm(iden)
     de la migration `…000006` et des migrations sœurs qui référencent la table
     (`…000008` conversations).
-  - Porter exactement les 9 colonnes listées en Structure, mêmes noms Rust (snake_case
+  - Porter exactement les 11 colonnes listées en Structure (les 9 d'origine + les deux
+    champs système de m20261005_000003), mêmes noms Rust (snake_case
     serde par défaut), mêmes nullabilités — tout ajout/retrait de champ exige d'aligner
     la migration dans le même changement.
   - Garder `id` et `owner_id` avec @serde(default) : les corps de création du frontend
@@ -300,8 +307,10 @@ Scenario: Sérialisation REST expose la forme ligne complète
   Given un @Model construit avec `id: 3`, `owner_id: 7`, `model_profile_id: 2`,
     `toolsets: json!(["fs"])`, `skills: json!("auto")`, `description: @None`
   When il est sérialisé en JSON
-  Then l'objet contient les 9 clés `id`, `owner_id`, `name`, `description` (présente
-    même à @None), `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt`
+  Then l'objet contient les 11 clés `id`, `owner_id`, `name`, `description` (présente
+    même à @None), `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt`,
+    `system_key`, `system_version` (les deux dernières à @null pour un agent ordinaire —
+    ajout S8 2026-10-13, aligné sur le Must AGENTS SYSTÈME)
 
 Scenario: Création via resource_router retourne 201 avec des ids distincts
   Given une base réelle `../db/test_support.rs` @real_db (sqlite en mémoire,
@@ -371,10 +380,13 @@ Tasks:
       malgré le défaut SQL » (4e), « Corps de création du frontend désérialise sans id
       ni owner_id » (5e, couvert seulement de bout en bout via HTTP), « Champs absents
       du corps prennent les défauts serde » (6e), « Clé toolsets explicitement null
-      survit telle quelle » (7e), « Sérialisation REST expose la forme ligne complète »
-      (8e), « Deux agents homonymes chez le même owner collent en base » (10e), « Les
+      survit telle quelle » (7e), « Deux agents homonymes chez le même owner collent en base » (10e), « Les
       FK du schéma bornent le cycle de vie des lignes » (11e). Les écrire, ou assumer
       que la régression HTTP unique suffit à couvrir l'entité ?
+      — ressaisi 2026-10-14 (validator S8) : le 8e (« Sérialisation REST expose la forme
+      ligne complète ») est DÉSORMAIS COUVERT par @serialisation_expose_la_forme_ligne_complete
+      (11 clés depuis les champs système S8) ; les hooks AGENTS SYSTÈME ont leurs tests
+      homonymes (`before_create_refuse_*`, `before_update_*`, `before_delete_*`).
   [!] `mode` non gardé en UPDATE : @before_create ne couvre que la création ; si
       `resource_router` de miryad-core expose un PUT/PATCH, un `mode` invalide peut être
       écrit en modification, puis faire ÉCHECHER DURABLEMENT tout `list_agents` de

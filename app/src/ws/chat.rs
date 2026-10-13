@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -13,7 +13,6 @@ use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use vanyline_lib::domain::{McpSelection, McpServer, McpTransport};
 use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
@@ -115,6 +114,9 @@ async fn run_socket(
         return Err(AppError::ConversationAccessDenied);
     }
 
+    // `AuthUser` n'est pas `Clone` (miryad-core) : un `Arc` par socket, cloné vers
+    // chaque tâche de tour.
+    let user = Arc::new(user);
     let (ws_sink, mut ws_stream) = socket.split();
     let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
     let forward_handle = tokio::spawn(forward_events(rx, ws_sink));
@@ -152,6 +154,7 @@ async fn run_socket(
 
         let spawn_state = state.clone();
         let spawn_tx = tx.clone();
+        let spawn_user = Arc::clone(&user);
         let content = client_msg.content.clone();
         tokio::spawn(async move {
             let _guard = BusyGuard {
@@ -165,6 +168,7 @@ async fn run_socket(
                 conv.context_id,
                 agent_id,
                 user_id,
+                &spawn_user,
                 &content,
             )
             .await;
@@ -208,27 +212,27 @@ fn send_tool_unavailable(tx: &mpsc::UnboundedSender<ChatEvent>, server: &str, re
     });
 }
 
-/// Résout `extra_mcp` à partir du contexte de la conversation. Aujourd'hui,
-/// seul `kind = "sandbox"` produit un serveur MCP (l'URL de la sandbox
-/// elle-même, comme le fait `--toolbox` côté CLI) — les autres `kind` (à
-/// venir, cf. docs/features/chat-app-fonctionnel.md) n'ont pas encore de
-/// toolset associé et retournent une liste vide, silencieusement (ce n'est
-/// pas une panne, juste pas encore implémenté). Un échec de résolution
-/// (sandbox absente, K8s injoignable) est non bloquant pour le tour : signalé
-/// via `ChatEvent::ToolUnavailable` plutôt que d'échouer le tour entier.
+/// Résout `extra_mcp` à partir du contexte de la conversation (ws/chat.sdd `Must`,
+/// 2026-10-04 : « outils des agents système »). Pour un contexte `settings`, `home`,
+/// `project` ou `sandbox` — quel que soit l'agent, système ou ordinaire — la résolution
+/// passe par `system_agents::context_tools` : serveurs MCP de l'app elle-même avec un
+/// jeton d'API jetable de l'utilisateur, + serveur de la sandbox du contexte pour
+/// `sandbox` (scoping par propriétaire conservé, garde IDOR incluse). Le `ContextTools`
+/// rendu porte la capacité de révoquer le jeton en fin de tour ; l'appelant DOIT appeler
+/// `revoke`, succès du tour comme échec. Les autres kinds de contexte (ex. `chat`)
+/// restent sans serveurs forcés, comme avant 2026-10-04.
 ///
-/// `context.data.sandbox_name` vient du client (posé à la création de la
-/// conversation, cf. `ChatContextInput`) — sans le scoping owner ci-dessous,
-/// n'importe quel utilisateur authentifié pourrait faire résoudre les tools
-/// MCP d'une sandbox appartenant à quelqu'un d'autre en la nommant dans le
-/// contexte. Même vérification que `api::sandboxes::get_sandbox`
-/// (project.spec.owner == owner de l'utilisateur), pas de raccourci ici.
+/// L'amorçage idempotent des quatre lignes d'agents système (`ensure_system_agents`) est
+/// appelé ici pour les contextes système : `main.sdd` le contracte « à la première
+/// connexion d'un utilisateur », mais miryad-core ne prête aucun hook de login — le tour
+/// de chat est le point atteignable le plus proche (QUESTION remontée à la spec-dd).
 async fn resolve_extra_mcp(
     state: &AppState,
-    tx: &mpsc::UnboundedSender<ChatEvent>,
     context_id: i32,
+    user: &AuthUser,
     user_id: i32,
-) -> Result<Vec<(McpServer, McpSelection)>, AppError> {
+    agent_name: &str,
+) -> Result<crate::system_agents::ContextTools, AppError> {
     let db = &state.auth.db;
     let context = crate::db::entities::chat_contexts::Entity::find_by_id(context_id)
         .one(db)
@@ -236,86 +240,12 @@ async fn resolve_extra_mcp(
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
-    if context.kind != "sandbox" {
-        return Ok(Vec::new());
+    if crate::system_agents::system_agent_for(&context.kind).is_none() {
+        return Ok(crate::system_agents::ContextTools::default());
     }
 
-    let Some(sandbox_name) = context.data.get("sandbox_name").and_then(|v| v.as_str()) else {
-        send_tool_unavailable(
-            tx,
-            "sandbox",
-            "contexte sandbox invalide (sandbox_name absent)",
-        );
-        return Ok(Vec::new());
-    };
-
-    let owner = match crate::api::owners::resolve_owner_name(state, user_id).await {
-        Ok(Some(o)) => o,
-        Ok(None) => {
-            send_tool_unavailable(
-                tx,
-                sandbox_name,
-                "aucun owner K8s associé à cet utilisateur",
-            );
-            return Ok(Vec::new());
-        }
-        Err(e) => {
-            send_tool_unavailable(tx, sandbox_name, &e.to_string());
-            return Ok(Vec::new());
-        }
-    };
-
-    let client = match crate::k8s::client(state).await {
-        Ok(c) => c,
-        Err(e) => {
-            send_tool_unavailable(tx, sandbox_name, &e.to_string());
-            return Ok(Vec::new());
-        }
-    };
-
-    let sandbox = match client.get_sandbox(&owner, sandbox_name).await {
-        Ok(s) => s,
-        Err(e) => {
-            send_tool_unavailable(tx, sandbox_name, &e.to_string());
-            return Ok(Vec::new());
-        }
-    };
-    let project = match client.get_project(&owner, &sandbox.spec.project).await {
-        Ok(p) => p,
-        Err(e) => {
-            send_tool_unavailable(tx, sandbox_name, &e.to_string());
-            return Ok(Vec::new());
-        }
-    };
-    if project.spec.owner != owner {
-        send_tool_unavailable(
-            tx,
-            sandbox_name,
-            "sandbox hors du périmètre de cet utilisateur",
-        );
-        return Ok(Vec::new());
-    }
-
-    let url = match client.sandbox_mcp_url(&owner, sandbox_name).await {
-        Ok(url) => url,
-        Err(e) => {
-            send_tool_unavailable(tx, sandbox_name, &e.to_string());
-            return Ok(Vec::new());
-        }
-    };
-
-    Ok(vec![(
-        McpServer {
-            name: "sandbox".to_string(),
-            transport: McpTransport::HttpStreamable,
-            url,
-            headers: BTreeMap::default(),
-        },
-        McpSelection {
-            server: "sandbox".to_string(),
-            tools: vec![],
-        },
-    )])
+    crate::system_agents::ensure_system_agents(db, user_id).await?;
+    crate::system_agents::context_tools(state, user, &context.kind, &context, agent_name).await
 }
 
 /// Persistance (R9) : le message user est enregistré AVANT l'appel à
@@ -325,6 +255,7 @@ async fn resolve_extra_mcp(
 /// d'échec). C'est cette sémantique qui fait référence — le RPC
 /// (`cli/src/rpc/handlers.rs`) est aligné dessus séparément.
 #[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
+#[allow(clippy::too_many_arguments)] // ws/chat.sdd handle_message : les 8 parametres sont le contrat du tour (2026-10-04)
 async fn handle_message(
     tx: &mpsc::UnboundedSender<ChatEvent>,
     state: &AppState,
@@ -332,6 +263,7 @@ async fn handle_message(
     context_id: i32,
     agent_id: i32,
     user_id: i32,
+    user: &AuthUser,
     user_msg: &str,
 ) -> Result<(), AppError> {
     let db = &state.auth.db;
@@ -353,7 +285,10 @@ async fn handle_message(
             .map_err(AppError::from)?
             .and_then(|conv| conv.todo);
 
-    let extra_mcp = resolve_extra_mcp(state, tx, context_id, user_id).await?;
+    let mut tools = resolve_extra_mcp(state, context_id, user, user_id, &agent_name).await?;
+    for (server, reason) in &tools.unavailable {
+        send_tool_unavailable(tx, server, reason);
+    }
 
     let sink = Arc::new(ChannelSink { tx: tx.clone() });
     let ctx = SessionContext {
@@ -361,13 +296,20 @@ async fn handle_message(
         sink,
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
-        extra_mcp,
+        extra_mcp: tools.take_servers(),
         model_override: None,
         todo_state: Arc::new(std::sync::Mutex::new(todo_initial.clone())),
     };
 
-    let result =
-        vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None).await?;
+    let turn =
+        vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None).await;
+    // Jeton jetable du tour : révoqué QUE LE TOUR RÉUSSISSE OU ÉCHEUE (system_agents.sdd
+    // `Must`), avant toute propagation d'erreur ; l'échec de révocation est loggé, le
+    // jeton meurt de toute façon à 1 h.
+    if let Err(e) = tools.revoke().await {
+        tracing::warn!("ws chat: token revocation failed: {e}");
+    }
+    let result = turn?;
 
     let tool_calls = tool_calls_for_persistence(&result.tool_calls);
     persist_message(
@@ -594,5 +536,317 @@ mod tests {
     #[test]
     fn todo_to_persist_unchanged_none_is_none() {
         assert_eq!(todo_to_persist(None, None), None);
+    }
+
+    // ── Outils des agents système (ws/chat.sdd `Must`, 2026-10-04 ; system_agents.sdd) ──
+
+    use crate::db::entities::{chat_contexts, model_profiles};
+    use sea_orm::{ActiveValue::NotSet, ConnectionTrait, EntityTrait, Set, Statement};
+
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            oidc_issuer_url: "https://issuer.example.com".to_string(),
+            oidc_client_id: "client-id".to_string(),
+            oidc_client_secret: "client-secret".to_string(),
+            oidc_redirect_url: "https://app.example.com/callback".to_string(),
+            oidc_scopes: vec![],
+            oidc_ca_cert: None,
+            oidc_connect_timeout: std::time::Duration::from_secs(5),
+            oidc_timeout: std::time::Duration::from_secs(15),
+            cookie_secret: "0".repeat(64),
+            database_url: "sqlite::memory:".to_string(),
+            listen_addr: "0.0.0.0:8080".to_string(),
+            static_dir: "./static".to_string(),
+            k8s_namespace: None,
+            application_name: None,
+            default_home_storage_class: None,
+            default_home_access_mode: None,
+            default_project_storage_class: None,
+            default_project_access_mode: None,
+            restate_admin_url: None,
+            restate_ingress_url: None,
+            workflow_listen: "0.0.0.0:9080".to_string(),
+            workflow_deployment_url: None,
+        }
+    }
+
+    fn test_state_with_db(db: sea_orm::DatabaseConnection) -> AppState {
+        AppState {
+            config: test_config(),
+            cookie_key: cookie::Key::from(&[0u8; 64]),
+            busy: Arc::new(Mutex::new(HashSet::new())),
+            k8s: Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+            shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+            workflow: None,
+        }
+    }
+
+    fn test_user() -> AuthUser {
+        AuthUser {
+            subject: "alice".to_string(),
+            email: None,
+            id_token: "test-id-token".to_string(),
+        }
+    }
+
+    async fn seed_context(state: &AppState, kind: &str, data: serde_json::Value) -> i32 {
+        chat_contexts::Entity::insert(chat_contexts::ActiveModel {
+            id: NotSet,
+            kind: Set(kind.to_string()),
+            data: Set(data),
+            created_at: Set(chrono::Utc::now()),
+        })
+        .exec(&state.auth.db)
+        .await
+        .expect("context inserts")
+        .last_insert_id
+    }
+
+    async fn seed_profile(state: &AppState, owner: i32) {
+        let provider = crate::db::entities::llm_providers::ActiveModel {
+            id: NotSet,
+            name: Set("p".to_string()),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://x".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(true),
+        };
+        let provider = crate::db::entities::llm_providers::Entity::insert(provider)
+            .exec(&state.auth.db)
+            .await
+            .expect("provider inserts")
+            .last_insert_id;
+        model_profiles::Entity::insert(model_profiles::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set("qwen".to_string()),
+            provider_id: Set(provider),
+            model: Set("qwen".to_string()),
+            temperature: Set(None),
+            max_tokens: Set(None),
+            options: Set(serde_json::json!({})),
+        })
+        .exec(&state.auth.db)
+        .await
+        .expect("profile inserts");
+    }
+
+    async fn token_count(state: &AppState) -> i64 {
+        let res = state
+            .auth
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                state.auth.db.get_database_backend(),
+                "SELECT COUNT(*) FROM miryad_api_tokens",
+                [],
+            ))
+            .await
+            .expect("count succeeds")
+            .expect("count row");
+        res.try_get_by_index::<i64>(0)
+            .or_else(|_| res.try_get_by_index::<i32>(0).map(i64::from))
+            .expect("count decodes")
+    }
+
+    fn noop_tx() -> mpsc::UnboundedSender<ChatEvent> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        tx
+    }
+
+    /// ws/chat.sdd `Must` : une conversation HORS contexte système (ex. `chat`) ne reçoit
+    /// aucun serveur forcé et ne fait émettre AUCUN jeton.
+    #[tokio::test]
+    async fn hors_contexte_systeme_aucun_outil_aucun_jeton() {
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let user_id = miryad_core::users::resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        let context_id = seed_context(&state, "chat", serde_json::json!({})).await;
+
+        let tools = resolve_extra_mcp(&state, context_id, &test_user(), user_id, "mon-agent")
+            .await
+            .expect("hors contexte: aucune panne");
+        assert!(tools.servers.is_empty());
+        assert_eq!(
+            token_count(&state).await,
+            0,
+            "aucun jeton émis hors contexte"
+        );
+        let _ = noop_tx();
+    }
+
+    /// ws/chat.sdd `Must` : un contexte `settings` résout `extra_mcp` par `context_tools`
+    /// (serveur `vanyline-config` + jeton émis) ET amorce les quatre agents système.
+    #[tokio::test]
+    async fn contexte_settings_resout_config_et_amorce_les_agents() {
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let user_id = miryad_core::users::resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        seed_profile(&state, user_id).await;
+        let context_id = seed_context(&state, "settings", serde_json::json!({})).await;
+
+        let tools = resolve_extra_mcp(&state, context_id, &test_user(), user_id, "config")
+            .await
+            .expect("settings résout");
+        let names: Vec<&str> = tools.servers.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert_eq!(names, ["vanyline-config"]);
+        assert_eq!(token_count(&state).await, 1, "un jeton par tour");
+
+        let agents = crate::db::entities::agents::Entity::find()
+            .all(&state.auth.db)
+            .await
+            .expect("find succeeds");
+        assert_eq!(
+            agents.len(),
+            4,
+            "l\'amorçage des agents système est branché ici"
+        );
+    }
+
+    /// Pannes de résolution sandbox NON bloquantes : sans cluster joignable, le serveur
+    /// `vanyline-domain` du contexte `sandbox` reste et le serveur sandbox est rendu
+    /// indisponible (signalé en `ToolUnavailable` par l\'appelant).
+    #[tokio::test]
+    async fn sandbox_hors_cluster_non_bloquante() {
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let user_id = miryad_core::users::resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        seed_profile(&state, user_id).await;
+        let context_id = seed_context(
+            &state,
+            "sandbox",
+            serde_json::json!({"sandbox_name": "sb-1"}),
+        )
+        .await;
+
+        let tools = resolve_extra_mcp(&state, context_id, &test_user(), user_id, "sandbox")
+            .await
+            .expect("la panne sandbox ne doit pas faire échouer le tour");
+        let names: Vec<&str> = tools.servers.iter().map(|(s, _)| s.name.as_str()).collect();
+        assert_eq!(names, ["vanyline-domain"]);
+        assert!(
+            tools.unavailable.iter().any(|(s, _)| s == "sandbox"),
+            "got: {:?}",
+            tools.unavailable
+        );
+    }
+
+    /// ws/chat.sdd `Must` : le contexte inexistant reste la seule panne bloquante
+    /// (comportement historique `VNL-DB-007`).
+    #[tokio::test]
+    async fn contexte_absent_reste_bloquant() {
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let user_id = miryad_core::users::resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        let err = resolve_extra_mcp(&state, 999, &test_user(), user_id, "x")
+            .await
+            .expect_err("contexte absent: bloquant");
+        assert!(err.to_string().contains("VNL-DB-007"));
+    }
+
+    /// ws/chat.sdd §Must (S8) : le jeton jetable du tour est révoqué en fin de tour,
+    /// que le tour RÉUSSISSE OU ÉCHOUE. Ici l'échec est naturel et post-émission : le
+    /// fournisseur vise un endpoint surement injoignable (port 9 « discard », fermé →
+    /// connection refused immédiate), le jeton est donc bien émis par `context_tools`
+    /// avant que `run_agent_turn` n'échoue.
+    #[tokio::test]
+    async fn jeton_revoque_malgre_tour_en_erreur() {
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let user_id = miryad_core::users::resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        // Fournisseur injoignable garanti : le tour échoue APRÈS l'émission du jeton.
+        let provider = crate::db::entities::llm_providers::ActiveModel {
+            id: NotSet,
+            name: Set("injoignable".to_string()),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://127.0.0.1:9".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(true),
+        };
+        let provider = crate::db::entities::llm_providers::Entity::insert(provider)
+            .exec(&state.auth.db)
+            .await
+            .expect("provider inserts")
+            .last_insert_id;
+        model_profiles::Entity::insert(model_profiles::ActiveModel {
+            id: NotSet,
+            owner_id: Set(user_id),
+            name: Set("qwen".to_string()),
+            provider_id: Set(provider),
+            model: Set("qwen".to_string()),
+            temperature: Set(None),
+            max_tokens: Set(None),
+            options: Set(serde_json::json!({})),
+        })
+        .exec(&state.auth.db)
+        .await
+        .expect("profile inserts");
+
+        let rows = crate::system_agents::ensure_system_agents(&state.auth.db, user_id)
+            .await
+            .expect("system agents ensure");
+        let agent_id = rows
+            .iter()
+            .find(|r| r.system_key.as_deref() == Some("config"))
+            .expect("config agent")
+            .id;
+        let context_id = seed_context(&state, "settings", serde_json::json!({})).await;
+        let conversation_id = crate::db::entities::conversations::Entity::insert(
+            crate::db::entities::conversations::ActiveModel {
+                id: NotSet,
+                owner_id: Set(user_id),
+                agent_id: Set(Some(agent_id)),
+                context_id: Set(context_id),
+                title: Set(None),
+                todo: Set(None),
+                created_at: Set(chrono::Utc::now()),
+                updated_at: Set(chrono::Utc::now()),
+            },
+        )
+        .exec(&state.auth.db)
+        .await
+        .expect("conversation inserts")
+        .last_insert_id;
+
+        assert_eq!(
+            token_count(&state).await,
+            0,
+            "aucun jeton avant le tour (le compte viendra de context_tools)"
+        );
+
+        let err = handle_message(
+            &noop_tx(),
+            &state,
+            conversation_id,
+            context_id,
+            agent_id,
+            user_id,
+            &test_user(),
+            "salut",
+        )
+        .await
+        .expect_err("le tour doit échouer sur l'endpoint injoignable");
+        assert!(
+            !err.to_string().contains("VNL-DB-007"),
+            "l'échec attendu est celui du tour, pas du contexte: {err}"
+        );
+
+        assert_eq!(
+            token_count(&state).await,
+            0,
+            "le jeton émis pour le tour doit être révoqué même quand le tour échoue"
+        );
     }
 }

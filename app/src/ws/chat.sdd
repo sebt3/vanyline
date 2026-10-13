@@ -187,10 +187,15 @@ Returns:
     testées). @tool_calls_for_persistence : même ordre, même contenu sans `id`, vide →
     vide. @persist_message : id i32 inséré (non consommé). @load_history : Vec dans
     l'ordre @created_at ASC, éléments élagués exclus.
-  @resolve_extra_mcp @Ok : @Vec de paires @(@McpServer, @McpSelection) de 0 ou 1 élément ;
-    succès = @McpServer { name: `"sandbox"`, transport: @McpTransport::HttpStreamable,
+  @resolve_extra_mcp @Ok : @Vec de paires @(@McpServer, @McpSelection) — 0 à 2 éléments
+    selon le contexte (table de ../system_agents.sdd : `settings` → config seul ;
+    `home`/`project` → config + domain ; `sandbox` → domain + sandbox ; hors contexte →
+    vide). Serveurs de l'app elle-même : URL loopback avec l'en-tête du jeton d'API
+    jetable de l'utilisateur. Serveur sandbox : @McpServer { name: `"sandbox"`,
+    transport: @McpTransport::HttpStreamable,
     url interne ClusterIP `http://{service}.{namespace}.svc:{MCP_PORT}/mcp` (construit
-    par la lib), headers vides } + @McpSelection { server: `"sandbox"`, tools: vec![] }
+    par la lib), en-tête d'autorisation du jeton d'accès sandbox (kind : `[?]`
+    ../system_agents.sdd) } + @McpSelection { server: `"sandbox"`, tools: vec![] }
     — `tools` vide = sélection de TOUS les tools (contrat @McpSelection de
     `../../../cfgstore/src/domain.rs`, doc « Vide = tous ("*") »).
 
@@ -542,11 +547,17 @@ Scenario: historique rejoue en ordre et ecarte les lignes hors vocabulaire
     rig) — les lignes invalides et hors vocabulaire sont écartées sans erreur ni log
     (test d'intégration @real_db)
 
-Scenario: contexte hors sandbox donne zero tool sans signal
-  Given une conversation dont @chat_contexts.kind vaut `"settings"` (kind non câblé)
+Scenario: contexte hors sandbox resout les outils du contexte
+  # Réécrit 2026-10-14 (passe spec-dd S8) — l'ancien « contexte hors sandbox donne zero
+  # tool sans signal » décrivait le pré-contrat « settings = kind non câblé », caduc depuis
+  # le §Must « Outils des agents système » (2026-10-04) de cette spec.
+  Given une conversation dont @chat_contexts.kind vaut `"settings"` (puis `"home"`, puis
+    `"project"`)
   When @resolve_extra_mcp résout pour un tour
-  Then @Ok(vec![]) est rendu et AUCUN @ChatEvent::ToolUnavailable n'est émis — le tour
-    part sans tools, silencieusement (test d'intégration @real_db, K8s jamais appelé)
+  Then les serveurs rendus sont ceux de `context_tools` pour CE contexte (table de
+    ../system_agents.sdd : `settings` → config seul ; `home`/`project` → config + domain),
+    avec le jeton d'API jetable de l'utilisateur — plus AUCUN retour `Ok(vec![])` silencieux
+    pour ces kinds (test `contexte_settings_resout_config_et_amorce_les_agents`)
 
 Scenario: contexte sandbox sans sandbox_name signale ToolUnavailable server sandbox
   Given un contexte @kind=`"sandbox"` dont @data ne porte pas la clé `"sandbox_name"`
@@ -573,8 +584,22 @@ Scenario: contexte sandbox valide produit le serveur MCP sandbox tous tools
   When @resolve_extra_mcp résout
   Then la liste rendue a exactement une paire : @McpServer { name: `"sandbox"`,
     transport: @McpTransport::HttpStreamable, url interne `…/mcp` issue de
-    @sandbox_mcp_url, headers vides } et @McpSelection { server: `"sandbox"`, tools:
+    @sandbox_mcp_url, EN-TÊTE d'autorisation portant le jeton d'accès de la sandbox du
+    contexte} et @McpSelection { server: `"sandbox"`, tools:
     `[]` } — tools vides = sélection de tous les tools ; aucun @ToolUnavailable
+    (quel jeton — utilisateur ou Owner-SA — : objet du `[?]` de ../system_agents.sdd, la
+    sandbox n'acceptant physiquement que le JWT de l'Owner selon
+    `/sandbox/src/auth.sdd`)
+
+Scenario: jeton_revoque_malgre_tour_en_erreur
+  # Ajouté 2026-10-14 (S8) — contrat §Must « révoquer le jeton à la fin du tour, succès
+  # OU erreur » ; le test éponyme (ws/chat.rs) échoue le tour APRÈS émission (endpoint
+  # fermé) et asserit le compteur `miryad_api_tokens` à 0.
+  Given une conversation de contexte système dont le tour doit échouer après l'émission
+    du jeton d'API jetable (par exemple fournisseur injoignable)
+  When @handle_message termine (en erreur)
+  Then le jeton émis pour ce tour est RÉVOQUÉ (plus présent en base) et AUCUN événement
+    ni message persisté ne le porte
 
 Scenario: ligne de contexte absente bloque le tour en VNL-DB-007
   Given une conversation orpheline de contexte (ligne `vanyline_chat_contexts` supprimée
@@ -651,6 +676,13 @@ Tasks:
   [ ] Contextes `settings`/`home`/`project` et agents système (2026-10-04) : les Scenario « contexte
     hors sandbox donne zéro tool » sont à réécrire (ces contextes donnent désormais les outils de
     leur agent système) ; ajouter les Scenario de révocation de jeton et de non-fuite.
+    — Partiel 2026-10-14 : Scenario « hors sandbox » réécrit et « contexte sandbox valide »
+    alignés par le spec-dd ; Scenario de révocation ajouté ci-dessous (test
+    `jeton_revoque_malgre_tour_en_erreur` en place). RESTE : Scenario de NON-FUITE du
+    jeton (aucun test d'absence dans les événements/la base — contrat §Must déjà écrit),
+    tests des branches « sandbox_name absent » et IDOR (voir les deux Scenarios qui
+    revendiquent @real_db sans test — à écrire ou à requalifier cluster-manuel), et
+    l'arbitrage `[?]` du jeton sandbox (E1, ../system_agents.sdd).
   [!] Erreurs de conversation invisibles au client : @ConversationNotFound /
     @ConversationAccessDenied / @resolve_user en échec surviennent APRÈS l'upgrade et ne
     produisent qu'une fermeture de socket + log serveur — le frontend ne peut pas

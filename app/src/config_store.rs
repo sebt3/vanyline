@@ -365,6 +365,8 @@ mod tests {
             toolsets,
             skills,
             system_prompt: "prompt".to_string(),
+            system_key: None,
+            system_version: None,
         }
     }
 
