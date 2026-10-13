@@ -560,22 +560,31 @@ Scenario: contexte hors sandbox resout les outils du contexte
     pour ces kinds (test `contexte_settings_resout_config_et_amorce_les_agents`)
 
 Scenario: contexte sandbox sans sandbox_name signale ToolUnavailable server sandbox
+  # Wording « Ok(vec![]) » ressynchronisé 2026-10-14 (passe spec-dd) : pré-contrat
+  # « contexte hors sandbox = zéro tool », caduc face au §Must « Outils des agents
+  # système » — la résolution rend le domain, seul le serveur sandbox est absent.
   Given un contexte @kind=`"sandbox"` dont @data ne porte pas la clé `"sandbox_name"`
-    (ou la porte non-chaîne)
+    (ou la porte non-chaîne, ou @null)
   When @resolve_extra_mcp résout
   Then un @ChatEvent::ToolUnavailable { server: `"sandbox"`, reason: `"contexte sandbox
-    invalide (sandbox_name absent)"` } est émis et @Ok(vec![]) rendu — le tour continue
-    sans tools (test d'intégration @real_db)
+    invalide (sandbox_name absent)"` } est émis ; la liste rendue ne contient AUCUN
+    serveur `"sandbox"` (pas d'URL MCP) mais garde le serveur `vanyline-domain` du
+    contexte — le tour continue sans la sandbox (test
+    `contexte_sandbox_sans_sandbox_name_signale_tool_unavailable_server_sandbox`)
 
 Scenario: sandbox nommee hors du perimetre de l utilisateur est refusee
+  # Requalifié en intégration CLUSTER-MANUEL 2026-10-14 : la garde lit Sandbox puis
+  # Project via le client kube réel (`../k8s.sdd` : anti-mock kube, pas de seam
+  # d'injection) — aucune fixture propre possible sans violer ce contrat. À dérouler
+  # sur le cluster de test ; aucune couverture revendiquée.
   Given un contexte @kind=`"sandbox"` nommant une sandbox dont le @Project.spec.owner
-    diffère de l'owner de l'utilisateur (cluster de test, ou fixture respectant la
-    convention anti-mock kube de ../k8s.sdd)
+    diffère de l'owner de l'utilisateur (cluster de test — convention anti-mock kube
+    de ../k8s.sdd)
   When @resolve_extra_mcp résout
   Then @ToolUnavailable { server: sandbox_name, reason: `"sandbox hors du périmètre de
-    cet utilisateur"` } est émis, @Ok(vec![]) rendu, et AUCUNE url MCP de cette sandbox
-    n'est produite — la garde IDOR ne peut pas être court-circuitée par un contexte
-    pointant une sandbox d'autrui
+    cet utilisateur"` } est émis, @Ok rendu sans serveur de cette sandbox, et AUCUNE
+    url MCP de cette sandbox n'est produite — la garde IDOR ne peut pas être
+    court-circuitée par un contexte pointant une sandbox d'autrui
 
 Scenario: contexte sandbox valide produit le serveur MCP sandbox tous tools
   Given un contexte @kind=`"sandbox"` nommant une sandbox de l'owner de l'utilisateur,
@@ -680,9 +689,9 @@ Tasks:
     alignés par le spec-dd ; Scenario de révocation ajouté ci-dessous (test
     `jeton_revoque_malgre_tour_en_erreur` en place). RESTE : Scenario de NON-FUITE du
     jeton (aucun test d'absence dans les événements/la base — contrat §Must déjà écrit),
-    tests des branches « sandbox_name absent » et IDOR (voir les deux Scenarios qui
-    revendiquent @real_db sans test — à écrire ou à requalifier cluster-manuel), et
-    l'arbitrage `[?]` du jeton sandbox (E1, ../system_agents.sdd).
+    garde IDOR requalifiée cluster-manuel (à dérouler sur le cluster de test) ; la
+    branche « sandbox_name absent » est testée depuis 2026-10-14, et l'arbitrage `[?]`
+    du jeton sandbox (E1, ../system_agents.sdd).
   [!] Erreurs de conversation invisibles au client : @ConversationNotFound /
     @ConversationAccessDenied / @resolve_user en échec surviennent APRÈS l'upgrade et ne
     produisent qu'une fermeture de socket + log serveur — le frontend ne peut pas

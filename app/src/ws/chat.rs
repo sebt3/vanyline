@@ -738,6 +738,54 @@ mod tests {
         );
     }
 
+    /// Scenario ws/chat.sdd « contexte sandbox sans `sandbox_name` signale `ToolUnavailable`
+    /// server sandbox » : un contexte `sandbox` dont `data` ne porte pas la clé
+    /// `sandbox_name` (ou la porte non-chaîne) → résolution NON bloquante (`Ok`), signal
+    /// `ToolUnavailable { server: "sandbox", reason exact }` (porté par
+    /// `ContextTools::unavailable`, converti en `@ChatEvent::ToolUnavailable` par
+    /// `handle_message`), et AUCUNE url MCP sandbox rendue. Sans cluster : la branche
+    /// échoue avant tout appel kube. Écart tracé pour la spec-dd : le « `Ok(vec![])` »
+    /// littéral du Scenario (rédigé pré-2026-10-04) contredit le §Must « Outils des
+    /// agents système » de la même spec (table `sandbox` → domain + sandbox) ; le
+    /// serveur `vanyline-domain` du contexte est donc rendu, seul le serveur `sandbox`
+    /// est absent.
+    #[tokio::test]
+    async fn contexte_sandbox_sans_sandbox_name_signale_tool_unavailable_server_sandbox() {
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let user_id = miryad_core::users::resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        seed_profile(&state, user_id).await;
+
+        for data in [
+            serde_json::json!({}),
+            serde_json::json!({"sandbox_name": 42}),
+            serde_json::json!({"sandbox_name": null}),
+        ] {
+            let context_id = seed_context(&state, "sandbox", data).await;
+            let tools = resolve_extra_mcp(&state, context_id, &test_user(), user_id, "sandbox")
+                .await
+                .expect("sandbox_name absent ou non-chaîne : panne non bloquante (Ok)");
+            assert!(
+                tools.unavailable.iter().any(|(s, r)| s == "sandbox"
+                    && r == "contexte sandbox invalide (sandbox_name absent)"),
+                "ToolUnavailable exact attendu, got: {:?}",
+                tools.unavailable
+            );
+            let names: Vec<&str> = tools.servers.iter().map(|(s, _)| s.name.as_str()).collect();
+            assert!(
+                !names.contains(&"sandbox"),
+                "aucune url MCP sandbox rendue, got: {names:?}"
+            );
+            assert_eq!(
+                names,
+                ["vanyline-domain"],
+                "le contexte sandbox conserve les outils §Must du contexte (domain)"
+            );
+        }
+    }
+
     /// ws/chat.sdd `Must` : le contexte inexistant reste la seule panne bloquante
     /// (comportement historique `VNL-DB-007`).
     #[tokio::test]

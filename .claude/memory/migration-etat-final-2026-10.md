@@ -236,3 +236,49 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
 - **Suite** : S6c (écrire RestateSpec dans crds/src/lib.sdd — tâche SPEC-DD,
   puis delegate crds+controller, décommenter wiring S6b) → étape 7 TUI cli →
   8 agents système → 9 llm-config. Rien poussé (~25 commits locaux).
+
+## Session 2026-10-13→14 — S6c + étape 7 TUI + étape 8 agents système (commités, rien poussé)
+
+- **S6c commitée `cf8c5cd`** (validator PASS) : contrat RestateSpec rédigé en `crds/src/lib.sdd`
+  par le spec-dd (3 Option<String>, replis au controller) puis livré — `restate` dans la CRD
+  Application (`crds.yaml` régénéré, diff = bloc restate seul), builders StatefulSet
+  (mono-réplica, `RESTATE_LABEL` pod template+selector, vct 5Gi)/Service (8080/9070/5122,
+  jamais d'Ingress)/netpol (app→8080+9070, sandboxes→8080 seul), Role à DEUX règles
+  (Scenario 3 règles REMPLACÉ dans la spec), `--restate-image`, wiring cross-namespace
+  S6b ACTIVÉ en `apply()`. `[x]` : crds S6c, wiring, `VNL_HEALTH_BASE_REF` (H3b re-vérifié).
+- **Étape 7 TUI commitée `717eacd`** (validator FAIL→corrections→PASS) : les 6 fichiers
+  `cli/src/tui/` (52/52 Scenarios testés), gate TTY + `cli/tests/tui_usage.rs`, `run_repl`
+  supprimé. **Leçon : premier implementer revenu avec un rapport FANTÔME (fichiers de tests
+  annoncés inexistants, `markdown.rs` non compilable) + session perdue au timeout — reprise
+  par un second lot avec mandat « arbre = seule vérité »**, `dest`→`destination`
+  pulldown-cmark 0.13. 216 tests cli.
+- **Étape 8 commitée `9cb7409`** (validator FAIL→corrections→PASS) : migrations
+  m20261005_000003/4 (chaîne à QUATORZE, `mod.sdd` ressynchronisé), hooks
+  `VNL-AGENT-002/003/004`, entité `app_settings`, `system_agents.rs` (prompts
+  `SYSTEM_VERSION=1` À RELIRE Sébastien), branchement `context_tools` dans `ws/chat`.
+  Durcissement E4 : `base` avant `issue_token` (test rouge/vert, jeton jamais vivant) ;
+  test révocation-sur-erreur ajouté. 310 tests app.
+- **E1-S8 OUVERT (arbitrage dû, le plus important de la passe)** : le serveur `sandbox` de
+  `context_tools` porte le jeton UTILISATEUR mais `sandbox/src/auth.sdd` n'accepte que le
+  JWT SA de l'Owner (audience `vanyline-sandbox`) → 401 garanti en cluster sur ce chemin.
+  `owner_token` existe dans lib feature `k8s`. `[?]` dans `system_agents.sdd`.
+- **E1-S7 récidive évitée** : 2 allows `too_many_lines` sans ancre → ancres vérifiées
+  fidèles par le re-validator. Aucun nouveau compteur de dette (harnais toujours zéro).
+- **Passe d'arbitrage Sébastien — les `[?]` de cette session** : E1-S8 (jeton sandbox) ;
+  application.sdd ×5 (sockets restated, noms netpol/ports, table d'env 12 var, ordre
+  reconcile + sort du PVC au retrait) ; sandbox.sdd (mutualisation `fetch_application`) ;
+  main.sdd controller (13→14 drapeaux, `--restate-image` `:latest` à épingler) ;
+  system_agents.sdd ×4 (NoModelProfile→422/VNL-LLM-008, nom=clé vs UNIQUE(owner_id,name),
+  fournisseur supprimé derrière `default_model`, E1) ; app_settings.sdd (`VNL-SET-001/002`) ;
+  main.sdd app (point d'amorçage vs hook login) ; chat.sdd ×4 (stderr, `repl_*` stale,
+  motif VNL-CFG, +5 Scenarios one-shot sans test — dette tracée) ; tui/mod.sdd (panique
+  tâche de tour, `--no-mouse`, `TuiSession` toolbox/mouse, ligne finale hors backend) ;
+  editor.sdd (curseur sans wrap) ; tooling.sdd (missing_docs mods privés) ; vanyline.sdd
+  (démarrer llm-config ?).
+- **Restes tracés** : `/mcp` générique miryad-core JAMAIS MONTÉ (tâche main.sdd — verrou
+  d'accouchabilité : `vanyline-config` vise une route inexistante en prod) ; `app-settings`
+  non monté non plus (même tâche) ; prompts système à relire ; IDOR sandbox et
+  « sandbox_name absent » — tests en cours ce soir ; dette cluster : wiring restate
+  cross-namespace, happy path `domain+sandbox`, DDL Postgres des migrations.
+- **Suite** : étape 9 `llm-config` bloquée `[?]` (aucune spec) ; specs toolchains/images et
+  déploiement non écrites ; ~14 Scenarios `from_env_*` config.sdd toujours sans tests.
