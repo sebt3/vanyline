@@ -110,6 +110,10 @@ Tasks:
   [ ] Agents système (`app/src/system_agents.sdd`) et écrans (`frontend/frontend.sdd` et specs liées).
   [ ] Autonomie des agents (`lib/src/autonomous.sdd`) et, sur décision, extraction de la
     config LLM (`llm-config/src/lib.sdd`, membre `llm-config` à ajouter au workspace).
+  [?] Démarrer l'étape 9 (`llm-config`) maintenant ? Aucune spec `.sdd` n'existe pour ce
+    crate (la règle « pas de code sans spec » interdit d'implémenter avant) ; l'extraction
+    de la config LLM hors de `app`/`cfgstore` est-elle décidée, et avec quel périmètre de
+    partage entre applications miryad-core ?
 
 Done when:
   Chaque fichier `*.rs` du workspace est couvert par une spec revue, le harnais est à

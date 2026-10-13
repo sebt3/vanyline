@@ -232,6 +232,11 @@ Tasks:
   [?] Bascule `missing_docs = "deny"` dans `[workspace.lints]` : la purge est faite
     partout, le passage en deny est désormais sans coût — GO ? (contrevient seulement
     si un crate futur veut s'en dispenser ; le retirer plus tard est trivial.)
+  [?] Portée de `missing_docs` sur les mods privés neufs (S7 cli tui, 2026-10-13) : le
+    patron racine de crate `#![allow(missing_docs)]` ne signale pas `mod tui` ni `mod tests`
+    sans aucune doc — l'implémentation TUI a donc posé des docs par prudence sans y être
+    contrainte. Le harnais doit-il exiger une doc sur tout module privé neuf (extension de
+    la purge aux mods), ou le silence du `allow` racine est-il le contrat assumé ?
   [x] Basculer la vérification harnais en tout-vert (compteur de dette à zéro) — FAIT
     2026-10-09, validator-vert : `cargo clippy --workspace --all-targets -- -D warnings`
     VERT sur les 8 crates, 0 unique sous cap. Les exemptions `cfg(test)` restent toutes
