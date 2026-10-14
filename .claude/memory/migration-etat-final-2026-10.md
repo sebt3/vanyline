@@ -282,3 +282,46 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
   cross-namespace, happy path `domain+sandbox`, DDL Postgres des migrations.
 - **Suite** : étape 9 `llm-config` bloquée `[?]` (aucune spec) ; specs toolchains/images et
   déploiement non écrites ; ~14 Scenarios `from_env_*` config.sdd toujours sans tests.
+
+## Session 2026-10-14 (2) — dettes de tests soldées + ressynchronisation ws/chat.sdd
+
+- **`14f9160`** : 16 tests `from_env_*` (12 + 4 optional) dans `app/src/config.rs` (fichier
+  100 % tests) — dette « ~14 from_env » SOLDÉE (16 au lieu de 14), couverture 100 % de
+  `AppConfig::from_env`, tâche config.sdd `[x]`. Cosmétique restant noté : les 3 Scenario
+  `moteur_workflow_*` sont couverts par des tests nommés `from_env_workflow_*` (à renommer).
+- **`63856b3`** : 5 Scenarios one-shot cli sans homonyme — 2 process (`cli/tests/one_shot.rs`,
+  mock SSE loopback 127.0.0.1:0, binaire réel) + 3 unité ; 221 = 216+5, validator VERT
+  (fidélité Then par Then, y compris corps de requête reçu et `is_poisoned()`). Tâche
+  `[x]`, compteur `mod tests` 16→21. 311 app, 221 cli, 180 controller, 38 crds.
+- **`7ff62e4`** : `ws/chat.sdd` intégralement ressynchronisé sur le flux réel
+  (`resolve_extra_mcp` → `system_agents::context_tools` / `resolve_sandbox_server`) :
+  §Must pannes sandbox (l'ancien littéral `Ok(vec![])` contredisait le §Must Outils —
+  domain CONSERVÉ en panne sandbox), Handles réécrit (gating `system_agent_for`, table
+  settings/home-project/sandbox, `X-Vnl-Agent`, raisons littérales, IDOR cluster-manuel),
+  Returns = `ContextTools { servers, unavailable, revocation }`, UN seul site d'émission
+  ToolUnavailable (boucle `handle_message` l.289-291), séquence : `tools.revoke()` AVANT
+  `turn?` (l.304-312 — l'étape 7 l'omettait), Exposes 15 tests (9 purs + 6 tokio real_db).
+- **LEÇON MAJEURE — validator partiellement FANTÔME (côté validator cette fois)** : le
+  rapport S8 citait `app/src/agent.rs`, `ws/sandbox_agent.rs`, `sandbox_tools.rs`,
+  `app/tests/sandbox_agent_resolution.rs`, les fonctions `profile_for_sandbox_agent`,
+  `profile_for_agent`, `extraire_sandbox_name`, `crate::k8s::revoke_token` — RIEN n'existe.
+  Le mandat « corriger E1 » a fait un STOP juste (implementer : aucun des artefacts,
+  vérifier `git log --all -S`). Réalités vérifiées dans l'arbre : E2/E3 (révocation avant
+  propagation d'erreur) et E4 (commentaire fournisseur supprimé + gel `[?]`) DÉJÀ clos au
+  commit S8 ; le fallback app_settings est dans `resolve_or_bootstrap_profile`
+  (`amorcage_par_le_modele_par_defaut` / `amorcage_sans_reglage`). Consigne permanente :
+  AVANT toute délégation de correction, le spec-dd vérifie dans l'arbre chaque path/func
+  cité par un rapport (grep systématique), y compris venant d'un validator.
+- **Nouveaux `[?]` pour la passe Sébastien** : ws/chat.sdd — label `server` des
+  ToolUnavailable sandbox (code unifié sur littéral `"sandbox"`, Scenario IDOR porte
+  encore `sandbox_name` : standardiser littéral ou nom ?) ; cli chat.sdd — Given « tool
+  call sans résultat » de `tour_reussi…` inexécutable bout-en-bout (rig-core 0.38 corrèle
+  toujours ; couvert côté unité). La `[?]` ancienne « incohérence entre deux branches »
+  a été réécrite (sa prémisse a disparu).
+- **Le TUI `chat.sdd` l.550 reste `[ ]`** : l'implémentation est faite (`TuiSession` +
+  `run_tui`, gate TTY testé) mais la moitié SPEC du contrat attend l'arbitrage : Exposes
+  cite encore `@run_repl` et les 3 Scenario `repl_*` stale (l.390-403) sont `[?]`.
+- **Tests app** : 327 (dont les 16 from_env). `real_db()` = sqlite en mémoire (PAS de
+  DATABASE_URL requis — le doute de la session précédente est levé).
+- **Aucune tâche `[x]` bougée sur la base du rapport fantôme** ; rien poussé ;
+  32 commits locaux.
