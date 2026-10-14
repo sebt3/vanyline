@@ -143,7 +143,10 @@ pub fn system_agent_for(kind: &str) -> Option<SystemAgentKey> {
 
 /// Crée les quatre lignes d'agents système absentes et réécrit celles dont
 /// `system_version < SYSTEM_VERSION` (prompt, description, `mode = primary`, `toolsets` et
-/// `skills` vides), sans jamais toucher à leur `model_profile_id`. Sans aucun profil de
+/// `skills` vides), sans jamais toucher à leur `model_profile_id`. NOM de la ligne =
+/// `system-<clé>` (`system-config`…), la clé stable étant portée par `system_key` — pour
+/// ne pas heurter l'`UNIQUE (owner_id, name)` d'un agent ordinaire préexistant
+/// (`system_agents.sdd` `Exposes`, décidé 2026-10-14). Sans aucun profil de
 /// modèle pour l'utilisateur, amorce un profil `default` depuis le réglage global
 /// `default_model` ; sans réglage, rend `NoModelProfile` (`VNL-LLM-008`).
 pub async fn ensure_system_agents(
@@ -167,7 +170,7 @@ pub async fn ensure_system_agents(
                     crate::db::entities::agents::ActiveModel {
                         id: NotSet,
                         owner_id: Set(user_id),
-                        name: Set(key.key().to_string()),
+                        name: Set(format!("system-{}", key.key())),
                         description: Set(Some(key.description().to_string())),
                         mode: Set("primary".to_string()),
                         model_profile_id: Set(profile_id),
@@ -270,17 +273,17 @@ async fn resolve_or_bootstrap_profile(
         .cloned()
         .unwrap_or(serde_json::json!({}));
     // Le réglage peut viser un fournisseur supprimé depuis (aucune FK contractée, cf.
-    // m20261005_000004) : l'amorçage s'arrête là sur `AppError::LlmProviderNotFound` —
-    // PAS « comme sans réglage » (`NoModelProfile`). Comportement gelé en `[?]`
-    // (`system_agents.sdd`, arbitrage S8 2026-10-14 ouvert : revenir ou non à
-    // `NoModelProfile` reste à trancher par Sébastien).
+    // m20261005_000004) : l'amorçage s'arrête là sur `NoModelProfile`, le MÊME rendu que
+    // « sans réglage » — décidé 2026-10-14 : l'utilisateur doit reconfigurer, pas
+    // d'erreur dédiée, pas de silence (`system_agents.sdd` `Handles`, Scenario
+    // `amorcage_fournisseur_supprime_rend_no_model_profile`).
     if crate::db::entities::llm_providers::Entity::find_by_id(provider_id)
         .one(db)
         .await
         .map_err(AppError::from)?
         .is_none()
     {
-        return Err(AppError::LlmProviderNotFound);
+        return Err(no_model());
     }
     let created = crate::db::entities::model_profiles::Entity::insert(
         crate::db::entities::model_profiles::ActiveModel {
@@ -869,6 +872,128 @@ mod tests {
             .await
             .expect_err("missing default_model must fail");
         assert!(err.to_string().contains("VNL-LLM-008"));
+    }
+
+    /// Scenario : `amorcage_fournisseur_supprime_rend_no_model_profile`.
+    ///
+    /// Un réglage `default_model` dont le `provider_id` ne désigne plus aucun fournisseur
+    /// existant (fournisseur supprimé) rend le même `NoModelProfile` (`VNL-LLM-008`, 422)
+    /// que « sans réglage » — aucune ligne d'agent, aucun profil créé (décidé 2026-10-14).
+    #[tokio::test]
+    async fn amorcage_fournisseur_supprime_rend_no_model_profile() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let provider = llm_providers::ActiveModel {
+            id: NotSet,
+            name: Set("global-supprime".to_string()),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://localhost:11434".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(true),
+        };
+        let provider_id = llm_providers::Entity::insert(provider)
+            .exec(&db)
+            .await
+            .expect("provider inserts")
+            .last_insert_id;
+        insert_setting(
+            &db,
+            "default_model",
+            serde_json::json!({"provider_id": provider_id, "model": "qwen3.6:35b-a3b"}),
+        )
+        .await;
+        // Le fournisseur est supprimé APRÈS coup : le `provider_id` du réglage devient
+        // orphelin (aucune FK contractée, m20261005_000004).
+        llm_providers::Entity::delete_by_id(provider_id)
+            .exec(&db)
+            .await
+            .expect("provider deletes");
+
+        let err = ensure_system_agents(&db, alice)
+            .await
+            .expect_err("a setting pointing a deleted provider must fail bootstrap");
+        assert!(
+            err.to_string().contains("VNL-LLM-008"),
+            "expected NoModelProfile (VNL-LLM-008), got: {err}"
+        );
+        assert_eq!(count_rows(&db, "vanyline_agents").await, 0);
+        assert_eq!(count_rows(&db, "vanyline_model_profiles").await, 0);
+    }
+
+    /// Scenario : `amorcage_prefixe_system_sans_collision`.
+    ///
+    /// Un agent ordinaire préexistant nommé `config` ne heurte plus l'`UNIQUE (owner_id,
+    /// name)` : les quatre lignes système se créent sous `system-<clé>`, l'agent ordinaire
+    /// est intact, et une nouvelle exécution reconnaît par `system_key` — pas par le nom
+    /// (décidé 2026-10-14).
+    #[tokio::test]
+    async fn amorcage_prefixe_system_sans_collision() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let profile = seed_profile(&db, alice, "qwen").await;
+        let provider = llm_providers::Entity::find()
+            .one(&db)
+            .await
+            .expect("provider lookup")
+            .expect("seed_profile created a provider");
+        insert_setting(
+            &db,
+            "default_model",
+            serde_json::json!({"provider_id": provider.id, "model": "qwen"}),
+        )
+        .await;
+        // L'agent ordinaire préexistant qui portait le nom de la clé.
+        agents::Entity::insert(agents::ActiveModel {
+            id: NotSet,
+            owner_id: Set(alice),
+            name: Set("config".to_string()),
+            description: Set(Some("mon agent perso".to_string())),
+            mode: Set("primary".to_string()),
+            model_profile_id: Set(profile),
+            toolsets: Set(serde_json::json!([])),
+            skills: Set(serde_json::json!([])),
+            system_prompt: Set("prompt ordinaire".to_string()),
+            system_key: Set(None),
+            system_version: Set(None),
+        })
+        .exec(&db)
+        .await
+        .expect("ordinary agent inserts");
+
+        let rows = ensure_system_agents(&db, alice)
+            .await
+            .expect("bootstrap must not collide with the ordinary agent");
+        let mut names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "system-config",
+                "system-home",
+                "system-project",
+                "system-sandbox"
+            ],
+            "system rows must be named system-<key>"
+        );
+
+        // L'agent ordinaire `config` est intact (non préempté, non réécrit).
+        let ordinary = agents::Entity::find()
+            .filter(agents::Column::OwnerId.eq(alice))
+            .filter(agents::Column::Name.eq("config"))
+            .one(&db)
+            .await
+            .expect("find succeeds")
+            .expect("ordinary config agent survives");
+        assert_eq!(ordinary.system_key, None);
+        assert_eq!(ordinary.system_prompt, "prompt ordinaire");
+
+        // Idempotence par `system_key`, pas par nom : une nouvelle exécution ne crée ni
+        // ne duplique rien (pas de collision `UNIQUE (owner_id, name)`).
+        ensure_system_agents(&db, alice)
+            .await
+            .expect("second ensure succeeds (recognized by system_key)");
+        assert_eq!(count_rows(&db, "vanyline_agents").await, 5);
     }
 
     /// Scenario : `outils_par_contexte` — la table de `Exposes` : `settings` → config ;

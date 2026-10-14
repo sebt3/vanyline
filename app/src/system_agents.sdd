@@ -36,7 +36,11 @@ Exposes:
   @ensure_system_agents(db, user_id) -> Result<Vec<AgentRecord>, AppError> (async) — crée les
     quatre lignes absentes et réécrit celles dont `system_version < SYSTEM_VERSION` (prompt,
     `mode = primary`, `toolsets = []`, `skills` vides, description), sans toucher à
-    `model_profile_id` d'une ligne existante.
+    `model_profile_id` d'une ligne existante. NOM de la ligne = `system-<clé>`
+    (`system-config`, `system-home`, `system-project`, `system-sandbox` — décidé 2026-10-14
+    pour ne pas heurter l'`UNIQUE (owner_id, name)` quand l'utilisateur a déjà un agent
+    ordinaire du nom de la clé ; la clé stable reste `config`/`home`/`project`/`sandbox`,
+    portée par `system_key`).
   @system_agent_for(kind: &str) -> Option<SystemAgentKey> — l'agent d'un type de contexte.
   @context_tools(state, user, kind, context, agent_name) -> Result<ContextTools, AppError> (async) —
     les serveurs MCP forcés (`extra_mcp`) donnés pour CE tour à l'agent qui tourne dans un
@@ -55,7 +59,9 @@ Handles:
   l'utilisateur, nom `system-agent`, expiration 1 h, poivre de l'app) est émis, injecté en
   `Authorization: Bearer` des serveurs MCP forcés qui pointent vers l'app elle-même
   (`http://127.0.0.1:<port de l'API>/mcp` et `/mcp/domain`, ce dernier avec l'en-tête
-  `X-Vnl-Agent: <clé de l'agent>` pour la traçabilité des lancements), puis RÉVOQUÉ (`revoke_token`) à la fin
+  `X-Vnl-Agent: <nom de l'agent>` pour la traçabilité des lancements — nom lu en base,
+  donc `system-<clé>` pour les agents système depuis la décision 2026-10-14), puis RÉVOQUÉ
+  (`revoke_token`) à la fin
   du tour, y compris sur erreur. Le jeton n'est jamais journalisé, jamais persisté dans une
   conversation, jamais renvoyé au navigateur.
   Amorçage : la colonne `model_profile_id` est obligatoire. Pour un utilisateur sans AUCUN profil
@@ -63,7 +69,9 @@ Handles:
   réglage global `default_model` (../db/entities/app_settings.sdd : fournisseur global, modèle,
   options) et y rattache ses agents système ; l'utilisateur peut ensuite le changer librement.
   Sans réglage `default_model`, @ensure_system_agents rend `NoModelProfile` et l'écran des
-  paramètres propose les formulaires de base (fournisseur, profil) avant l'agent.
+  paramètres propose les formulaires de base (fournisseur, profil) avant l'agent. Un réglage
+  `default_model` pointant un FOURNISSEUR SUPPRIMÉ rend le même `NoModelProfile` (décidé
+  2026-10-14 : l'utilisateur doit reconfigurer — pas d'erreur dédiée, pas de silence).
   Politique commune des prompts (contrat de comportement, texte dans le code) : agir au nom de
   l'utilisateur dans ses seuls droits ; AGIR DIRECTEMENT, sans demander de confirmation, y
   compris pour des suppressions ou des écrasements (vanyline est en mode « yolo » assumé : les
@@ -94,7 +102,11 @@ Tasks:
     ne quitte pas l'app). Demandé APRÈS la garde IDOR ; échec ⇒ serveur `unavailable`, non
     bloquant. Test `sandbox_porte_le_jeton_de_l_owner`. Reste : le §Must de `../ws/chat.sdd`
     dit encore « jeton d'API jetable » pour ce serveur — à aligner (`[ ]` ws/chat.sdd).
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : rendre `NoModelProfile` (l'utilisateur reconfigure) ; aligner le commentaire du code ; ajouter un Scenario. (Question d'origine : `default_model` pointant un fournisseur supprimé (S8, validator 2026-10-14) :
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : rendre `NoModelProfile` (l'utilisateur reconfigure).
+    — FAIT 2026-10-14 (P3, validator PASS : `resolve_or_bootstrap_profile` rend
+    `UnprocessableReference(NoModelConfigured)` (422, `VNL-LLM-008`) sur fournisseur
+    introuvable, commentaire aligné, Scenario
+    `amorcage_fournisseur_supprime_rend_no_model_profile` verrouillé). (Question d'origine : `default_model` pointant un fournisseur supprimé (S8, validator 2026-10-14) :
     l'implémentation rend `LlmProviderNotFound` alors que le commentaire dit « comme sans
     réglage » (`NoModelProfile`) — aucun Scenario ne contracte ce cas. Rendre
     `NoModelProfile` (l'utilisateur doit reconfigurer) ou une erreur dédiée explicite ?
@@ -103,11 +115,14 @@ Tasks:
     variante — l'implémentation rend `AppError::UnprocessableReference(VnyError::
     NoModelConfigured)` (422, marqueur `VNL-LLM-008` réutilisé, aucun type local). Ratifier,
     ou créer une variante dédiée `error.sdd` (nouveau code `VNL-*`) ?)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : PRÉFIXER — nom = `system-<clé>` (`system-config`, `system-home`…) pour ne pas heurter `UNIQUE (owner_id, name)` ; code, Scenarios et lookup `system_agent_for` à aligner. (Question d'origine : Nom des lignes d'agent système (S8, 2026-10-13) : non contracté ; retenu nom = clé
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : PRÉFIXER — nom = `system-<clé>` (`system-config`, `system-home`…). (Question d'origine : Nom des lignes d'agent système (S8, 2026-10-13) : non contracté ; retenu nom = clé
     (`config`, `home`, `project`, `sandbox`) — mais l'`UNIQUE (owner_id, name)` de la
     migration m20260825_000006 refuse alors l'amorçage si l'utilisateur a déjà un agent
     ordinaire de ce nom. Préfixer (`system-config`…) ? Assumer la collision (l'amorçage
     échoue et l'utilisateur renomme) ? Ou relaxer l'unique sur `name` ?)
+    — FAIT 2026-10-14 (P3, validator PASS : insertion `system-<clé>`, `system_key` nu,
+    idempotence par `system_key`, Scenario `amorcage_prefixe_system_sans_collision` ;
+    `X-Vnl-Agent` porte le nom lu en base, §Handles aligné).
   [-] TRANCHÉ (2026-10-04) : modèle par défaut global = réglage `default_model`, configurable par
     l'API avec un jeton d'administrateur et par l'interface pour les utilisateurs qui en ont les
     droits (../db/entities/app_settings.sdd).
@@ -177,6 +192,24 @@ Scenario: amorcage_sans_reglage
   Given un utilisateur sans profil et aucun réglage `default_model`
   When @ensure_system_agents
   Then `NoModelProfile`
+
+Scenario: amorcage_fournisseur_supprime_rend_no_model_profile
+  # Décidé 2026-10-14 : réglage pointant un fournisseur supprimé = même rendu que
+  # « sans réglage » (l'utilisateur reconfigure), pas de silence ni d'erreur dédiée.
+  Given un utilisateur sans profil et un réglage `default_model` dont le `provider_id`
+    ne désigne plus aucun fournisseur existant (fournisseur supprimé)
+  When @ensure_system_agents
+  Then `NoModelProfile`, aucune ligne créée, aucun profil créé
+
+Scenario: amorcage_prefixe_system_sans_collision
+  # Décidé 2026-10-14 : nom = `system-<clé>` ; l'UNIQUE (owner_id, name) n'est plus
+  # heurté par un agent ordinaire préexistant portant la clé pour nom.
+  Given un utilisateur ayant déjà un agent ordinaire nommé `config` et un réglage
+    `default_model` valide
+  When @ensure_system_agents
+  Then les quatre lignes sont créées sous `system-config`, `system-home`, `system-project`,
+    `system-sandbox` ; l'agent ordinaire `config` est intact ; une nouvelle exécution
+    d'@ensure_system_agents reste idempotente (reconnaissance par `system_key`, pas par nom)
 
 Scenario: jeton_revoque_en_fin_de_tour
   Given un tour qui se termine, puis un autre qui échoue

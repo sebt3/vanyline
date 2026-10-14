@@ -259,6 +259,11 @@ Must:
     l'utilisateur, `sandbox` une sandbox de l'utilisateur (même scoping qu'aujourd'hui). Un
     utilisateur sans profil de modèle reçoit une erreur explicite (`NoModelProfile`), pas une
     conversation sans agent.
+    Amorçage à la création (décidé 2026-10-14, `../main.sdd` — pas de hook miryad-core amont) :
+    la CRÉATION de conversation en contexte système (`settings` en tête, `home`/`project`/
+    `sandbox` par leur défaut ci-dessus) appelle `ensure_system_agents` (idempotent) AVANT de
+    rendre la conversation — l'amorçage n'attend plus la première connexion ni le premier tour
+    (`ws/chat.rs::resolve_extra_mcp` garde le sien, les deux chemins convergent).
   - Exiger @AuthUser dans la signature des CINQ handlers et appeler @resolve_user
     AVANT toute requête métier, en chaînant sur l'@id résolu (jamais sur le
     `subject` brut) : c'est la seule source de l'owner utilisé par tous les filtres.
@@ -400,6 +405,16 @@ Scenario: création_sans_agent_name_retourne_201_avec_agent_name_null
     la conversation en base a `agent_id` @None — absent et `null` sont traités
     identiquement
 
+Scenario: création_contexte_settings_amorce_les_agents_système
+  # Décidé 2026-10-14 (`../main.sdd`) : l'amorçage ne tarde plus au premier tour —
+  # la création de conversation en contexte système appelle `ensure_system_agents`.
+  Given @real_db, un utilisateur authentifié ayant un profil de modèle mais AUCUNE
+    ligne d'agent système (aucune ligne `system_key` non nulle)
+  When `POST /conversations` authentifié avec le corps `{"context":{"kind":"settings","data":{}}}`
+    est adressé
+  Then la réponse est @201 et les QUATRE lignes d'agent système (`system-config`,
+    `system-home`, `system-project`, `system-sandbox`) existent en base pour cet owner
+
 Scenario: création_avec_agent_inconnu_retourne_422_sans_aucune_écriture
   Given @real_db, un utilisateur authentifié (bearer `alice`) et un agent nommé
     `"agent-1"` appartenant à bob (AUTRE owner), aucun agent de ce nom pour alice
@@ -503,6 +518,13 @@ Depends on:
     lints, exemptions `cfg(test)`), conventions `AGENTS.md` (identifiants VNL-*).
 
 Tasks:
+  [ ] Lacune constatée en passe P3 (2026-10-14) : le §Must « une conversation de contexte
+      `settings` utilise l'AGENT SYSTÈME `config` et le client ne peut pas lui en substituer
+      un autre » (et le Scenario `parametres_exige_l_agent_systeme` de
+      `../system_agents.sdd`) n'est PAS IMPLÉMENTÉ dans @create_conversation — un
+      `agent_name` ordinaire est accepté en contexte `settings`. Le câbler (imposer
+      l'agent système, ou refuser 422 l'agent ordinaire — trancher la forme) + Scenario
+      testé.
   [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : @to_output résout l'agent
       par @find_by_id SANS filtre owner — si une conversation référence l'agent d'un
       autre owner (possible via `../ws/chat.rs`, la FK ne vérifie que l'existence),

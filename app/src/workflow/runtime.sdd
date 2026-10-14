@@ -44,11 +44,21 @@ Exposes:
     endpoint : le Service Kubernetes de l'app + port d'endpoint ; défaut dérivé du nom de
     l'Application — @derive_deployment_url, forme `http://<application_name>.<k8s_namespace>.svc:<port>`
     motivée par deploy/web/configmap.yaml) ; absentes ⇒ moteur non configuré.
-    Contracté validation W3 2026-10-10 : @from_config rend @None (moteur éteint, avec
-    @tracing::warn!) sur config PARTIELLE (les trois URL non toutes présentes et non
-    vides) comme sur deployment URL non dérivable (nom d'application ou namespace
-    absents/vide) — jamais de port à moitié ouvert ni de moteur à moitié vivant. Un `[?]`
-    Tasks porte le niveau : warn ou fail-fast.
+    Contracté W3 2026-10-10, REVU 2026-10-14 (arbitrage Sébastien : FAIL-FAST) :
+    @from_config rend @Ok(@None) SILENCIEUSEMENT seulement si AUCUNE des trois variables
+    d'engagement (`VNL_RESTATE_ADMIN_URL`, `VNL_RESTATE_INGRESS_URL`,
+    `VNL_WORKFLOW_DEPLOYMENT_URL`) n'est posée (déploiement sans workflows — le moteur est
+    voulu éteint). Dès l'une posée — même vide — le déploiement s'est engagé et la
+    configuration doit être COMPLÈTE : @Err dès qu'une des deux URL `VNL_RESTATE_*`
+    manque ou est vide, ou que la deployment URL est à la fois absente ET non dérivable
+    (nom d'application ou namespace absents/vide) — la deployment URL posée explicitement
+    ou dérivable tenant lieu de présence. Rendu `VNL-WF-001` + exit(1) par ./../../main.rs,
+    cf. ./main.sdd `Raises`.
+    Signature : @from_config(@Config) -> @Result<@Option<Self>, @WorkflowError> — le
+    @Err est une erreur de configuration de @WorkflowError (variante effective à choisir
+    dans la surface de miryad-core au plus proche de « config invalide », même famille
+    que `VNL-WF-002`, cause `MRD-WORKFLOW-007` imbriquée ; rendu `VNL-WF-001` + exit(1)
+    par ./../main.rs).
   @WorkflowRuntime — handle `Clone` dans @AppState : `trigger(dag) -> RunHandle` (délègue à
     `miryad_core::workflow::client::trigger_run` — @RunHandle porte `invocation_id`, la
     liaison persistée par ./../db/entities/workflow_runs.sdd), l'URL d'admin et d'ingress
@@ -102,7 +112,11 @@ Raises:
   ./../../main.rs (exit(1)) — cf. ./main.sdd `Raises`.
 
 Tasks:
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : FAIL-FAST (exit 1, `VNL-WF-001`) quand la config `VNL_RESTATE_*` est partielle ou non dérivable ; silence seulement si AUCUNE variable n'est posée. (Question d'origine : Niveau d'alerte du moteur inerte malgré `VNL_RESTATE_*` posées (config partielle
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : FAIL-FAST (exit 1, `VNL-WF-001`) quand la config d'engagement est partielle ou non dérivable ; silence seulement si AUCUNE variable n'est posée.
+    — FAIT 2026-10-14 (P3, validator PASS : `from_config -> @Result<@Option, @WorkflowError>`
+    (`InvalidConfig`, `MRD-WORKFLOW-007` imbriqué), trois Scenarios
+    `config_partielle_fail_fast`/`deployment_non_derable_fail_fast`/
+    `aucune_variable_silence_voulu`, plus de warn, `main.rs` 10bis trois branches). (Question d'origine : Niveau d'alerte du moteur inerte malgré `VNL_RESTATE_*` posées (config partielle
     ou déploiement non dérivable ⇒ warn + moteur éteint, validation W3) : warn suffisant
     — le controller pose ces variables de façon fiable — ou fail-fast exit(1) ? Le cas
     réel est « workflows morts sans bruit » au déploiement. Trancher.)
@@ -123,6 +137,25 @@ Scenario: config_invalide
   Given `VNL_RESTATE_ADMIN_URL` non absolue
   When @start_runtime
   Then erreur de configuration et aucun port ouvert
+
+Scenario: config_partielle_fail_fast
+  # Décidé 2026-10-14 (FAIL-FAST remplace warn+moteur éteint de W3).
+  Given seules `VNL_RESTATE_ADMIN_URL` posée (les deux autres absentes)
+  When @WorkflowConfigApp::from_config
+  Then @Err (aucun @None silencieux) — rendu `VNL-WF-001` + exit(1) par ./../../main.rs
+
+Scenario: deployment_non_derable_fail_fast
+  # URL toutes posées mais nom d'Application ou namespace vides ⇒ deployment URL
+  # non dérivable : fail-fast aussi (2026-10-14).
+  Given les trois URL posées et un nom d'application vide
+  When @WorkflowConfigApp::from_config
+  Then @Err
+
+Scenario: aucune_variable_silence_voulu
+  Given aucune variable d'engagement posée (ni `VNL_RESTATE_ADMIN_URL`, ni
+    `VNL_RESTATE_INGRESS_URL`, ni `VNL_WORKFLOW_DEPLOYMENT_URL`)
+  When @WorkflowConfigApp::from_config
+  Then @Ok(@None) silencieux — déploiement sans moteur de workflow, voulu tel quel
 
 Scenario: enregistrement_reessaye
   Given un Restate qui refuse l'enregistrement puis l'accepte

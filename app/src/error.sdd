@@ -66,7 +66,7 @@ Depends on:
 Exposes:
   @AppError — `pub enum` à portée crate (./main.rs déclare `mod error;` sans `pub` : le
     binaire n'expose rien hors de lui-même ; les modules du crate l'importent par
-    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 30 variantes,
+    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 31 variantes (compteur tenu à 31 depuis @AppError::SandboxRelayUnavailable, 2026-10-14 — ne pas re-compter à chaque ajout, le match @IntoResponse exhaustif est le contrat vivant),
     aucun gating de feature. Le @Display de chaque variante commence par son marqueur suivi
     de `": "` SAUF @AppError::UnprocessableReference qui n'a pas de marqueur propre (gabarit
     `"{0}"`, marqueur hérité du @VnyError embarqué — voir `Tasks`). Rendus exacts, caractère
@@ -95,6 +95,16 @@ Exposes:
         has no application_ref)"`
       @AppError::SandboxBranchEmpty — `"VNL-SBX-002: branch must not be empty"`
       @AppError::GitPathInvalid — `"VNL-SBX-003: invalid git path segment"`
+      @AppError::SandboxRelayUnavailable — `"VNL-SBX-017: sandbox unavailable"` — variante
+        SANS champ (revue 2026-10-14) : panne de RELAI app→sandbox (transport, timeout,
+        statut de la frappe du ticket). Aucune cause embarquée dans le @Display : le
+        @Display de @reqwest::Error porte l'URL interne de la sandbox, qui ne sort jamais
+        de l'app — la panne complète est consignée en @tracing::warn! par l'appelant
+        (./api/sandboxes.sdd §Must « Erreurs du RELAIS opaques »). Le marqueur est pris
+        APRÈS la plage `004..016` réservée aux erreurs git de la sandbox
+        (`../../sandbox/src/git.sdd`) : `VNL-SBX-004` n'est pas libre contrairement à ce
+        qu'annonçait le `[?]` de collision `VNL-SBX-002` ci-dessous — sa résolution devra
+        aussi prendre `017+`.
       @AppError::WorkflowNotFound — `"VNL-WFA-002: workflow not found"`
       @AppError::WorkflowNameTaken(String) — `"VNL-WFA-003: workflow name already taken: {0}"`
       @AppError::WorkflowDagInvalid(String) — `"VNL-WFA-004: MRD-WORKFLOW-004: {0}"` (le
@@ -183,6 +193,7 @@ Exposes:
       @AppError::SandboxNotExposed → 409 `CONFLICT`
       @AppError::SandboxBranchEmpty → 422 `UNPROCESSABLE_ENTITY`
       @AppError::GitPathInvalid → 400 `BAD_REQUEST`
+      @AppError::SandboxRelayUnavailable → 502 `BAD_GATEWAY`
       @AppError::WorkflowNotFound → 404 `NOT_FOUND`
       @AppError::WorkflowNameTaken → 409 `CONFLICT`
       @AppError::WorkflowDagInvalid → 400 `BAD_REQUEST`
@@ -199,7 +210,7 @@ Exposes:
       @AppError::WorkflowEngineUnavailable → 503 `SERVICE_UNAVAILABLE`
     Le match est exhaustif (compilateur) : toute nouvelle variante impose une ligne ici.
   @std::error::Error — implémenté par la derive : `source()` rend `Some` du @reqwest::Error
-    d'origine pour @AppError::RequestError uniquement, `None` pour les 29 autres variantes.
+    d'origine pour @AppError::RequestError uniquement, `None` pour toutes les autres variantes.
   Module de test `tests` — 5 tests existants, couverture partielle :
     `unprocessable_reference_maps_to_422`, `k8s_config_error_maps_to_502`,
     `k8s_api_error_maps_to_500`, `k8s_not_found_maps_to_404`,
@@ -239,7 +250,7 @@ Returns:
     que loggent les wrappers WS (`tracing::error!("ws chat error: {e}")`,
     `tracing::error!("ws sandbox-state error: {e}")`).
   @std::error::Error::source() — `Some` du @reqwest::Error d'origine pour
-    @AppError::RequestError, `None` pour les 22 autres.
+    @AppError::RequestError, `None` pour toutes les autres.
   Les @From ne retournent rien d'autre que la variante @AppError décrite.
   @Debug dérivé — rendu structurel par défaut, jamais contractualisé au-delà de son
     existence.
@@ -320,8 +331,8 @@ Handles:
 Must:
   Préfixer le @Display de chaque variante (sauf @AppError::UnprocessableReference, seul
     exception assumée) par son marqueur `VNL-<DOM>-<NNN>` exact suivi de `": "`, selon les
-    30 gabarits d'`Exposes`, et les verrouiller par test caractère par caractère.
-  Appliquer le barème d'`Exposes` variante → statut HTTP sur les 30 variantes, match
+    gabarits d'`Exposes`, et les verrouiller par test caractère par caractère.
+  Appliquer le barème d'`Exposes` variante → statut HTTP sur toutes les variantes, match
     exhaustif, corps `{"error": "<@Display complet>"}` en `application/json` pour toutes.
   Préserver les 5 gabarits byte-identiques à leurs jumeaux @VnyError (`VNL-LLM-001`,
     `VNL-LLM-002`, `VNL-MCP-001`, `VNL-AGT-001`, `VNL-INT-001`) : les messages circulent
@@ -374,6 +385,9 @@ Tasks:
     (`branch must not be empty`) ET ./api/sandboxes.rs::ws_ticket
     (`sandbox ticket response missing 'ticket'` dans @AppError::InternalError) émettent le
     même marqueur pour deux pannes distinctes. Renommer en `VNL-SBX-004` (ou autre) ?
+    FAIT DIVERS 2026-10-14 : `VNL-SBX-004` N'EST PAS libre — plage `004..016` des erreurs
+    git de la sandbox (`../../sandbox/src/git.sdd`) ; toute résolution prendra `017+`
+    (`017` déjà pris par @AppError::SandboxRelayUnavailable de l'app).
   [?] Heuristic du @From<@VnyError> : sous-chaînes `404`/`NotFound`/`not found` sensibles à
     la casse, évaluées sur le payload seul — faux positifs (`"4041"`, tout nom contenant
     `404`), faux négatifs (`"Not Found"`, `"NOT_FOUND"`). Le lib pourrait typer un
@@ -551,7 +565,7 @@ Scenario: marqueurs_propres_de_apperror_uniques_dans_le_fichier
   When chaque marqueur propre à ce fichier (`VNL-AUTH-004`, `VNL-LLM-001`, `VNL-LLM-002`,
     `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001`, `VNL-CNV-002`, `VNL-REQ-001`, `VNL-INT-001`,
     `VNL-K8S-001`, `VNL-K8S-002`, `VNL-K8S-003`, `VNL-SBX-001`, `VNL-SBX-002`,
-    `VNL-SBX-003`, `VNL-WFA-002`, `VNL-WFA-003`, `VNL-WFA-004`, `VNL-WFA-005`,
+    `VNL-SBX-003`, `VNL-SBX-017`, `VNL-WFA-002`, `VNL-WFA-003`, `VNL-WFA-004`, `VNL-WFA-005`,
     `VNL-WFA-006`, `VNL-WFA-007`, `VNL-WFA-008`, `VNL-WFA-011`, `VNL-WFA-012`,
     `VNL-WFA-013`, `VNL-WFA-014`, `VNL-WFA-015`, `VNL-WFA-016`,
     `VNL-WFA-017`) est dénombré hors du module de tests

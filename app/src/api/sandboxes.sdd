@@ -294,6 +294,18 @@ Must:
     (AuthUser → @resolve_user → @resolve_owner_name → sandbox → projet → match d'owner) :
     un utilisateur qui n'est pas l'Owner de la sandbox n'obtient jamais de jeton, et la
     sandbox n'est pas contactée.
+  - Erreurs du RELAIS opaques (revue 2026-10-14) : les pannes TRANSPORT du relais
+    (@ws_ticket, @git_proxy, relais `/code-health`) — échec d'envoi, timeout,
+    `error_for_status` sur la frappe du ticket — JAMAIS rendues telles quelles : le
+    @Display de @reqwest::Error porte l'URL interne
+    (`http://sandbox-{name}.{namespace}.svc:3000/…`), qui ne doit jamais sortir de l'app.
+    Conversion en @AppError::SandboxRelayUnavailable (502,
+    `"VNL-SBX-017: sandbox unavailable"` — pris après la plage `004..016` des erreurs git
+    de la sandbox, `../../../sandbox/src/git.sdd`, sans cause embarquée dans le message
+    @Display) ; la panne complète (reqwest, URL, statut) est consignée en
+    @tracing::warn! côté app uniquement. Le PASSTHROUGH des réponses HTTP de la sandbox
+    dans @git_proxy et le relais `/code-health` (statut + JSON TELS QUELS) n'est PAS
+    concerné : c'est le corps émis par la sandbox, qui ne porte pas l'URL interne.
   - Présenter `format!("Bearer {}", owner_token.token)` en @AUTHORIZATION aux DEUX relais
     (sandbox `POST /ws/ticket` sous @require_auth — ../../../sandbox/src/auth.sdd), avec
     un client reqwest à timeout explicite : 10 s pour @ws_ticket, 30 s pour @git_proxy
@@ -528,6 +540,18 @@ Scenario: git_proxy_preserve_le_percent_encodage_d_une_branche
   Then l'URL demandée à la sandbox se termine par `/git/branches/feature%2Fx` — le
     `%2F` n'a pas été décodé en séparateur (le wildcard décodé par @Path est ignoré)
 
+Scenario: panne_de_relais_sans_fuite_d_url
+  # Revue 2026-10-14 : l'erreur de transport reqwest (dont le Display porte l'URL
+  # interne) est convertie en @AppError::SandboxRelayUnavailable ; le corps rendu au
+  # navigateur ne contient JAMAIS l'URL de la sandbox.
+  Given une conversion d'erreur de relais (@map_relay_err, privée) reçue avec une vraie
+    @reqwest::Error d'échec de connexion vers `http://sandbox-x.own.svc:3000/mcp`
+    (construite en test vers une adresse fermée)
+  When la variante est rendue par @IntoResponse
+  Then le statut est @502 et le corps est exactement
+    `{"error":"VNL-SBX-017: sandbox unavailable"}` — ni `svc`, ni `sandbox-x`, ni le
+    message reqwest d'origine
+
 Scenario: git_proxy_enveloppe_le_corps_non_json_sans_changer_le_statut
   Given la sandbox répondant `404` en texte brut `route not found` (route sandbox
     inconnue)
@@ -585,6 +609,15 @@ Tasks:
   [ ] Erreurs du relais (revue 2026-10-14) : `error_for_status()?` / `RequestError` sur
     `ws_ticket` et `git_proxy` peut exposer l'URL interne de la sandbox au navigateur —
     vérifier la conversion `AppError` et ne rendre qu'un identifiant `VNL-SBX-*` opaque.
+    — FAIT PARTIELLE 2026-10-14 (P3, validator PASS) : `@map_relay_err` +
+    @AppError::SandboxRelayUnavailable (`VNL-SBX-017`) sur `ws_ticket` (send +
+    `error_for_status`) et `proxy_git_request` (send seul, passthrough intact). RESTE
+    (ouvert au tranchage validator P3) : auditer les pannes reqwest des autres relais —
+    `mcp_domain.rs::code_health_relay` et `workflow/steps/{gate,mod}.rs` — sous la même
+    règle d'opacité ; leurs erreurs traversent `ToolUnavailable`/`ChatEvent::Error` vers
+    le navigateur, la règle s'applique donc aussi. Dans le même mouvement, trancher si
+    `resp.json().await?` de `ws_ticket` (erreur post-réponse, sans URL en reqwest 0.12)
+    entre dans « toute panne de transport » du §Must.
   [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
   [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 (../../../sandbox/src/auth.sdd) : remplacer
     `user.id_token` par `VnlK8sClient::owner_token` dans @ws_ticket et @git_proxy ; donner au SA

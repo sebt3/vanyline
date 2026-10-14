@@ -173,20 +173,30 @@ async fn main() {
         workflow: None,
     };
 
-    // Moteur de workflow (workflow/runtime.sdd) — appel CONDITIONNEL : sans configuration
-    // complète (`VNL_RESTATE_*` absentes ou vides), `from_config` rend `None`, l'app tourne
-    // sans workflows et aucun port d'endpoint n'est ouvert. Configurée mais invalide ⇒ le
-    // moteur refuse de démarrer : erreur de déploiement, fail-fast comme les autres
-    // étapes (le réessai d'enregistrement lui — runtime.sdd — ne bloque pas le démarrage).
-    if let Some(wf_config) = workflow::WorkflowConfigApp::from_config(&state.config) {
-        state.workflow = Some(
-            workflow::runtime::start_runtime(&state, &wf_config)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("VNL-WF-001: moteur de workflow incapable de démarrer: {e}");
-                    std::process::exit(1);
-                }),
-        );
+    // Moteur de workflow (workflow/runtime.sdd, FAIL-FAST revu 2026-10-14) —
+    // `from_config` : Ok(None) silencieux seulement si AUCUNE variable `VNL_RESTATE_*`
+    // n'est posée (moteur éteint voulu, aucun port ouvert, aucune requête Restate) ;
+    // Ok(Some) ⇒ start_runtime (l'échec d'ENREGISTREMENT du déploiement ne remonte
+    // jamais ici : réessayé en arrière-plan par runtime.sdd) ; Err (config partielle ou
+    // deployment non dérivable) ⇒ fail-fast exit(1) comme l'échec de start_runtime.
+    match workflow::WorkflowConfigApp::from_config(&state.config) {
+        Ok(None) => {}
+        Ok(Some(wf_config)) => {
+            state.workflow = Some(
+                workflow::runtime::start_runtime(&state, &wf_config)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!(
+                            "VNL-WF-001: moteur de workflow incapable de démarrer: {e}"
+                        );
+                        std::process::exit(1);
+                    }),
+            );
+        }
+        Err(e) => {
+            tracing::error!("VNL-WF-001: moteur de workflow incapable de démarrer: {e}");
+            std::process::exit(1);
+        }
     }
 
     let app = Router::new()

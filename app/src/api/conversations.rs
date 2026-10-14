@@ -183,6 +183,27 @@ pub async fn create_conversation(
         None => None,
     };
 
+    // Amorçage à la création (`conversations.sdd` §Must, décidé 2026-10-14) : un contexte
+    // système appelle `ensure_system_agents` (idempotent) AVANT de rendre la conversation.
+    // En `settings` l'agent système `config` est exigé : la panne (ex. `NoModelProfile`)
+    // est rendue telle quelle. Pour `home`/`project`/`sandbox` l'agent système n'est
+    // qu'un défaut choisissable et `ws/chat.rs::resolve_extra_mcp` garde son amorçage au
+    // tour (les deux chemins convergent) : une panne d'amorçage y est non bloquante,
+    // consignée en warn — sinon elle contredirait les Scenario « 201 avec agent_name
+    // null » et de régression des ids (création `sandbox` sans profil verrouillée).
+    match crate::system_agents::system_agent_for(&body.context.kind) {
+        Some(crate::system_agents::SystemAgentKey::Config) => {
+            crate::system_agents::ensure_system_agents(db, principal_user.id).await?;
+        }
+        Some(_) => {
+            if let Err(e) = crate::system_agents::ensure_system_agents(db, principal_user.id).await
+            {
+                tracing::warn!("amorçage des agents système non bloquant : {e}");
+            }
+        }
+        None => {}
+    }
+
     // Effect de bord : créer le ChatContext avant la Conversation
     let now = chrono::Utc::now();
     let ctx_active = ChatContextActiveModel {
@@ -419,6 +440,140 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("my-sandbox")
         );
+    }
+
+    /// Scenario : `création_contexte_settings_amorce_les_agents_système`.
+    ///
+    /// Création de conversation en contexte `settings` pour un utilisateur ayant un
+    /// profil de modèle mais AUCUNE ligne `system_key` : la réponse est 201 et les
+    /// QUATRE lignes système (`system-config`, `system-home`, `system-project`,
+    /// `system-sandbox`) existent en base pour cet owner — l'amorçage ne tarde plus au
+    /// premier tour (décidé 2026-10-14). Le handler est appelé DIRECTEMENT sur `real_db`
+    /// + `test_auth_state_with_db` (précédent `id_regression` ; l'authentification HTTP
+    /// par cookie est verrouillée telle quelle par les deux tests 401 du module).
+    #[tokio::test]
+    async fn creation_contexte_settings_amorce_les_agents_systeme() {
+        use sea_orm::PaginatorTrait;
+
+        use crate::db::entities::{agents, llm_providers, model_profiles};
+
+        let db = crate::db::test_support::real_db().await;
+        let alice = miryad_core::users::resolve_user(&db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        // Profil de modèle (l'amorçage doit aboutir), mais aucune ligne système.
+        let provider = llm_providers::Entity::insert(llm_providers::ActiveModel {
+            id: NotSet,
+            name: Set("prov-settings".to_string()),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://localhost:11434".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(true),
+        })
+        .exec(&db)
+        .await
+        .expect("provider inserts")
+        .last_insert_id;
+        model_profiles::Entity::insert(model_profiles::ActiveModel {
+            id: NotSet,
+            owner_id: Set(alice),
+            name: Set("qwen".to_string()),
+            provider_id: Set(provider),
+            model: Set("qwen".to_string()),
+            temperature: Set(None),
+            max_tokens: Set(None),
+            options: Set(serde_json::json!({})),
+        })
+        .exec(&db)
+        .await
+        .expect("profile inserts");
+        assert_eq!(
+            agents::Entity::find()
+                .filter(agents::Column::SystemKey.is_not_null())
+                .count(&db)
+                .await
+                .expect("count succeeds"),
+            0,
+            "no system agent row before the creation"
+        );
+
+        let state = AppState {
+            config: test_config_for_state(),
+            cookie_key: test_key(),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db.clone()),
+            shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+            workflow: None,
+        };
+        let user = miryad_core::auth::AuthUser {
+            subject: "alice".to_string(),
+            email: None,
+            id_token: "test-id-token".to_string(),
+        };
+        let body = CreateConversation {
+            agent_name: None,
+            context: ChatContextInput {
+                kind: "settings".to_string(),
+                data: serde_json::json!({}),
+            },
+        };
+
+        let (status, Json(out)) =
+            create_conversation(axum::extract::State(state), user, Json(body))
+                .await
+                .expect("settings creation succeeds");
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(out.context.kind, "settings");
+        let mut rows = agents::Entity::find()
+            .filter(agents::Column::SystemKey.is_not_null())
+            .all(&db)
+            .await
+            .expect("find succeeds");
+        let mut names: Vec<String> = rows.drain(..).map(|r| r.name).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "system-config",
+                "system-home",
+                "system-project",
+                "system-sandbox"
+            ],
+            "the four system agents must exist after the settings creation"
+        );
+    }
+
+    /// `Config` de test pour les états appelant les handlers directement (mêmes
+    /// valeurs que `make_app`).
+    fn test_config_for_state() -> crate::config::Config {
+        crate::config::Config {
+            oidc_issuer_url: "https://issuer.example.com".to_string(),
+            oidc_client_id: "client-id".to_string(),
+            oidc_client_secret: "client-secret".to_string(),
+            oidc_redirect_url: "https://app.example.com/callback".to_string(),
+            oidc_scopes: vec![],
+            oidc_ca_cert: None,
+            oidc_connect_timeout: std::time::Duration::from_secs(5),
+            oidc_timeout: std::time::Duration::from_secs(15),
+            cookie_secret: "0".repeat(64),
+            database_url: "postgres://localhost/test".to_string(),
+            listen_addr: "0.0.0.0:8080".to_string(),
+            static_dir: "./static".to_string(),
+            k8s_namespace: None,
+            application_name: None,
+            default_home_storage_class: None,
+            default_home_access_mode: None,
+            default_project_storage_class: None,
+            default_project_access_mode: None,
+            restate_admin_url: None,
+            restate_ingress_url: None,
+            workflow_listen: "0.0.0.0:9080".to_string(),
+            workflow_deployment_url: None,
+        }
     }
 }
 

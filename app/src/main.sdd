@@ -172,11 +172,15 @@ Returns:
     de tokens API existantes — les tokens sont à réémettre après rotation) } puis @AppState
     (champs en Exposes, `busy` vide, `k8s` à `None`). Le champ `workflow` est encore
     @None à ce point.
-  10bis. Moteur de workflow (ajouté W3 2026-10-10, ./workflow/runtime.sdd) —
-    @workflow::@WorkflowConfigApp::from_config(`&config`) : @None (moteur non configuré,
-    ou config partielle/déploiement non dérivable — warn émis par ./workflow/runtime.sdd)
+  10bis. Moteur de workflow (ajouté W3 2026-10-10, ./workflow/runtime.sdd ; FAIL-FAST
+    revu 2026-10-14) —
+    @workflow::@WorkflowConfigApp::from_config(`&config`) : @Ok(@None) (AUCUNE variable
+    d'engagement posée — voir les trois variables de ./workflow/runtime.sdd ;
+    moteur éteint voulu, silencieux)
     ⇒ `state.workflow` reste @None, AUCUN port ouvert, aucune requête vers Restate ;
-    @Some ⇒ @workflow::@start_runtime (await — @VnlK8sClient::discover, registre,
+    @Err (config PARTIELLE ou deployment URL non dérivable — décidé 2026-10-14, plus de
+    warn + moteur éteint) ⇒ log une ligne `"VNL-WF-001: {cause}"` + exit(1) ;
+    @Ok(@Some) ⇒ @workflow::@start_runtime (await — @VnlK8sClient::discover, registre,
     endpoint, enregistrement) : succès ⇒ `state.workflow = @Some(runtime)` ; échec ⇒ log
     une ligne `"VNL-WF-001: {cause}"` + exit(1) (l'échec d'ENREGISTREMENT du déploiement
     ne remonte jamais ici : réessayé en arrière-plan par ./workflow/runtime.sdd).
@@ -389,7 +393,7 @@ Depends on:
     opérationnels de `GET /health`, `LISTEN_ADDR`, `STATIC_DIR`.
 
 Tasks:
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : appeler AUSSI `ensure_system_agents` (idempotent) à la création de conversation en contexte `settings` (`api/conversations.rs`) ; pas de hook miryad-core amont. (Question d'origine : Amorçage des agents système (S8, 2026-10-13) : le point d'appel contracté est
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : appeler AUSSI `ensure_system_agents` (idempotent) à la création de conversation en contexte `settings` (`api/conversations.rs`) ; pas de hook miryad-core amont. (Question d'origine : Amorçage des agents système (S8, 2026-10-13) : le point d'appel contracté est
     `ensure_system_agents` à la PREMIÈRE CONNEXION d'un utilisateur, mais `auth_router` de
     miryad-core ne prête aucun hook de login. L'implémentation branche l'amorçage idempotent
     dans `ws/chat.rs::resolve_extra_mcp` (contextes système seulement) — la voie

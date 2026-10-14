@@ -153,6 +153,18 @@ pub struct WsTicketOut {
     pub ws_host: String,
 }
 
+/// Conversion des pannes TRANSPORT du relais app→sandbox en erreur OPAQUE
+/// (`AppError::SandboxRelayUnavailable`, 502 `VNL-SBX-017`) — `./sandboxes.sdd` §Must
+/// « Erreurs du RELAIS opaques » (revue 2026-10-14) : le `Display` de `reqwest::Error`
+/// porte l'URL interne de la sandbox (`http://sandbox-{name}.{namespace}.svc:…`), qui ne
+/// sort JAMAIS de l'app. La panne complète (reqwest, URL) est consignée ici en
+/// `tracing::warn!` — jamais dans le message `@Display` rendu au navigateur.
+fn map_relay_err(e: &reqwest::Error) -> AppError {
+    let url = e.url().map(ToString::to_string).unwrap_or_default();
+    tracing::warn!("panne du relais sandbox ({url}): {e}");
+    AppError::SandboxRelayUnavailable
+}
+
 /// Relais de ticket WS : scoping owner identique à `get_sandbox`, host
 /// public résolu via la CR Application (owner → `application_ref` →
 /// `spec.host`), ticket miné auprès de la sandbox en présentant le jeton du
@@ -204,8 +216,10 @@ pub async fn ws_ticket(
             format!("Bearer {}", owner_token.token),
         )
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(|e| map_relay_err(&e))?
+        .error_for_status()
+        .map_err(|e| map_relay_err(&e))?;
     let body: serde_json::Value = resp.json().await?;
     let ticket = body["ticket"].as_str().ok_or_else(|| {
         AppError::InternalError("VNL-SBX-002: sandbox ticket response missing 'ticket'".into())
@@ -237,7 +251,9 @@ async fn proxy_git_request(
     for (k, v) in headers {
         req = req.header(&k, &v);
     }
-    let resp = req.body(body).send().await?;
+    // Pannes de TRANSPORT opaques (`map_relay_err`) ; le passthrough statut+JSON de la
+    // réponse sandbox en dessous reste TEL QUEL (corps émis par la sandbox, sans URL).
+    let resp = req.body(body).send().await.map_err(|e| map_relay_err(&e))?;
 
     let status = StatusCode::from_u16(resp.status().as_u16())
         .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -792,6 +808,42 @@ mod tests {
         );
         assert_eq!(seen.content_type.as_deref(), Some("application/json"));
         assert_eq!(seen.body, r#"{"message":"m"}"#, "corps d'origine forwardé");
+    }
+
+    // ── Scenario: panne_de_relais_sans_fuite_d_url ──
+    // Une vraie `reqwest::Error` de connexion (adresse fermée) convertie par le helper
+    // privé rend 502 avec le corps exact `VNL-SBX-017` — ni l'URL interne (le `Display`
+    // reqwest la porte), ni `svc`, ni le message d'origine (revue 2026-10-14).
+    #[tokio::test]
+    async fn panne_de_relais_sans_fuite_d_url() {
+        use axum::response::IntoResponse;
+
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/mcp")
+            .send()
+            .await
+            .expect_err("adresse fermée ⇒ panne de transport réelle");
+        assert!(
+            err.url()
+                .is_some_and(|u| u.to_string().contains("127.0.0.1")),
+            "la panne d'origine porte bien l'URL interne (risque verrouillé)"
+        );
+
+        let resp = map_relay_err(&err).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("corps lisible");
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"VNL-SBX-017: sandbox unavailable"}"#.as_slice(),
+            "corps exact, sans fuite"
+        );
+        let rendu = String::from_utf8_lossy(&body);
+        assert!(
+            !rendu.contains("127.0.0.1") && !rendu.contains("svc"),
+            "ni l'adresse fermée ni le suffixe du service interne ne sortent : {rendu}"
+        );
     }
 
     // ── Scenario: git_proxy_enveloppe_le_corps_non_json_sans_changer_le_statut ──

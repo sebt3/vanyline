@@ -40,6 +40,14 @@ pub enum AppError {
     SandboxBranchEmpty,
     #[error("VNL-SBX-003: invalid git path segment")]
     GitPathInvalid,
+    /// Panne de RELAIS app→sandbox (transport, timeout, statut de la frappe du ticket) —
+    /// `./api/sandboxes.sdd` §Must « Erreurs du RELAIS opaques ». SANS champ embarqué : le
+    /// `Display` de `reqwest::Error` porte l'URL interne de la sandbox, qui ne sort JAMAIS
+    /// de l'app ; la panne complète est consignée en `tracing::warn!` par l'appelant.
+    /// Marqueur pris en `017+` : la plage `VNL-SBX-004..016` appartient aux erreurs git de
+    /// la sandbox (`sandbox/src/git.sdd`) — `./error.sdd`.
+    #[error("VNL-SBX-017: sandbox unavailable")]
+    SandboxRelayUnavailable,
     /// Workflow inexistant OU appartenant à un autre utilisateur (404, aucune distinction —
     /// `./api/workflows.sdd`).
     #[error("VNL-WFA-002: workflow not found")]
@@ -130,7 +138,8 @@ impl IntoResponse for AppError {
             Self::LlmError(_)
             | Self::McpError(_)
             | Self::RequestError(_)
-            | Self::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            | Self::K8sConfigError(_)
+            | Self::SandboxRelayUnavailable => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::LlmProviderNotFound
             | Self::AgentNotFound
             | Self::ConversationNotFound

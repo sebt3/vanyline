@@ -76,47 +76,62 @@ fn non_vide(valeur: Option<&String>) -> Option<&str> {
 }
 
 impl WorkflowConfigApp {
-    /// Lit le moteur dans le `Config` : les deux URL Restate (`admin`, `ingress`) doivent être
-    /// présentes et non vides, sinon moteur non configuré (`None`, l'app tourne sans workflows).
-    /// `VNL_WORKFLOW_DEPLOYMENT_URL` absente ou vide ⇒ défaut dérivé du nom de l'Application
-    /// (voir [`Self::derive_deployment_url`]) ; non dérivable ⇒ moteur éteint aussi (un warn,
-    /// jamais un panic).
-    #[must_use]
-    pub fn from_config(config: &Config) -> Option<Self> {
-        let admin = non_vide(config.restate_admin_url.as_ref());
-        let ingress = non_vide(config.restate_ingress_url.as_ref());
-        match (admin, ingress) {
-            (None, None) => None,
-            (None, Some(_)) | (Some(_), None) => {
-                tracing::warn!(
-                    "configuration workflow incomplète (VNL_RESTATE_ADMIN_URL = {:?}, VNL_RESTATE_INGRESS_URL = {:?}) : le moteur reste éteint",
-                    admin.map(|_| "posée"),
-                    ingress.map(|_| "posée"),
-                );
-                None
-            }
-            (Some(admin_url), Some(ingress_url)) => {
-                let deployment_url = match non_vide(config.workflow_deployment_url.as_ref()) {
-                    Some(url) => url.to_string(),
-                    None => {
-                        if let Some(url) = Self::derive_deployment_url(config) {
-                            url
-                        } else {
-                            tracing::warn!(
-                                "VNL_WORKFLOW_DEPLOYMENT_URL absente et défaut impossible à dériver (nom d'Application, namespace ou port d'endpoint manquants) : le moteur reste éteint"
-                            );
-                            return None;
-                        }
-                    }
-                };
-                Some(Self {
-                    admin_url: admin_url.to_string(),
-                    ingress_url: ingress_url.to_string(),
-                    deployment_url,
-                    listen: config.workflow_listen.clone(),
-                })
-            }
+    /// Lit le moteur dans le `Config` — FAIL-FAST (décidé 2026-10-14, remplace warn +
+    /// moteur éteint de W3) : `Ok(None)` SILENCIEUX seulement si AUCUNE des variables
+    /// moteur (`VNL_RESTATE_ADMIN_URL`, `VNL_RESTATE_INGRESS_URL`,
+    /// `VNL_WORKFLOW_DEPLOYMENT_URL`) n'est posée (déploiement sans workflows, voulu éteint).
+    /// Config partielle (variable posée mais URL absente/vide) ou deployment URL non
+    /// dérivable (`VNL_WORKFLOW_DEPLOYMENT_URL` absente/vide et nom d'Application ou
+    /// namespace absents/vide, port de `VNL_WORKFLOW_LISTEN` invalide) ⇒ `Err` d'erreur de
+    /// configuration miryad-core (`InvalidConfig`, marqueur `MRD-WORKFLOW-007` imbriqué,
+    /// même famille que `VNL-WF-002`) — rendu `VNL-WF-001` + `exit(1)` par `main.rs`.
+    pub fn from_config(config: &Config) -> Result<Option<Self>, WorkflowError> {
+        let admin = config.restate_admin_url.as_ref();
+        let ingress = config.restate_ingress_url.as_ref();
+        let deployment = config.workflow_deployment_url.as_ref();
+        if admin.is_none() && ingress.is_none() && deployment.is_none() {
+            // Aucune variable posée : moteur éteint voulu, silencieux (`runtime.sdd`
+            // Scenario `aucune_variable_silence_voulu`).
+            return Ok(None);
         }
+        let declared = || {
+            format!(
+                " VNL_RESTATE_ADMIN_URL posée = {}, VNL_RESTATE_INGRESS_URL posée = {}, VNL_WORKFLOW_DEPLOYMENT_URL posée = {}",
+                admin.is_some(),
+                ingress.is_some(),
+                deployment.is_some(),
+            )
+        };
+        let invalid = |cause: String| WorkflowError::InvalidConfig(cause);
+        let admin_url = non_vide(admin).ok_or_else(|| {
+            invalid(format!(
+                "VNL_RESTATE_ADMIN_URL absente ou vide alors que le moteur de workflow est déclaré;{}",
+                declared()
+            ))
+        })?;
+        let ingress_url = non_vide(ingress).ok_or_else(|| {
+            invalid(format!(
+                "VNL_RESTATE_INGRESS_URL absente ou vide alors que le moteur de workflow est déclaré;{}",
+                declared()
+            ))
+        })?;
+        let deployment_url = match non_vide(deployment) {
+            Some(url) => url.to_string(),
+            None => Self::derive_deployment_url(config).ok_or_else(|| {
+                invalid(
+                    "VNL_WORKFLOW_DEPLOYMENT_URL absente ou vide et défaut non dérivable \
+                     (nom d'Application ou namespace absents/vide, ou port de \
+                     VNL_WORKFLOW_LISTEN non parseable)"
+                        .to_string(),
+                )
+            })?,
+        };
+        Ok(Some(Self {
+            admin_url: admin_url.to_string(),
+            ingress_url: ingress_url.to_string(),
+            deployment_url,
+            listen: config.workflow_listen.clone(),
+        }))
     }
 
     /// Défaut de la deployment URL, forme du déploiement existant
@@ -706,35 +721,92 @@ mod tests {
     }
 
     // ── Scenario: moteur_non_configure (mod.sdd, volet W3) ───────────────────
-    // Aucun `VNL_RESTATE_*` (ou partiel, ou posé vide) ⇒ `from_config` rend `None` :
-    // `main.rs` n'appelle jamais `start_runtime`, donc aucun port d'endpoint Restate
-    // n'est ouvert. (Les routes `503` sont W4 — `api/workflows.sdd`.)
+    // REVU 2026-10-14 (FAIL-FAST) : l'extinction silencieuse `Ok(None)` ne couvre plus
+    // que l'absence totale de variables ; les cas partiel/vide sont des `Err` portés par
+    // `config_partielle_fail_fast`. `main.rs` n'appelle alors jamais `start_runtime`,
+    // aucun port d'endpoint Restate n'est ouvert.
     #[test]
     fn moteur_non_configure() {
         assert!(
-            WorkflowConfigApp::from_config(&config_base()).is_none(),
-            "aucune variable moteur ⇒ éteint"
+            matches!(WorkflowConfigApp::from_config(&config_base()), Ok(None)),
+            "aucune variable moteur ⇒ Ok(None) silencieux"
         );
-        let mut partiel = config_base();
-        partiel.restate_admin_url = Some("http://restate-admin:9070".to_string());
+    }
+
+    // ── Scenario: aucune_variable_silence_voulu ───────────────────────────────
+    // Décidé 2026-10-14 : AUCUNE variable `VNL_RESTATE_*` posée ⇒ `Ok(None)` SILENCIEUX —
+    // déploiement sans moteur de workflow, voulu tel quel (plus de warn).
+    #[test]
+    fn aucune_variable_silence_voulu() {
         assert!(
-            WorkflowConfigApp::from_config(&partiel).is_none(),
-            "admin seule (ingress absente) ⇒ éteint"
+            matches!(WorkflowConfigApp::from_config(&config_base()), Ok(None)),
+            "aucune variable posée ⇒ Ok(None)"
         );
-        let mut vide = config_moteur();
+    }
+
+    // ── Scenario: config_partielle_fail_fast ─────────────────────────────────
+    // Décidé 2026-10-14 (FAIL-FAST remplace warn+moteur éteint de W3) : une ou deux des
+    // URL posées (ou posées vides) ⇒ `Err` (rendu `VNL-WF-001` + exit(1) par `main.rs`),
+    // jamais un `Ok(None)` silencieux. L'erreur porte le code miryad-core `MRD-WORKFLOW-007`
+    // (variante `InvalidConfig`, même famille que `VNL-WF-002`).
+    #[test]
+    fn config_partielle_fail_fast() {
+        let mut admin_seule = config_base();
+        admin_seule.restate_admin_url = Some("http://restate-admin:9070".to_string());
+        let err = WorkflowConfigApp::from_config(&admin_seule)
+            .expect_err("admin seule ⇒ fail-fast, jamais Ok(None)");
+        assert!(
+            err.to_string().contains("MRD-WORKFLOW-007"),
+            "la cause MRD-WORKFLOW-007 est imbriquée : {err}"
+        );
+
+        let mut ingress_seule = config_base();
+        ingress_seule.restate_ingress_url = Some("http://restate-ingress:8080".to_string());
+        assert!(
+            WorkflowConfigApp::from_config(&ingress_seule).is_err(),
+            "ingress seule ⇒ fail-fast"
+        );
+
+        let mut vide = config_base();
         vide.restate_admin_url = Some(String::new());
+        vide.restate_ingress_url = Some("http://restate-ingress:8080".to_string());
         assert!(
-            WorkflowConfigApp::from_config(&vide).is_none(),
-            "URL posée vide ⇒ éteint (le vide n'entre pas dans le chemin réseau)"
+            WorkflowConfigApp::from_config(&vide).is_err(),
+            "URL posée vide avec les autres posées ⇒ fail-fast (jamais de silence)"
+        );
+    }
+
+    // ── Scenario: deployment_non_derable_fail_fast ───────────────────────────
+    // URL posées mais nom d'Application (ou namespace) absent/vide ⇒ deployment URL non
+    // dérivable : fail-fast aussi (2026-10-14, plus de warn + moteur éteint).
+    #[test]
+    fn deployment_non_derable_fail_fast() {
+        let mut nom_vide = config_moteur();
+        nom_vide.application_name = Some(String::new());
+        let err = WorkflowConfigApp::from_config(&nom_vide)
+            .expect_err("nom d'application vide ⇒ deployment non dérivable ⇒ Err");
+        assert!(
+            err.to_string().contains("MRD-WORKFLOW-007"),
+            "la cause MRD-WORKFLOW-007 est imbriquée : {err}"
+        );
+
+        let mut sans_namespace = config_moteur();
+        sans_namespace.k8s_namespace = None;
+        assert!(
+            WorkflowConfigApp::from_config(&sans_namespace).is_err(),
+            "namespace absent ⇒ deployment non dérivable ⇒ Err"
         );
     }
 
     // Appoint `Exposes` : la deployment URL défaut est dérivée du nom de l'Application
     // (forme du déploiement existant, deploy/web/configmap.yaml :
-    // `http://{app}.{ns}.svc:{port}`), l'explicite prime, l'in dérivable éteint le moteur.
+    // `http://{app}.{ns}.svc:{port}`), l'explicite prime, l'in dérivable est un fail-fast
+    // (revu 2026-10-14 : plus de None).
     #[test]
     fn deploiement_derivee_du_nom_application() {
-        let cfg = WorkflowConfigApp::from_config(&config_moteur()).expect("configurée");
+        let cfg = WorkflowConfigApp::from_config(&config_moteur())
+            .expect("config valide")
+            .expect("moteur configuré");
         assert_eq!(
             cfg.deployment_url, "http://vanyline.media-station.svc:9080",
             "dérivée : http://{{application_name}}.{{namespace}}.svc:{{port de VNL_WORKFLOW_LISTEN}}"
@@ -747,7 +819,8 @@ mod tests {
         explicite.workflow_deployment_url = Some("http://app.interne:9410".to_string());
         assert_eq!(
             WorkflowConfigApp::from_config(&explicite)
-                .expect("configurée")
+                .expect("config valide")
+                .expect("moteur configuré")
                 .deployment_url,
             "http://app.interne:9410",
             "VNL_WORKFLOW_DEPLOYMENT_URL posée prime le défaut"
@@ -756,8 +829,8 @@ mod tests {
         let mut sans_nom = config_moteur();
         sans_nom.application_name = None;
         assert!(
-            WorkflowConfigApp::from_config(&sans_nom).is_none(),
-            "sans nom d'Application, défaut impossible à dériver ⇒ éteint"
+            WorkflowConfigApp::from_config(&sans_nom).is_err(),
+            "sans nom d'Application, défaut impossible à dériver ⇒ fail-fast (2026-10-14)"
         );
     }
 
