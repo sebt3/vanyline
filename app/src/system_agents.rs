@@ -449,15 +449,13 @@ pub async fn context_tools(
         // `ws/chat.rs::resolve_extra_mcp` (garde IDOR `project.spec.owner == owner`).
         // Toute panne de résolution est NON bloquante : serveur marqué `unavailable`.
         match resolve_sandbox_server(state, user, context).await {
-            Ok(url) => {
-                let mut headers = std::collections::BTreeMap::new();
-                headers.insert("Authorization".to_string(), auth.clone());
+            Ok((url, owner_token)) => {
                 tools.servers.push((
                     McpServer {
                         name: "sandbox".to_string(),
                         transport: McpTransport::HttpStreamable,
                         url,
-                        headers,
+                        headers: sandbox_headers(&owner_token),
                     },
                     McpSelection {
                         server: "sandbox".to_string(),
@@ -488,13 +486,23 @@ fn app_base_url(state: &crate::AppState) -> Result<String, AppError> {
     Ok(format!("http://127.0.0.1:{port}"))
 }
 
-/// Résolution (avec scoping owner) de l'URL MCP interne de la sandbox du contexte — motifs
+/// En-têtes du serveur MCP `sandbox` : le jeton du SA de l'Owner seul (la sandbox
+/// n'accepte rien d'autre, `sandbox/src/auth.sdd`) ; jamais le jeton d'API de l'utilisateur.
+fn sandbox_headers(owner_token: &str) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([(
+        "Authorization".to_string(),
+        format!("Bearer {owner_token}"),
+    )])
+}
+
+/// Résolution (avec scoping owner) de l'URL MCP interne de la sandbox du contexte et du
+/// jeton d'Owner qui l'authentifie — le jeton n'est demandé qu'APRÈS la garde IDOR. Motifs
 /// de panne rendus en `Err(raison)` pour un signalement `ToolUnavailable` non bloquant.
 async fn resolve_sandbox_server(
     state: &crate::AppState,
     user: &AuthUser,
     context: &crate::db::entities::chat_contexts::Model,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let Some(sandbox_name) = context.data.get("sandbox_name").and_then(|v| v.as_str()) else {
         return Err("contexte sandbox invalide (sandbox_name absent)".to_string());
     };
@@ -519,10 +527,15 @@ async fn resolve_sandbox_server(
     if project.spec.owner != owner {
         return Err("sandbox hors du périmètre de cet utilisateur".to_string());
     }
-    client
+    let url = client
         .sandbox_mcp_url(&owner, sandbox_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let owner_token = client
+        .owner_token(&owner)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((url, owner_token.token))
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,6 +1098,76 @@ mod tests {
         );
         let _ = alice;
         let _ = bob;
+    }
+
+    /// Scenario: `sandbox_porte_le_jeton_de_l_owner` — le serveur `sandbox` ne reçoit
+    /// JAMAIS le jeton d'API de l'utilisateur : la sandbox n'accepte que le JWT du SA de
+    /// l'Owner (`sandbox/src/auth.sdd`).
+    #[test]
+    fn sandbox_porte_le_jeton_de_l_owner() {
+        let headers = sandbox_headers("owner-jwt");
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer owner-jwt")
+        );
+        assert_eq!(headers.len(), 1, "aucun autre en-tête d'identité");
+    }
+
+    /// Scenario: `mcp_config_monte` — `POST /mcp` (CRUD de la configuration, miryad-core)
+    /// est monté : 401 sans jeton (jamais 404), 200 `tools/list` avec le jeton jetable.
+    #[tokio::test]
+    async fn mcp_config_monte_et_authentifie() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state(real_db().await);
+        seed_user(&state.auth.db, "alice").await;
+        let app = crate::mcp_config_router().with_state(state.clone());
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let anonymous = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(list))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router does not fail");
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let tools = context_tools(
+            &state,
+            &auth_user("alice"),
+            "settings",
+            &context_of("settings"),
+            "config",
+        )
+        .await
+        .expect("context_tools succeeds");
+        let token = bearer_of(&tools, "vanyline-config");
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::from(list))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router does not fail");
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("readable body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        let n = json["result"]["tools"].as_array().map_or(0, Vec::len);
+        assert!(n >= 30, "6 entités × 5 outils attendus, got {n}: {json}");
     }
 
     /// Extrait le jeton du serveur nommé (en-tête `Authorization: Bearer <token>`).

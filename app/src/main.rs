@@ -197,6 +197,7 @@ async fn main() {
         >())
         .merge(resource_router::<db::entities::agents::Entity, AppState>())
         .merge(swagger_ui_router::<AppState>(openapi_spec()))
+        .merge(mcp_config_router())
         .merge(mcp_domain::mcp_domain_router())
         .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
@@ -224,6 +225,21 @@ async fn main() {
         tracing::error!("VNL-NET-002: server error: {}", e);
         std::process::exit(1);
     });
+}
+
+/// `POST /mcp` : CRUD de la configuration (les six ressources du `resource_router`) par le
+/// serveur MCP générique de miryad-core, avec l'identité de l'appelant (`main.sdd`).
+pub(crate) fn mcp_config_router() -> Router<AppState> {
+    use miryad_core::mcp::{McpToolRegistry, OutputFormat, mcp_router};
+    let mut registry = McpToolRegistry::new(OutputFormat::Json);
+    registry
+        .register::<db::entities::llm_providers::Entity>()
+        .register::<db::entities::mcp_servers::Entity>()
+        .register::<db::entities::skills::Entity>()
+        .register::<db::entities::toolsets::Entity>()
+        .register::<db::entities::model_profiles::Entity>()
+        .register::<db::entities::agents::Entity>();
+    mcp_router(registry)
 }
 
 async fn health() -> &'static str {
