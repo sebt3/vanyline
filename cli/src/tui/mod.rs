@@ -190,6 +190,25 @@ impl TurnSlot {
     fn finish(&mut self) {
         self.handle = None;
     }
+
+    /// Polling de la garde au tick de 100 ms (`mod.sdd` §Must « Panique de la
+    /// tâche de tour ») : si la handle est présente ET la tâche TERMINÉE
+    /// (panique, ou fin anticipée sans envoi de `TurnOutcome`), consommer la
+    /// garde, égoutter la `JoinError` (rendu immédiat, la tâche est finie) et
+    /// la rendre à l'appelant. `None` sinon — aucun await bloquant (`await`
+    /// uniquement derrière `is_finished()`).
+    #[must_use]
+    async fn take_finished(&mut self) -> Option<Result<(), tokio::task::JoinError>> {
+        if !self
+            .handle
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            return None;
+        }
+        let handle = self.handle.take()?;
+        Some(handle.await)
+    }
 }
 
 /// Installe le hook de panique qui RESTAURE le terminal AVANT tout message
@@ -510,7 +529,46 @@ pub async fn run_tui(session: TuiSession) -> Result<(), CliError> {
                     None => None,
                 }
             }
-            _ = ticker.tick() => Some(state::Action::Tick),
+            _ = ticker.tick() => {
+                // §Must « Panique de la tâche de tour » : à chaque tick,
+                // sonder la garde ; une tâche terminée alors que la garde est
+                // encore prise (panique ou fin anticipée sans TurnOutcome)
+                // est consommée ici. Pas de double traitement : un résultat
+                // malgré tout en attente sur le canal passe d'abord par le
+                // chemin normal (même traitement que le bras `turn_rx`).
+                if let Some(join) = lp.slot.take_finished().await {
+                    match turn_rx.try_recv() {
+                        Ok((Ok(result), todo)) => {
+                            lp.last_turn = Some((
+                                crate::chat::result_to_assistant_message(result),
+                                todo,
+                            ));
+                            lp.slot.finish();
+                            lp.step(state::Action::TurnFinished(Ok(ChatTurnResult {
+                                response_text: String::new(),
+                                tool_calls: Vec::new(),
+                            })));
+                        }
+                        Ok((Err(e), _)) => {
+                            lp.slot.finish();
+                            lp.step(state::Action::TurnFinished(Err(e)));
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty
+                        | tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                            let reason = match join {
+                                Ok(()) => "fin anticipée sans résultat".to_string(),
+                                Err(e) => e.to_string(),
+                            };
+                            lp.step(state::Action::TurnFinished(Err(
+                                vanyline_lib::VnyError::InternalError(format!(
+                                    "tour interrompu : la tâche de tour s'est terminée sans résultat ({reason})"
+                                )),
+                            )));
+                        }
+                    }
+                }
+                Some(state::Action::Tick)
+            }
             () = async {
                 match signals.as_mut() {
                     #[cfg(unix)]
@@ -899,6 +957,129 @@ mod tests {
         assert!(slot.start(done), "un tour est possible après annulation");
         slot.finish();
         assert!(!slot.busy(), "la fin du tour libère la garde");
+    }
+
+    /// Scenario: `tour_interrompu_panique_tache_de_tour` (volet garde —
+    /// §Must « Panique de la tâche de tour ») — une tâche de tour qui panique
+    /// (panique capturée en `JoinError` par tokio, hook global non installé en
+    /// test) : `take_finished` rend `None` tant que la tâche vit sans consommer
+    /// la garde, puis consomme la garde, égoutte la `JoinError` de panique et
+    /// la libère ; un tour suivant est accepté.
+    #[tokio::test]
+    async fn tour_interrompu_panique_take_finished_egoutte_join_error() {
+        // Le hook par défaut afficherait la panique capturée sur stderr :
+        // on le remplace pour la durée du test (aucune sortie parasite).
+        let orig_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_info| {}));
+        let mut slot = TurnSlot::default();
+        let boom: futures::future::BoxFuture<'static, ()> =
+            Box::pin(async { panic!("boom : tâche de tour qui panique (test)") });
+        assert!(slot.start(boom), "la tâche de tour est acceptée");
+        // Tâche non finie (runtime mono-thread, aucun yield émis) : None et
+        // la garde n'est PAS consommée.
+        assert!(
+            slot.take_finished().await.is_none(),
+            "tâche non finie : take_finished rend None sans consommer la garde"
+        );
+        assert!(slot.busy(), "la garde est restée prise");
+        // Attendre la fin de la tâche sans sleep long : quelques yields
+        // bornés suffisent (la panique est capturée en JoinError par tokio).
+        let mut spins = 0u32;
+        while !slot
+            .handle
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            spins += 1;
+            assert!(spins < 1000, "la tâche doit finir promptement");
+            tokio::task::yield_now().await;
+        }
+        let drained = slot
+            .take_finished()
+            .await
+            .expect("garde terminée : elle doit être consommée");
+        let err = drained.expect_err("la panique est rendue en JoinError");
+        assert!(
+            err.is_panic(),
+            "JoinError de panique attendue, obtenu: {err}"
+        );
+        assert!(!slot.busy(), "la garde est libre après consommation");
+        assert!(
+            slot.take_finished().await.is_none(),
+            "plus de garde : rien à consommer"
+        );
+        let next: futures::future::BoxFuture<'static, ()> = Box::pin(std::future::pending());
+        assert!(
+            slot.start(next),
+            "la garde libre rend un tour suivant possible"
+        );
+        slot.cancel();
+        std::panic::set_hook(orig_hook);
+    }
+
+    /// Scenario: `tour_interrompu_panique_tache_de_tour` (volet décision +
+    /// état) — l'action injectée par le polling après panique,
+    /// `TurnFinished(Err(InternalError(« … tour interrompu … »)))`, sort de
+    /// `Running` vers `Idle`, rend une `Notice` Error contenant
+    /// `VNL-INT-001` et « interrompu », et n'émet AUCUN effet `Save` (le tour
+    /// interrompu n'est pas persisté) — jamais `Running` à vie.
+    #[test]
+    fn tour_interrompu_panique_sort_de_running_sans_sauvegarde() {
+        // État `Running` obtenu par le chemin de préparation déjà testé
+        // (saisie « x » puis Entrée ⇒ StartTurn + Running).
+        let st = state::AppState::new("a1", "conv-1".to_string(), None, (100, 30));
+        let (st, _e) = state::update(
+            st,
+            state::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        let (st, effects) = state::update(
+            st,
+            state::Action::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(
+            effects.contains(&state::Effect::StartTurn("x".to_string())),
+            "préparation Running: {effects:?}"
+        );
+        assert!(
+            matches!(st.status, state::Status::Running { .. }),
+            "l'état est Running avant l'injection"
+        );
+        // Action injectée par le polling de la garde (message rendu :
+        // « VNL-INT-001: Internal error: tour interrompu… »).
+        let (st, effects) = state::update(
+            st,
+            state::Action::TurnFinished(Err(vanyline_lib::VnyError::InternalError(
+                "tour interrompu : la tâche de tour s'est terminée sans résultat".to_string(),
+            ))),
+        );
+        assert_eq!(st.status, state::Status::Idle, "jamais Running à vie");
+        let notices: Vec<&String> = st
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                state::TranscriptItem::Notice {
+                    level: state::NoticeLevel::Error,
+                    text,
+                } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|t| t.contains("VNL-INT-001") && t.contains("interrompu")),
+            "une Notice Error contenant VNL-INT-001 et « interrompu », obtenues: {notices:?}"
+        );
+        assert!(
+            !effects.contains(&state::Effect::Save),
+            "le tour interrompu n'est jamais persisté: {effects:?}"
+        );
     }
 
     /// Le résumé `git diff --shortstat` de la barre d'état : `Some` sur dépôt
