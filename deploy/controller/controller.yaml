@@ -49,13 +49,6 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Délégation à `app` du droit de demander des jetons de SA (TokenRequest) : K8s interdit de
-  # lier un rôle dont on ne détient pas les droits (anti-escalade), le controller doit donc
-  # lui-même pouvoir créer des jetons de ServiceAccount pour pouvoir lier le ClusterRole
-  # `vanyline-app-owner-scope`.
-  - apiGroups: [""]
-    resources: ["serviceaccounts/token"]
-    verbs: ["create"]
   # Moteur de workflow : StatefulSet Restate, sous-ressource de l'Application.
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
@@ -71,9 +64,10 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Role/RoleBinding namespacés : Role de l'app dans le namespace d'application (owners,
   # applications) et RoleBinding `vanyline-app` dans chaque namespace d'Owner. Pas d'escalade de
-  # privilèges : le controller possède déjà, via les règles ci-dessus, un sur-ensemble des droits
-  # qu'il délègue (y compris serviceaccounts/token) ; `bind` est ajouté explicitement pour le
-  # ClusterRole délégué.
+  # privilèges : pour les Roles de l'app il possède déjà un sur-ensemble des droits délégués ;
+  # le ClusterRole `vanyline-app-owner-scope` (qui porte serviceaccounts/token) est lié par le
+  # seul verbe `bind` (resourceNames) — le controller ne détient PAS serviceaccounts/token lui-même
+  # (sinon : jetons forgeables pour n'importe quel SA du cluster, kube-system compris).
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
