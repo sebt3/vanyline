@@ -77,6 +77,17 @@ fn token_is_fresh(now: DateTime<Utc>, expires_at: DateTime<Utc>) -> bool {
         .is_some_and(|refresh_at| now < refresh_at)
 }
 
+/// Composer la clé de cache des jetons d'Owner : `"<owner>:<uid du SA>"`
+/// (`k8s.sdd` « Obtenir le jeton d'un Owner », invalidation par la clé décidé
+/// 2026-10-14) — la recréation d'un Owner (nouvel uid de SA) change la clé,
+/// le jeton de l'ancien SA devient structurellement inrattrapable sans écoute
+/// d'événement. Pure et testable seule (Scenario
+/// `owner_token_cle_de_cache_contient_uid_sa`).
+#[must_use]
+fn owner_token_cache_key(owner: &str, sa_uid: &str) -> String {
+    format!("{owner}:{sa_uid}")
+}
+
 /// Décision pure de l'horodatage d'expiration du jeton : la valeur rendue par
 /// l'apiserver (`apiserver_expiry`) prime ; en son absence (ou si elle est
 /// hors plage chrono), repli sur `now + OWNER_TOKEN_EXPIRATION_SECS`.
@@ -462,28 +473,41 @@ impl VnlK8sClient {
 
     /// Lit un jeton d'Owner valide depuis le cache partagé (tous les clones
     /// du client) si celui-ci a plus de `OWNER_TOKEN_REFRESH_MARGIN_SECS` de
-    /// validité restante à `now`.
-    fn cached_owner_token(&self, owner: &str, now: DateTime<Utc>) -> Option<OwnerToken> {
+    /// validité restante à `now`. La lookup se fait sous la clé composée
+    /// `"<owner>:<uid du SA>"` (`owner_token_cache_key`), plus le seul nom
+    /// d'Owner.
+    fn cached_owner_token(&self, key: &str, now: DateTime<Utc>) -> Option<OwnerToken> {
         let guard = self
             .owner_tokens
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
-            .get(owner)
+            .get(key)
             .filter(|t| token_is_fresh(now, t.expires_at))
             .cloned()
     }
 
     /// Lit le jeton d'authentification de l'Owner `owner` (uprès de SES
     /// sandboxes — cf. `sandbox/src/auth.sdd`) :
-    /// 1. cache partagé réutilisé s'il reste plus de 300 s de validité ;
-    /// 2. sinon lecture de `owner.status.serviceAccount` dans le namespace
-    ///    d'application (jamais un nom reconstruit à la main) — Owner ou SA
-    ///    absent = erreur explicite sans demande de jeton ;
-    /// 3. `TokenRequest` sur ce SA dans le namespace de l'Owner
+    /// 1. lecture de `owner.status.serviceAccount` dans le namespace
+    ///    d'application (jamais un nom reconstruit à la main) — Owner ou
+    ///    `status.serviceAccount` absent = erreur explicite sans demande de
+    ///    jeton ;
+    /// 2. lecture de l'objet `ServiceAccount` lui-même (namespace de l'Owner)
+    ///    pour en tirer `metadata.uid` — objet absent (recréation en cours)
+    ///    ou uid non posé = erreur explicite, AUCUN `TokenRequest` émis ;
+    /// 3. cache partagé réutilisé sous la clé composée
+    ///    `owner_token_cache_key` (`"<owner>:<uid du SA>"`) s'il reste plus de
+    ///    300 s de validité — deux lectures légères (CR `Owner`, objet `ServiceAccount`)
+    ///    sont effectuées À CHAQUE appel, même sur succès en cache : c'est le
+    ///    prix assumé de la clé à uid (invalidation à la recréation d'Owner
+    ///    sans écoute d'événement, décidé 2026-10-14) ;
+    /// 4. sinon `TokenRequest` sur ce SA dans le namespace de l'Owner
     ///    (`audiences = [OWNER_TOKEN_AUDIENCE]`, `expirationSeconds = 900`,
-    ///    sans `boundObjectRef`), puis mise en cache (jamais persisté, jamais
-    ///    loggé — le Debug de `OwnerToken` masque la valeur).
+    ///    sans `boundObjectRef`), puis mise en cache sous la nouvelle clé et
+    ///    purge des entrées du MÊME Owner portant un uid différent (la map ne
+    ///    croît pas au fil des recréations) — jamais persisté, jamais loggé
+    ///    (le Debug de `OwnerToken` masque la valeur).
     ///
     /// L'appelant est responsable du jeton : il le journalise pas, ne le
     /// renvoie à aucun navigateur, et vérifie AVANT de le demander que son
@@ -493,13 +517,11 @@ impl VnlK8sClient {
     ///
     /// `VnyError::K8sApiError` (`VNL-K8S-002`) si le nom d'Owner produit un
     /// namespace invalide, si l'Owner ou son `status.serviceAccount` est
-    /// absent (aucune demande de jeton émise dans ce cas), ou si l'appel
-    /// `TokenRequest` échoue.
+    /// absent, si l'objet `ServiceAccount` est introuvable ou sans
+    /// `metadata.uid` (aucune demande de jeton émise dans ces cas), ou si
+    /// l'appel `TokenRequest` échoue.
     pub async fn owner_token(&self, owner: &str) -> Result<OwnerToken, VnyError> {
         let now = Utc::now();
-        if let Some(cached) = self.cached_owner_token(owner, now) {
-            return Ok(cached);
-        }
         let owner_obj = self.get_owner(owner).await.map_err(|e| {
             VnyError::K8sApiError(format!("Owner «{owner}» introuvable pour son jeton: {e}"))
         })?;
@@ -513,7 +535,25 @@ impl VnlK8sClient {
                 ))
             })?;
         let ns = self.owner_namespace(owner)?;
-        let api: kube::Api<ServiceAccount> = kube::Api::namespaced(self.client.clone(), &ns);
+        // Lecture de l'objet SA lui-même : son uid compose la clé de cache
+        // (invalidation à la recréation d'Owner, k8s.sdd 2026-10-14). Objet
+        // absent alors que status.serviceAccount est posé (recréation en
+        // cours) = erreur explicite, aucun TokenRequest émis.
+        let sa_api: kube::Api<ServiceAccount> = kube::Api::namespaced(self.client.clone(), &ns);
+        let sa_obj = sa_api.get(&service_account).await.map_err(|e| {
+            VnyError::K8sApiError(format!(
+                "ServiceAccount «{service_account}» de l'Owner «{owner}» introuvable dans le namespace «{ns}»: {e}"
+            ))
+        })?;
+        let sa_uid = sa_obj.metadata.uid.clone().ok_or_else(|| {
+            VnyError::K8sApiError(format!(
+                "ServiceAccount «{service_account}» de l'Owner «{owner}» sans metadata.uid (objet en cours de création)"
+            ))
+        })?;
+        let cache_key = owner_token_cache_key(owner, &sa_uid);
+        if let Some(cached) = self.cached_owner_token(&cache_key, now) {
+            return Ok(cached);
+        }
         let request = TokenRequest {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta::default(),
             spec: Some(TokenRequestSpec {
@@ -523,7 +563,7 @@ impl VnlK8sClient {
             }),
             status: None,
         };
-        let response = api
+        let response = sa_api
             .create_token_request(&service_account, &kube::api::PostParams::default(), &request)
             .await
             .map_err(|e| {
@@ -550,10 +590,18 @@ impl VnlK8sClient {
             });
         let expires_at = token_expires_at(now, apiserver_expiry)?;
         let jeton = OwnerToken { token, expires_at };
-        self.owner_tokens
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(owner.to_string(), jeton.clone());
+        {
+            let mut guard = self
+                .owner_tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Purge des entrées du MÊME Owner portant un uid de SA différent
+            // (recréation d'Owner) : la map ne croît pas au fil des
+            // recréations, aucune entrée vivante sous un uid mort.
+            let owner_prefix = format!("{owner}:");
+            guard.retain(|k, _| k == &cache_key || !k.starts_with(&owner_prefix));
+            guard.insert(cache_key.clone(), jeton.clone());
+        }
         Ok(jeton)
     }
 }
@@ -704,5 +752,26 @@ mod tests {
         assert!(!token_is_fresh(now, now + Duration::seconds(240)));
         assert!(!token_is_fresh(now, now + Duration::seconds(60)));
         assert!(!token_is_fresh(now, now - Duration::seconds(1)));
+    }
+
+    /// Scenario: `owner_token_cle_de_cache_contient_uid_sa` (invalidation par
+    /// la clé, décidé 2026-10-14) — la composition de clé est une fonction
+    /// pure interne : un changement d'uid du SA seul éteint la lookup, chaque
+    /// clé contient le nom d'Owner et l'uid, et le même appel est
+    /// déterministe. Test unitaire pur, sans cluster.
+    #[test]
+    fn owner_token_cle_de_cache_contient_uid_sa() {
+        let k1 = owner_token_cache_key("alice", "uid-1");
+        let k2 = owner_token_cache_key("alice", "uid-2");
+        assert_ne!(k1, k2, "le changement d'uid seul doit éteindre la lookup");
+        for (key, uid) in [(&k1, "uid-1"), (&k2, "uid-2")] {
+            assert!(key.contains("alice"), "la clé porte le nom d'Owner: {key}");
+            assert!(key.contains(uid), "la clé porte l'uid du SA: {key}");
+        }
+        assert_eq!(
+            k1,
+            owner_token_cache_key("alice", "uid-1"),
+            "composition déterministe"
+        );
     }
 }

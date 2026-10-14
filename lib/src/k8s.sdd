@@ -84,16 +84,27 @@ Must:
 
   Obtenir le jeton d'un Owner par @VnlK8sClient::owner_token : lire `owner.status.serviceAccount`
     (erreur `K8sApiError` explicite si l'Owner ou son SA n'existe pas encore, jamais un nom
-    reconstruit à la main), demander à l'apiserver un jeton par l'API TokenRequest
+    reconstruit à la main), puis lire l'objet @ServiceAccount lui-même (dans le namespace de
+    l'Owner) pour en tirer `metadata.uid`, demander à l'apiserver un jeton par l'API TokenRequest
     (`POST …/serviceaccounts/{sa}/token`) avec `audiences = [@OWNER_TOKEN_AUDIENCE]` et
     `expirationSeconds = 900` (l'apiserver impose un minimum de 600), SANS `boundObjectRef`
-    (v1). Le jeton est mis en CACHE par Owner (map partagée par tous les clones du client) et
-    réutilisé tant qu'il reste plus de 300 s de validité (@OWNER_TOKEN_REFRESH_MARGIN_SECS
+    (v1). Le jeton est mis en CACHE sous la clé `"<owner>:<uid du SA>"` (map partagée par tous
+    les clones du client ; fonction de composition de clé pure et testable) : réutilisé tant
+    qu'il reste plus de 300 s de validité (@OWNER_TOKEN_REFRESH_MARGIN_SECS
     = 300, portée de 120 à 300 le 2026-10-08 — décision Sébastien : le TTL 900 s est la
     fenêtre que le cluster impose, invariant non négociable ; le renouvellement à la demande
     avec plancher de 5 min est la réponse, pas un TTL plus long. Tout jeton rendu a donc
-    une vie restante ≥ 600 s côté apiserver) ; sinon un nouveau jeton est demandé et
-    remplace l'ancien. Le cache n'est jamais persisté.
+    une vie restante ≥ 600 s côté apiserver) ; sinon un nouveau jeton est demandé, stocké
+    sous la nouvelle clé, et les entrées de l'MÊME Owner portant une clé d'un uid DIFFÉRENT
+    sont purgées à l'insertion (la map ne croît pas au fil des recréations). Le cache n'est
+    jamais persisté.
+    Invalidation par la clé (décidé 2026-10-14) : recréer un Owner (CR supprimée puis reposée
+    → controller recrée le SA, nouvel uid) change la clé de cache — le jeton de l'ancien SA
+    est structurellement inrattrapable, aucune écoute d'événement de suppression n'est
+    nécessaire. Coût assumé : @VnlK8sClient::owner_token effectue À CHAQUE appel deux lectures
+    légères (la CR @Owner et l'objet @ServiceAccount) avant même un succès en cache, c'est le
+    prix de la clé à uid. L'objet @ServiceAccount absent alors que `status.serviceAccount` est
+    posé (recréation en cours) rend une erreur `K8sApiError` explicite, sans demande de jeton.
     Ce jeton est l'unique credential accepté par une sandbox (/sandbox/src/auth.sdd) ; son
     appelant (`app`, service central de revue, cli) en est responsable : il ne le journalise
     pas, ne le renvoie à aucun navigateur, et vérifie AVANT de le demander que son propre
@@ -141,7 +152,8 @@ Exposes:
   @VnlK8sClient — `pub`, @Clone ; champs privés `client`, `app_namespace` (namespace
     d'application : CR @Owner/@Application) et `owner_tokens`
     (@Arc<@Mutex<@HashMap<@String, @OwnerToken>>> — cache de jetons PARTAGÉ par le clone
-    du @Arc entre tous les clones du client, jamais persisté).
+    du @Arc entre tous les clones du client, clé `"<owner>:<uid du SA>"` (cf. §Must « Obtenir
+    le jeton d'un Owner »), jamais persisté).
   @OWNER_TOKEN_AUDIENCE — `pub const &str` = `"vanyline-sandbox"` (même valeur que
     `token_audience` par défaut de /sandbox/src/config.sdd).
   @OwnerToken — `pub struct { pub token: String, pub expires_at: chrono::DateTime<Utc> }`,
@@ -256,6 +268,11 @@ Tasks:
   [ ] Cache `owner_tokens` (revue 2026-10-14) : aucune invalidation à la suppression ou à la
     recréation d'un Owner — un jeton orphelin est réutilisé jusqu'à 15 min. Invalider sur
     l'événement de suppression, ou garder l'UID du SA dans la clé de cache.
+    — DÉCIDÉ 2026-10-14 (Sébastien) : UID du SA dans la clé. Contrat posé au §Must (clé
+    `"<owner>:<uid>"`, purge des entrées périmées du même Owner à l'insertion, deux lectures
+    par appel assumées) ; Scenarios @owner_token_cle_de_cache_contient_uid_sa (unité pure),
+    @owner_token_service_account_objet_absent et @owner_token_cache_invalide_a_recreation_owner
+    (intégration cluster) à écrire, @owner_token_cache_par_owner à ajuster.
   [x] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04) — parties CODE et DEPLOY FAITES,
     validator-vertes étape 4c (2026-10-06) : signatures `*_project`, `*_sandbox`,
     `sandbox_*_url`, `watch_sandboxes`, `owner_token` (SA lu dans le namespace de l'Owner) ;
@@ -462,9 +479,35 @@ Scenario: owner_token_demande_a_l_apiserver_avec_la_bonne_audience
     `vanyline-sandbox` et son `expires_at` est postérieur d'au moins 600 s
 
 Scenario: owner_token_cache_par_owner
-  Given un jeton déjà obtenu pour `alice`, encore valide plus de 300 s (la marge)
+  Given un jeton déjà obtenu pour `alice` (clé de cache `alice:<uid du SA>`), encore valide
+    plus de 300 s (la marge)
   When @VnlK8sClient::owner_token("alice") est rappelé, y compris sur un clone du client
-  Then le MÊME jeton est rendu sans nouvel appel à l'apiserver
+  Then le MÊME jeton est rendu sans nouveau @TokenRequest — seules les deux lectures légères
+    (CR @Owner, objet @ServiceAccount) précédant la lookup sont effectuées
+
+Scenario: owner_token_cle_de_cache_contient_uid_sa
+  Given la composition de clé de cache (fonction pure interne à ./k8s.rs, testable seule)
+  When elle est appelée avec `("alice", "uid-1")` puis `("alice", "uid-2")`
+  Then les deux clés sont DIFFÉRENTES (le changement d'uid seul éteint la lookup), chaque clé
+    contient le nom d'Owner et l'uid, et `("alice", "uid-1")` rappelée rend la même valeur —
+    test unitaire pur, sans cluster
+
+Scenario: owner_token_service_account_objet_absent
+  Given (intégration — cluster réel) un Owner `alice` dont `status.serviceAccount` est posé
+    mais dont l'objet @ServiceAccount a été supprimé (recréation en cours)
+  When @VnlK8sClient::owner_token("alice")
+  Then une erreur @VnyError::K8sApiError explicite est rendue et AUCUN @TokenRequest n'est
+    émis
+
+Scenario: owner_token_cache_invalide_a_recreation_owner
+  Given (intégration — cluster réel) un jeton obtenu pour `alice` encore frais (plus de 300 s
+    de validité), sous la clé `alice:<uid-1>`
+  When la CR @Owner `alice` est supprimée puis recréée — le controller recrée le
+    @ServiceAccount avec un nouvel uid — et @VnlK8sClient::owner_token("alice") est rappelé
+  Then le jeton de l'ancien SA est INRATTRAPABLE (la lookup `alice:<uid-2>` est un coup
+    manquant) : un nouveau @TokenRequest est émis, le jeton rendu diffère de l'ancien, et
+    l'entrée `alice:<uid-1>` est purgée de la map à l'insertion de la nouvelle (aucune entrée
+    vivante sous un uid mort)
 
 Scenario: owner_token_renouvele_pres_de_l_expiration
   Given un jeton en cache dont il reste moins de 300 s de validité (sous la marge)

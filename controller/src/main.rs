@@ -154,11 +154,12 @@ struct Cli {
     /// Application qui porte `spec.restate`, quand `spec.restate.image` est
     /// absent (flag hors `main.sdd`, implémenté au patron des autres flags —
     /// cf. tâche S6c de `application.sdd`). Surchargée par l'env
-    /// `RESTATE_IMAGE`.
+    /// `RESTATE_IMAGE`. Tag épinglé à la version validée sur le cluster de
+    /// test (décidé 2026-10-14 : jamais `:latest`).
     #[arg(
         long,
         env = "RESTATE_IMAGE",
-        default_value = "docker.restate.dev/restatedev/restate:latest"
+        default_value = "docker.restate.dev/restatedev/restate:1.7.13"
     )]
     restate_image: String,
 }

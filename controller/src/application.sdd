@@ -54,6 +54,25 @@ Must:
     l'env du Deployment `app` reçoit `VNL_RESTATE_ADMIN_URL` et `VNL_RESTATE_INGRESS_URL`
     (URL internes du Service). Sans `spec.restate`, aucune de ces ressources n'existe et l'app
     démarre sans moteur de workflow. Le Service Restate n'est jamais exposé par un Ingress.
+    Table d'env du conteneur `"restate"` (nom du conteneur contracté au Scenario
+    @build_restate_statefulset_shape) — contractée 2026-10-14 (elle conditionne tout
+    changement d'image), EXHAUSTIVE, dans l'ordre :
+    - `RESTATE_CLUSTER_NAME` = nom nu de l'Application ;
+    - `RESTATE_BOOTSTRAP_CLUSTER` = `"true"` (mono-nœud, amorçage au démarrage — la haute
+      disponibilité en cluster Restate est hors périmètre, ratifié 2026-10-14) ;
+    - `RESTATE_INGRESS_SOCKET` = `0.0.0.0:8080`, `RESTATE_ADMIN_SOCKET` = `0.0.0.0:9070`,
+      `RESTATE_WORKER_SOCKET` = `0.0.0.0:5122` (mêmes constantes que les ports du Service) ;
+    - `RESTATE_DATA_DIR` = `/var/restate` (point de montage du volumeClaimTemplate « data »,
+      accès `ReadWriteOnce`).
+    Noms des ports du Service — contractés 2026-10-14, le DNS en dépend : `ingress` (8080),
+    `admin` (9070), `worker` (5122) ; `targetPort` = même numéro. Le nom de la NetworkPolicy
+    (`<application>-restate-netpol`) reste un détail d'implémentation non contracté.
+    Sort du PVC au retrait de `spec.restate` — décidé 2026-10-14 : le bloc restate est
+    réconcilié APRÈS l'Ingress et AVANT le statut ; le retrait de `spec.restate` supprime
+    StatefulSet, Service et NetworkPolicy mais CONSERVE le PVC de données (journal des runs
+    Restate) : `persistentVolumeClaimRetentionPolicy` explicite `whenDeleted: Retain` /
+    `whenScaled: Retain` sur le StatefulSet, purge manuelle assumée. Remettre `spec.restate`
+    après retrait remonte un StatefulSet qui revenduit le PVC conservé (même nom dérivé).
   Exposer @APP_PORT comme `pub const APP_PORT: i32 = 8080` — port HTTP du pod `app`, écho du
     défaut `LISTEN_ADDR` de `app/src/config.rs` (`0.0.0.0:8080`) ; un seul contrat de port
     pour le ContainerPort, le Service, la sonde et le backend d'Ingress.
@@ -337,14 +356,24 @@ Tasks:
     @application_name).
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ — mono-nœud, HA hors périmètre. (Question d'origine : Restate en StatefulSet mono-nœud sans réplication : suffisant pour un cluster de
     développement/homelab ; la haute disponibilité (cluster Restate) est hors périmètre.)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTER la table d'env du conteneur `restated` dans cette spec (elle conditionne tout changement d'image). (Question d'origine : Env interne du conteneur `restated` non contractée (interprétation posée S6c,
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTER la table d'env du conteneur `restated` dans cette spec (elle conditionne tout changement d'image). (Question d'origine : Env interne du conteneur `restated` non contractée (interprétation posée S6c,
     2026-10-13) : `RESTATE_CLUSTER_NAME`, `RESTATE_BOOTSTRAP_CLUSTER`,
     `RESTATE_INGRESS_SOCKET`, `RESTATE_ADMIN_SOCKET`, `RESTATE_WORKER_SOCKET`,
     `RESTATE_DATA_DIR=/var/restate` — la spec ne nomme que l'image, les ports et le volume.
     Contracter ces variables dans cette spec (elles conditionnent tout changement d'image) ?)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTER les noms de ports du Service (`ingress` 8080, `admin` 9070, `worker` 5122 — le DNS en dépend) ; le nom de la NetworkPolicy reste un détail d'implémentation. (Question d'origine : Noms dérivés non contractés (S6c, 2026-10-13) : la NetworkPolicy s'appelle
+    — contractée au §Must ; test à écrire : Scenario @build_restate_statefulset_env_exhaustive
+    (les tests existants ne verrouillent pas la table). FAIT 2026-10-14 — validator vert :
+    table contractée au §Must (nom du conteneur corrigé en `"restate"`), test
+    `build_restate_statefulset_env_exhaustive` vert (6 variables, ordre exact, dataDir ==
+    mountPath).
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTER les noms de ports du Service (`ingress` 8080, `admin` 9070, `worker` 5122 — le DNS en dépend) ; le nom de la NetworkPolicy reste un détail d'implémentation. (Question d'origine : Noms dérivés non contractés (S6c, 2026-10-13) : la NetworkPolicy s'appelle
     `<application>-restate-netpol` et les ports du Service sont nommés `ingress` (8080),
     `admin` (9070), `worker` (5122). À contracter ou à assommer comme détail d'implémentation ?)
+    — contractés au §Must ; Scenarios @build_restate_service_shape et
+    @build_restate_netpol_shape (tests existants à tagger aux titres). FAIT 2026-10-14 —
+    validator vert : ports nommés contractés au §Must, Scenarios écrits et tests homonymes
+    verts (`build_restate_service_shape`, `build_restate_netpol_shape`), netpol non contractée
+    au nominal (dérivation seulement).
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONFIRMÉ — 12 variables avec `spec.restate`, les deux URL Restate en fin de liste. (Question d'origine : Table d'env du Deployment `app` amendée (S6c, 2026-10-13) : la table contractée
     (« exactement 10 variables », ordre de construction exact) ne positionnait pas les deux
     URL internes ; `VNL_RESTATE_ADMIN_URL` et `VNL_RESTATE_INGRESS_URL` sont ajoutées EN FIN
@@ -358,6 +387,10 @@ Tasks:
     ressources. Confirmer la place et la sémantique destructive du retrait (le PVC du
     volumeClaimTemplate survit à la suppression du StatefulSet par défaut K8s — trancher
     aussi son sort) ?)
+    — contracté au §Must ; défaut K8s tranché : `persistentVolumeClaimRetentionPolicy` est
+    Delete par défaut, donc pose EXPLICITE Retain à implémenter. Scenarios
+    @build_restate_statefulset_retention_pvc_retain (unité) et
+    @retrait_spec_restate_supprime_le_moteur (intégration).
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [?] @deployment_phase filtre reasons `"Failed"`/`"ProgressDeadlineExceeded"` sur la
@@ -727,3 +760,73 @@ Scenario: suppression_application_gc_supprime_les_enfants
     `"demo-cookie"` — est collecté par la GC en cascade via les ownerReferences ; une
     recréation homonyme repart d'un cookie entièrement neuf (sessions invalidées, effet de
     bord documenté de l'auto-génération)
+
+Scenario: build_restate_statefulset_shape
+  Given une @Application `"demo"` (namespace `"ns"`, nom CR nu `"demo"`) dont `spec.restate`
+    est posé sans `image`, et une image par défaut de l'appelant `"restate:test"`
+  When @build_restate_statefulset construit le StatefulSet
+  Then le nom est `"demo-restate"` (@restate_service_name de ./sandbox.sdd — PAS
+    @application_name), le namespace `"ns"`, une @app_owner_ref `controller: true` ;
+    @RESTATE_LABEL (`vanyline.solidite.fr/restate`) vaut `"demo"` dans le
+    `spec.selector.matchLabels` ET sur le pod template (obligation S6b : cible des règles
+    egress sandbox et de la netpol) ; UN réplica ; UN conteneur `"restate"` d'image
+    `"restate:test"` portant les trois containerPorts 8080, 9070, 5122 ; UN
+    volumeClaimTemplate `"data"` en `ReadWriteOnce`, 5Gi, `storageClassName` absent ; le
+    conteneur monte `"data"`
+  When `spec.restate.image` vaut `"custom/restate:tag"`
+  Then cette image gagne sur le défaut de l'appelant
+
+Scenario: build_restate_statefulset_env_exhaustive
+  Given la même @Application `"demo"` que @build_restate_statefulset_shape
+  When @build_restate_statefulset construit le conteneur `"restate"`
+  Then la table d'env est EXHAUSTIVE — exactement six variables, dans cet ordre :
+    `RESTATE_CLUSTER_NAME` = `"demo"`, `RESTATE_BOOTSTRAP_CLUSTER` = `"true"`,
+    `RESTATE_INGRESS_SOCKET` = `"0.0.0.0:8080"`, `RESTATE_ADMIN_SOCKET` = `"0.0.0.0:9070"`,
+    `RESTATE_WORKER_SOCKET` = `"0.0.0.0:5122"`, `RESTATE_DATA_DIR` = `"/var/restate"` —
+    cette dernière égale au `mountPath` du volume `"data"`
+
+Scenario: build_restate_statefulset_retention_pvc_retain
+  Given la même @Application `"demo"` que @build_restate_statefulset_shape
+  When @build_restate_statefulset construit le StatefulSet
+  Then `spec.persistentVolumeClaimRetentionPolicy` est explicite : `whenDeleted: "Retain"`
+    et `whenScaled: "Retain"` (le défaut K8s est Delete : sans pose explicite, le retrait de
+    `spec.restate` détruirait le journal des runs Restate)
+
+Scenario: build_restate_statefulset_storage_from_spec
+  Given une @Application dont `spec.restate` pose `storage_size: "8Gi"` et
+    `storage_class: "local-path"`
+  When @build_restate_statefulset construit le StatefulSet
+  Then le volumeClaimTemplate `"data"` requiert `"8Gi"` avec `storageClassName`
+    `"local-path"` (les replis 5Gi / classe absente s'appliquent aux champs omis, cf.
+    @build_restate_statefulset_shape)
+
+Scenario: build_restate_service_shape
+  Given une @Application `"demo"` (namespace `"ns"`) dont `spec.restate` est posé
+  When @build_restate_service construit le Service
+  Then le nom est `"demo-restate"`, le namespace `"ns"`, une @app_owner_ref ; `type_` non
+    posé (ClusterIP par l'apiserver — jamais exposé par un Ingress) ; le sélecteur est
+    `{RESTATE_LABEL: "demo"}` ; TROIS ports exactement, nommés `ingress` (8080), `admin`
+    (9070), `worker` (5122), `targetPort` au même numéro (le DNS des noms est contracté)
+
+Scenario: build_restate_netpol_shape
+  Given une @Application `"demo"` (namespace `"ns"`) dont `spec.restate` est posé
+  When @build_restate_netpol construit la NetworkPolicy (nom dérivé du Service en
+    suffixant `-netpol` — le nom littéral reste un détail d'implémentation)
+  Then `policyTypes` = `[Ingress]`, sélecteur `{RESTATE_LABEL: "demo"}`, deux règles :
+    les pods `{APP_LABEL: "demo"}` du namespace joignent 8080 et 9070 en TCP ; les pods
+    portant le label `vanyline.solidite.fr/sandbox` (opérateur `Exists`) des namespaces
+    porteurs du label namespace d'application ne joignent QUE l'ingress 8080 (callback
+    d'awakeable)
+
+Scenario: retrait_spec_restate_supprime_le_moteur
+  Given (intégration — cluster réel) une @Application `"demo"` materialisée avec
+    `spec.restate` posé (StatefulSet, Service et NetworkPolicy `"demo-restate-netpol"`
+    existants, PVC `"data-demo-restate"` en service)
+  When `spec.restate` est retiré de la CR puis @reconcile exécuté
+  Then le bloc restate — réconcilié APRÈS l'Ingress et AVANT le patch de status — supprime
+    StatefulSet, Service et NetworkPolicy (vérification d'existence par `get_opt` avant
+    chaque `delete`, aucune requête pour les ressources absentes) et ne touche JAMAIS au PVC,
+    conservé grâce à `whenDeleted: Retain` ; le cycle redémarre 30 s plus tard comme pour
+    toute erreur d'API
+  When `spec.restate` est remis en place
+  Then le StatefulSet remonte avec les mêmes noms dérivés et revenduit le PVC conservé

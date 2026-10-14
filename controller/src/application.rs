@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::{
-    Deployment, DeploymentCondition, DeploymentSpec, StatefulSet, StatefulSetSpec,
+    Deployment, DeploymentCondition, DeploymentSpec, StatefulSet,
+    StatefulSetPersistentVolumeClaimRetentionPolicy, StatefulSetSpec,
 };
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PersistentVolumeClaim,
@@ -562,6 +563,17 @@ pub fn build_restate_statefulset(app: &Application, default_image: &str) -> Stat
         spec: Some(StatefulSetSpec {
             replicas: Some(1),
             service_name: Some(name.clone()),
+            // Sort du PVC contracté 2026-10-14 (application.sdd « Moteur de
+            // workflow ») : Retain explicite aux deux occasions — le défaut
+            // K8s est Delete ; sans pose explicite, le retrait de
+            // `spec.restate` detruirait le journal des runs Restate. Purge
+            // manuelle assumée.
+            persistent_volume_claim_retention_policy: Some(
+                StatefulSetPersistentVolumeClaimRetentionPolicy {
+                    when_deleted: Some("Retain".to_string()),
+                    when_scaled: Some("Retain".to_string()),
+                },
+            ),
             selector: LabelSelector {
                 match_labels: Some(labels.clone()),
                 ..Default::default()
@@ -2098,5 +2110,79 @@ mod tests {
             sandbox_ports[0].port,
             Some(IntOrString::Int(8080))
         ));
+    }
+
+    // Scenario: build_restate_statefulset_retention_pvc_retain — le sort du PVC
+    // au retrait de `spec.restate` est contracté Retain/Retain (décidé
+    // 2026-10-14) : le défaut K8s est Delete ; sans pose explicite, le retrait
+    // de `spec.restate` detruirait le journal des runs Restate.
+    #[test]
+    fn build_restate_statefulset_retention_pvc_retain() {
+        let app = restate_app();
+        let sts = build_restate_statefulset(&app, "restate:test");
+        let spec = sts.spec.as_ref().expect("should have spec");
+        let retention = spec
+            .persistent_volume_claim_retention_policy
+            .as_ref()
+            .expect("politique de retention explicite (defaut K8s = Delete)");
+        assert_eq!(
+            retention.when_deleted.as_deref(),
+            Some("Retain"),
+            "whenDeleted: Retain — le PVC survit a la suppression du StatefulSet"
+        );
+        assert_eq!(
+            retention.when_scaled.as_deref(),
+            Some("Retain"),
+            "whenScaled: Retain — le PVC survit a toute variation de replicas"
+        );
+    }
+
+    // Scenario: build_restate_statefulset_env_exhaustive — la table d'env du
+    // conteneur `restate` est EXHAUSTIVE (contractée 2026-10-14, elle
+    // conditionne tout changement d'image) : exactement six variables dans cet
+    // ordre, et RESTATE_DATA_DIR egale au mountPath du volume « data ».
+    #[test]
+    fn build_restate_statefulset_env_exhaustive() {
+        let app = restate_app();
+        let sts = build_restate_statefulset(&app, "restate:test");
+        let spec = sts.spec.as_ref().expect("should have spec");
+        let container = spec
+            .template
+            .spec
+            .as_ref()
+            .expect("template spec")
+            .containers
+            .first()
+            .expect("should have 1 container");
+        let env = container.env.as_ref().expect("should have env");
+        let expected = [
+            ("RESTATE_CLUSTER_NAME", "demo"),
+            ("RESTATE_BOOTSTRAP_CLUSTER", "true"),
+            ("RESTATE_INGRESS_SOCKET", "0.0.0.0:8080"),
+            ("RESTATE_ADMIN_SOCKET", "0.0.0.0:9070"),
+            ("RESTATE_WORKER_SOCKET", "0.0.0.0:5122"),
+            ("RESTATE_DATA_DIR", "/var/restate"),
+        ];
+        assert_eq!(env.len(), 6, "table exhaustive = exactement 6 variables");
+        for (i, (name, value)) in expected.iter().enumerate() {
+            assert_eq!(env[i].name, *name, "ordre de construction, rang {i}");
+            assert_eq!(env[i].value.as_deref(), Some(*value), "valeur de {name}");
+            assert!(
+                env[i].value_from.is_none(),
+                "{name} porte une valeur litterale, jamais une source"
+            );
+        }
+        // RESTATE_DATA_DIR egale au mountPath du volume « data ».
+        let mount = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volumeMounts")
+            .iter()
+            .find(|m| m.name == "data")
+            .expect("montage du volumeClaimTemplate « data »");
+        assert_eq!(
+            mount.mount_path, "/var/restate",
+            "RESTATE_DATA_DIR == mountPath du volume data"
+        );
     }
 }
