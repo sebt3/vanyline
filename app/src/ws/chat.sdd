@@ -123,8 +123,8 @@ Exposes:
     manuel de `conversations.updated_at` ; retourne l'id inséré (`last_insert_id as
     i32`) — valeur jamais lue par les deux call-sites de CE fichier.
   Module @tests — `#[cfg(test)]` avec `#![allow(clippy::unwrap_used,
-    clippy::expect_used)]` : 9 tests, tous sur les fonctions pures —
-    @tool_calls_for_persistence_drops_id_keeps_rest,
+    clippy::expect_used)]` : 15 tests — 9 sur les fonctions pures
+    (@tool_calls_for_persistence_drops_id_keeps_rest,
     @tool_calls_for_persistence_empty,
     @try_acquire_busy_first_call_succeeds_second_fails,
     @try_acquire_busy_different_conversations_independent,
@@ -132,9 +132,14 @@ Exposes:
     @todo_to_persist_changed_some_from_none_returns_some,
     @todo_to_persist_unchanged_returns_none,
     @todo_to_persist_changed_to_none_does_not_null_previous,
-    @todo_to_persist_unchanged_none_is_none.
-    Aucune couverture de test pour @run_socket, @forward_events, @resolve_extra_mcp,
-    @load_history, @persist_message, @handle_message (dette en `Tasks`).
+    @todo_to_persist_unchanged_none_is_none) + 6 @tokio::test sur @real_db couvrant
+    @resolve_extra_mcp (@hors_contexte_systeme_aucun_outil_aucun_jeton,
+    @contexte_settings_resout_config_et_amorce_les_agents, @sandbox_hors_cluster_non_bloquante,
+    @contexte_sandbox_sans_sandbox_name_signale_tool_unavailable_server_sandbox,
+    @contexte_absent_reste_bloquant) et @handle_message (@jeton_revoque_malgre_tour_en_erreur).
+    Aucune couverture de test pour @run_socket, @forward_events, @load_history,
+    @persist_message (dette en `Tasks`) ; la branche IDOR de la résolution sandbox est
+    testée cluster-manuel (garde lue sur le vrai kube, anti-mock ../k8s.sdd).
 
 Accepts:
   Handshake : `GET /api/ws/chat/{conversation_id}` avec la cookie de session miryad-core
@@ -176,8 +181,9 @@ Returns:
       for this conversation" } — verrou busy occupé.
       @ChatEvent::Error { code: "VNL-LLM-001", message: <@Display complet de l'@AppError
       du tour> } — toute erreur retournée par @handle_message (voir `Raises`).
-      @ChatEvent::ToolUnavailable { server, reason } — 8 sites d'émission dans
-      @resolve_extra_mcp (@Handles).
+      @ChatEvent::ToolUnavailable { server, reason } — UN seul site d'émission dans CE
+      fichier : la boucle de @handle_message sur @ContextTools::unavailable (les raisons
+      sont produites par @crate::system_agents::context_tools — voir `@Handles`).
     Transitent par le même canal sans être fabriqués ici : @Token, @ReasoningDelta,
     @ToolCall, @ToolResult, @Usage, @Done, @SkillLoaded, @SubagentStart/@SubagentEvent/
     @SubagentEnd, et les @Error/@ToolUnavailable émis par la lib
@@ -187,12 +193,16 @@ Returns:
     testées). @tool_calls_for_persistence : même ordre, même contenu sans `id`, vide →
     vide. @persist_message : id i32 inséré (non consommé). @load_history : Vec dans
     l'ordre @created_at ASC, éléments élagués exclus.
-  @resolve_extra_mcp @Ok : @Vec de paires @(@McpServer, @McpSelection) — 0 à 2 éléments
-    selon le contexte (table de ../system_agents.sdd : `settings` → config seul ;
-    `home`/`project` → config + domain ; `sandbox` → domain + sandbox ; hors contexte →
-    vide). Serveurs de l'app elle-même : URL loopback avec l'en-tête du jeton d'API
-    jetable de l'utilisateur. Serveur sandbox : @McpServer { name: `"sandbox"`,
-    transport: @McpTransport::HttpStreamable,
+  @resolve_extra_mcp @Ok : @crate::system_agents::ContextTools { servers, unavailable,
+    revocation } — @servers : 0 à 2 paires @(@McpServer, @McpSelection) selon la table de
+    ../system_agents.sdd (§Outils des agents système : `settings` → config seul ;
+    `home`/`project` → config + domain ; `sandbox` → domain + sandbox (ou domain seul en
+    panne sandbox, serveur marqué @unavailable) ; hors contexte agent système → vide).
+    @unavailable : paires (nom du serveur, raison) rendues au client en @ToolUnavailable.
+    @revocation :Some (id du jeton du tour, @DbConnection) — révoqué par @ContextTools::revoke
+    en fin de tour, succès ou échec. Serveurs de l'app elle-même : URL loopback avec
+    l'en-tête du jeton d'API jetable de l'utilisateur. Serveur sandbox : @McpServer {
+    name: `"sandbox"`, transport: @McpTransport::HttpStreamable,
     url interne ClusterIP `http://{service}.{namespace}.svc:{MCP_PORT}/mcp` (construit
     par la lib), en-tête d'autorisation du jeton d'accès sandbox (kind : `[?]`
     ../system_agents.sdd) } + @McpSelection { server: `"sandbox"`, tools: vec![] }
@@ -276,8 +286,10 @@ Handles:
       model_override = @None (jamais de override côté app) ;
       todo_state = @Arc<@Mutex<Option<@String>>> semé de @todo_initial.
     7. @run_agent_turn(&ctx, &agent_name, history, user_msg, @None) — dernier argument
-      = workspace_context @None. Échec → `?` : l'étape 8 n'est JAMAIS atteinte
-      (aucune persistance assistant sur tour raté).
+      = workspace_context @None. Puis TOUJOURS @tools.revoke() (jeton du tour, succès
+      comme échec du tour — §Must ; échec de révocation loggé seul), AVANT propagation
+      de l'erreur via `?` : l'étape 8 n'est JAMAIS atteinte sur tour raté (aucune
+      persistance assistant sur tour raté).
     8. @tool_calls_for_persistence (drop des `id`) puis @persist_message(assistant,
       response_text, tool_calls @None si liste vide) — APRÈS réussite seulement.
     9. relecture de @ctx.todo_state (`.lock().unwrap()`) → @todo_to_persist(final,
@@ -285,35 +297,46 @@ Handles:
       @ConversationNotFound, tour en échec APRÈS persistance du message assistant —
       voir `Tasks`) puis update de la colonne `todo`. Si @None : aucun update — l'état
       antérieur n'est jamais nullé.
-  @resolve_extra_mcp, branches exhaustives (toutes les branches non finales sauf
-    @Ok/absence de contexte émettent @ChatEvent::ToolUnavailable puis rendent @Ok(vec![])
-    — le tour CONTINUE sans tools, ce n'est pas une panne ; commentaire source) :
+  @resolve_extra_mcp (ressynchronisé 2026-10-14 : délègue à
+    @crate::system_agents::context_tools après gating ; l'ancienne description
+    pré-contrat « branches sandbox inline rendant @Ok(vec![]) » ne décrivait plus le flux) :
     - contexte (@chat_contexts::find_by_id(conv.context_id)) absent → @Err
       @AppError::InternalError(`"VNL-DB-007: context not found"`) — bloque le tour
       (incohérence de données normalement empêchée par la FK RESTRICT ; écart avec le
       commentaire « non bloquant », `Tasks` `[?]` ; le 500-vs-404 est déjà `[?]` dans
       ../db/entities/chat_contexts.sdd).
-    - @context.kind != `"sandbox"` → @Ok(vec![]) SILENCIEUX (aucun ToolUnavailable :
-      « pas encore implémenté », pas une panne — commentaire source ; seul kind réel
-      aujourd'hui).
-    - @context.data["sandbox_name"] absent ou non-chaîne → @ToolUnavailable { server:
-      `"sandbox"` (littéral), reason: `"contexte sandbox invalide (sandbox_name
-      absent)"` } → @Ok(vec![]).
-    - @resolve_owner_name → @Ok(@None) → @ToolUnavailable { server: sandbox_name,
-      reason: `"aucun owner K8s associé à cet utilisateur"` } → @Ok(vec![]) ; @Err →
-      @ToolUnavailable avec `e.to_string()` brut.
-    - @crate::k8s::client (découverte lazy, ../k8s.sdd) en @Err → @ToolUnavailable avec
-      message brut (l'équivalent WS du 502 REST).
-    - @client.get_sandbox(sandbox_name) en @Err → @ToolUnavailable idem.
-    - @client.get_project(sandbox.spec.project) en @Err → @ToolUnavailable idem.
-    - @project.spec.owner != owner de l'utilisateur → @ToolUnavailable { server:
-      sandbox_name, reason: `"sandbox hors du périmètre de cet utilisateur"` } — garde
-      IDOR obligatoire, même vérification que `api::sandboxes::get_sandbox` (commentaire
-      source : sans elle, tout utilisateur authentifié ferait résoudre les tools MCP
-      d'une sandbox d'autrui en la nommant dans @ChatContextInput à la création).
-    - @client.sandbox_mcp_url en @Err → @ToolUnavailable idem.
-    - Succès → paire unique @("sandbox", HttpStreamable, url interne) + sélection tools
-      vides (= tous les tools).
+    - @system_agent_for(@context.kind) == @None (contexte hors agent système) →
+      @ContextTools::default() SILENCIEUX — aucun tool, aucun ToolUnavailable, aucun
+      jeton.
+    - sinon @ensure_system_agents puis @context_tools(state, user, kind, @context.data,
+      agent_name) :
+      - @kind hors table (normalement atteint par le gating ci-dessus) → @default ;
+      - @app_base_url(@state.config.listen_addr) sans port → @Err @VNL-INT-001 — calculé
+        AVANT émission du jeton (pas de jeton orphelin vivant 1 h) ;
+      - @miryad_core::auth::issue_token (sujet user, `"system-agent"`, 1 h, poivre app)
+        en échec → @Err @VNL-INT-001 ; succès → jeton du tour + révocation portée par
+        @ContextTools::revocation ;
+      - table §Outils des agents système : `settings` → @("vanyline-config", …) seul ;
+        `home`/`project` → config + @("vanyline-domain", …) ; `sandbox` → domain +
+        sandbox. Serveurs internes : URL loopback `{base}/mcp` (config) et
+        `{base}/mcp/domain` (domain, + en-tête `X-Vnl-Agent: <agent_name>`) avec
+        l'en-tête d'autorisation du jeton du tour ;
+      - sandbox : @resolve_sandbox_server — toute panne → @unavailable.push((`"sandbox"`
+        (littéral, quel que soit le motif), raison)) et le serveur domain du contexte est
+        CONSERVÉ ; succès → paire @("sandbox", HttpStreamable, url interne ClusterIP
+        construite par @client.sandbox_mcp_url, en-tête d'autorisation du jeton du tour —
+        kind du jeton : `[?]` ../system_agents.sdd E1) + sélection tools vides (= tous
+        les tools). @resolve_sandbox_server, branches dans l'ordre :
+        @data["sandbox_name"] absent/non-chaîne → raison `"contexte sandbox invalide
+        (sandbox_name absent)"` ; @resolve_owner_name @Ok(@None) → raison `"aucun owner
+        K8s associé à cet utilisateur"` ; @crate::k8s::client / @get_sandbox /
+        @get_project en @Err → raison = @e.to_string() brut ; @project.spec.owner !=
+        owner de l'utilisateur → raison `"sandbox hors du périmètre de cet utilisateur"`
+        — garde IDOR obligatoire, même vérification que `api::sandboxes::get_sandbox`
+        (sans elle, tout utilisateur authentifié ferait résoudre les tools MCP d'une
+        sandbox d'autrui en la nommant dans @ChatContextInput à la création) ;
+        @sandbox_mcp_url en @Err → raison brute. Garde lue sur le vrai kube (aucune
+        couture d'injection : anti-mock kube ../k8s.sdd) → test cluster-manuel.
   @load_history : filtre @messages::Column::ConversationId, trie @CreatedAt ASC ;
     chaque `payload` est désérialisé en @vanyline_lib::Message ; payload JSON malformé
     → ligne SILENCIEUSEMENT écartée (`.ok()`) ; @Message.role ni `"user"` ni
@@ -373,10 +396,16 @@ Must:
   - Traiter `project.spec.owner == owner` de l'utilisateur dans @resolve_extra_mcp
       avant toute URL MCP (garde IDOR — revue Phase 3) ; ne jamais résoudre ni exposer
       l'URL d'une sandbox hors périmètre.
-  - Rendre non bloquants pour le tour les pannes de résolution sandbox (owner absent,
-      K8s injoignable, sandbox/projet absents, URL en échec) : @ToolUnavailable +
-      @Ok(vec![]), jamais @Err — seule l'absence de ligne de contexte est bloquante
-      (état actuel, à confirmer `Tasks`).
+  - Rendre non bloquants pour le tour les pannes de résolution sandbox (`sandbox_name`
+      absent/non-chaîne, owner absent, K8s injoignable, sandbox/projet absents ou hors
+      périmètre, URL en échec) : serveur `sandbox` marqué @unavailable (événement
+      @ToolUnavailable rendu par @handle_message sur @ContextTools::unavailable), le tour
+      conserve les autres serveurs du contexte selon la table §Outils des agents système
+      (`sandbox` → domain + sandbox — domain est rendu même en panne sandbox), jamais
+      @Err. Seules l'absence de ligne de contexte (@VNL-DB-007), @ensure_system_agents en
+      échec, @app_base_url en échec et l'émission de jeton en échec bloquent le tour
+      (ressynchronisé 2026-10-14 sur @crate::system_agents::context_tools — l'ancien
+      littéral « @Ok(vec![]) » pré-contrat contredisait le §Must).
   - Persister le `todo` selon @todo_to_persist : update uniquement sur changement vers
       une valeur non-NULL ; jamais de NULL systématique écrasant l'état antérieur.
   - Trier @load_history par @created_at ASC et ne rejouer que les rôles `"user"` /
@@ -722,9 +751,13 @@ Tasks:
     `?` et ABORT le tour. Aligner commentaire et code (le remonter explicitement comme
     bloquant, ou le replier en @ToolUnavailable + liste vide) — et arbitrer le 500-vs-404
     déjà `[?]` dans ../db/entities/chat_contexts.sdd.
-  [?] Champ `server` de @ToolUnavailable incohérent entre deux branches voisines :
-    `"sandbox"` littéral quand sandbox_name est absent, nom de la sandbox partout
-    ailleurs. Standardiser (toujours le nom, ou `unknown`) ?
+  [?] Champ `server` de @ToolUnavailable sandbox : depuis @crate::system_agents::context_tools
+    (2026-10-14) le code est unifié sur le littéral `"sandbox"` pour TOUTES les pannes
+    (@unavailable.push, quel que soit le motif) — mais le Scenario « sandbox nommée hors
+    du périmètre » (et l'ancien §Handles) portaient `server: sandbox_name` (le nom).
+    Standardiser sur le littéral (réécrire le Scenario — choisi par le code actuel) ou
+    sur le nom de la sandbox fautiver (modifier @context_tools) ? Le frontend affiche ce
+    champ : « sandbox » générique vs nom précis, à trancher.
   [?] `forward_events` : @serde_json::to_string `.unwrap_or_default()` enverrait un
     frame texte VIDE sur échec de sérialisation (théorique). Préférer un log + saut de
     l'événement ? Le frontend consommerait aujourd'hui `""` comme une erreur JSON côté
