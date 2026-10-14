@@ -24,9 +24,13 @@ Can read:
 Exposes:
   @RunOptions { root: PathBuf, out_dir: PathBuf, base: Option<String>, env: Vec<(String, String)>,
     check_timeout: Duration, tail_bytes: usize, unchecked_languages: Vec<String>,
-    max_parallel: usize, preliminary_issues: Vec<Issue>, niceness: Option<i32> }
+    max_parallel: usize, preliminary_issues: Vec<Issue>, niceness: Option<i32>,
+    output_cap_bytes: u64 }
     — `unchecked_languages` est recopié tel quel dans le rapport (l'appelant l'obtient de
     @checks::unchecked_languages).
+    — `output_cap_bytes` : @DEFAULT_OUTPUT_CAP_BYTES par défaut (64 MiB, décidé 2026-10-14) —
+    plafond d'écriture de CHACUN des fichiers `<id>.stdout` et `<id>.stderr` (§Handles
+    « Chaque vérification »).
     — `tail_bytes` : 4096 par défaut (@DEFAULT_TAIL_BYTES). `env` : paires ADDITIVES (jamais
     de vidage de l'environnement hérité) appliquées avant chaque spawn, dernière gagnante.
   @run_checks(options: &RunOptions, checks: &[Check]) -> Result<HealthReport, HealthError>
@@ -62,10 +66,19 @@ Handles:
   ou `git ls-files` en échec ⇒ vérification `errored`.
   Chaque vérification : @validate ; remplacement de @OUT_DIR_TOKEN dans l'argv par `out_dir` ;
   spawn direct de l'argv (jamais `sh -c`), cwd = `root` + `check.cwd` ; stdout et stderr
-  redirigés VERS DES FICHIERS de `out_dir` (`<id>.stdout`, `<id>.stderr`), jamais bornés à
-  l'écriture : un JSON clippy fait des mégaoctets ; groupe de processus dédié ; timeout
-  `check_timeout` qui tue le GROUPE entier (régression R8 de tools/command.sdd : tuer le seul
-  parent laisse des descendants).
+  redirigés VERS DES FICHIERS de `out_dir` (`<id>.stdout`, `<id>.stderr`) **plafonnés** à
+  `output_cap_bytes` par fichier (décidé 2026-10-14 : une sortie de gigaoctets — clippy très
+  bruyant — ne doit plus remplir `out_dir`) : les premiers `output_cap_bytes` octets sont
+  écrits (troncature en TÊTE — la tête porte l'en-tête et les premiers diagnostics), puis UNE
+  ligne marqueur `\n[TRONQUÉ — sortie plafonnée à <n> octets]\n` (n = plafond effectif en
+  octets, décimal) est ajoutée si et seulement si du contenu débordait, et le reste du flux
+  est VIDÉ sans écriture jusqu'à la fin du processus (jamais casser le pipe : l'enfant ne
+  doit pas se bloquer sur un tuyau plein). Un fichier sous le plafond est intégral, sans
+  marqueur. Le fichier tronqué est ensuite interprété par la sortie structurée comme tout
+  contenu (un parseur qui échoue sur du JSON coupé rend le comportement déjà contracté, pas
+  de traitement spécial) ; groupe de processus dédié ; timeout `check_timeout` qui tue le
+  GROUPE entier (régression R8 de tools/command.sdd : tuer le seul parent laisse des
+  descendants).
   Statut : code 0 → `passed` ; code ≠ 0 → `failed` ; spawn impossible, timeout, sortie
   exploitable absente ou illisible → `errored`. Une vérification `errored` n'interrompt pas les
   suivantes (une commande cassée ne doit pas masquer les autres résultats). Une vérification
@@ -119,8 +132,20 @@ Tasks:
     tests seulement, assertions distinctes lignes commitées/non commitées ; discrimination
     prouvée par mutation two-dot `merge-base..HEAD` ⇒ rouge 2≠4, restaurée mot pour mot ;
     97 tests health verts).
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : PLAFONNER le fichier de sortie (64 MiB par défaut) avec troncature + marqueur ; contracter et tester. (Question d'origine : Une sortie stdout de gigaoctets (clippy très bruyant) remplit `out_dir` : plafond de
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : PLAFONNER le fichier de sortie (64 MiB par défaut) avec troncature + marqueur ; contracter et tester. (Question d'origine : Une sortie stdout de gigaoctets (clippy très bruyant) remplit `out_dir` : plafond de
     taille du fichier à décider.)
+    — contrat posé 2026-10-14 : `output_cap_bytes` (défaut @DEFAULT_OUTPUT_CAP_BYTES = 64 MiB),
+    troncature en tête + ligne marqueur, flux vidé sans écriture après le plafond ; Scenario
+    @sortie_plafonnee_tronquee_avec_marqueur ; reste code + tests. FAIT 2026-10-14 —
+    validator vert : `write_capped` (troncature en tête, marqueur exact unique, vidange
+    jusqu'à EOF sans écriture), timeout maître conservé (R8), test éponyme octet-exact vert,
+    98 tests health.
+  [?] Descendant retenant stdout/stderr (découvert P6, 2026-10-14) : l'attente s'achevant à
+    l'EOF du flux, un descendant survivant qui garde les sorties ouvertes fait courir le
+    drain jusqu'au timeout (lequel tue le groupe) — un `sh -c 'long & exit 0'` devient
+    `errored` là où l'ancienne redirection fichier rendait `passed` immédiat (la fuite que
+    R8 combat). Épingler ce comportement par une phrase au §Handles, ou exiger un abandon du
+    drain dès le statut de l'enfant direct ?
   [?] Isolation des artefacts (`CARGO_TARGET_DIR`, caches) : passe par `env` ; la stratégie de
     cache (sccache, `target/` partagé) est un sujet séparé, à valider par mesure sur le
     workspace vanyline avant spec.
@@ -246,3 +271,14 @@ Scenario: diagnostics_lsp_preliminaires
   Given `preliminary_issues` contenant une issue `error`
   When @run_checks
   Then le rapport contient un CheckResult `lsp` `failed` et l'issue, avant l'exécution des commandes
+
+Scenario: sortie_plafonnee_tronquee_avec_marqueur
+  Given un `output_cap_bytes` de 128 et une fixture qui écrit plus de 256 octets sur stdout
+    puis plus de 256 sur stderr, en rendant le code 0 (fixtures sans cargo)
+  When @run_checks
+  Then le fichier `<id>.stdout` porte exactement les 128 premiers octets suivis de la ligne
+    `\n[TRONQUÉ — sortie plafonnée à 128 octets]\n` et de rien d'autre (troncature en tête,
+    marqueur unique, plafond effectif en décimal), et de même pour `<id>.stderr` ; la
+    vérification s'achève normalement (le flux excédentaire est vidé, pas coupé : pas de
+    blocage sur pipe plein) et rend `passed` ; une autre vérification dont la sortie tient
+    sous le plafond a un fichier intégral SANS marqueur

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::future::Future as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -44,6 +45,10 @@ use crate::tsc_text::parse_tsc_text;
 
 /// `output_tail` par défaut : fin de sortie bornée à 4 Kio.
 pub const DEFAULT_TAIL_BYTES: usize = 4096;
+
+/// Plafond d'écriture par défaut de chacun des fichiers `<id>.stdout`/`<id>.stderr` :
+/// 64 Mio (décidé 2026-10-14).
+pub const DEFAULT_OUTPUT_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Intervalle de respiration des attendes d'ordonnancement (groupe, plafond, préalable).
 const POLL: Duration = Duration::from_millis(5);
@@ -90,6 +95,9 @@ pub struct RunOptions {
     /// Niveau de priorité (`nice`) des commandes ; `None` = priorité normale, défaut usuel
     /// `Some(10)`.
     pub niceness: Option<i32>,
+    /// Plafond d'écriture de CHACUN des fichiers `<id>.stdout`/`<id>.stderr` ; au-delà,
+    /// troncature en tête puis ligne marqueur (défaut : [`DEFAULT_OUTPUT_CAP_BYTES`]).
+    pub output_cap_bytes: u64,
 }
 
 /// Environnement immuable partagé par toutes les tâches d'un run.
@@ -100,6 +108,7 @@ struct Ctx {
     check_timeout: Duration,
     tail_bytes: usize,
     niceness: Option<i32>,
+    output_cap_bytes: u64,
 }
 
 /// Vérification prête à exécuter, après expansion.
@@ -176,6 +185,7 @@ pub async fn run_checks(
         check_timeout: options.check_timeout,
         tail_bytes: options.tail_bytes,
         niceness: options.niceness,
+        output_cap_bytes: options.output_cap_bytes,
     });
     // Diagnostics préliminaires : versés au rapport AVANT l'exécution des commandes.
     let mut issues: Vec<Issue> = Vec::new();
@@ -946,6 +956,8 @@ async fn spawn_and_wait(
     let Some((program, rest)) = argv.split_first() else {
         return Exec::error("argv vide".to_string());
     };
+    // Les fichiers de sortie sont créés AVANT le spawn : leur échec rend ReportIo sans
+    // jamais lancer la commande.
     let stdout_file = match std::fs::File::create(stdout_path) {
         Ok(file) => file,
         Err(source) => {
@@ -973,8 +985,10 @@ async fn spawn_and_wait(
     let mut cmd = TokioCommand::new(program);
     cmd.args(rest)
         .current_dir(ctx.root.join(&ready.cwd))
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
+        // Sorties pipées puis copie bornée vers les fichiers : le fichier rendu est
+        // plafonné à `output_cap_bytes` (§Handles « Chaque vérification »).
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     // Groupe de processus dédié : le timeout tuera le GROUPE entier (régression R8).
     cmd.process_group(0);
@@ -994,8 +1008,22 @@ async fn spawn_and_wait(
             );
         }
     };
-    match tokio::time::timeout(ctx.check_timeout, child.wait()).await {
-        Ok(Ok(status)) => Exec {
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        // Inatteignable avec `Stdio::piped` : le lire défensivement, jamais un unwrap.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Exec::error(format!("sorties pipées indisponibles pour '{}'", ready.id));
+    };
+    match wait_with_drains(
+        ctx,
+        &mut child,
+        (stdout, stdout_file, stdout_path),
+        (stderr, stderr_file, stderr_path),
+        &ready.id,
+    )
+    .await
+    {
+        Ok(status) => Exec {
             status: if status.success() {
                 CheckStatus::Passed
             } else {
@@ -1004,18 +1032,147 @@ async fn spawn_and_wait(
             exit_code: status.code(),
             reason: None,
         },
-        Ok(Err(source)) => Exec::error(source.to_string()),
-        Err(_) => {
-            kill_process_group(child.id()).await;
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            Exec::error(
-                HealthError::Timeout {
-                    id: ready.id.clone(),
-                    secs: ctx.check_timeout.as_secs(),
-                }
-                .to_string(),
-            )
+        Err(reason) => Exec::error(reason),
+    }
+}
+
+/// Attend l'enfant en drainant CONCURRENTIELLEMENT ses deux flux pipes vers leurs fichiers
+/// plafonnés : le timeout qui tue le GROUPE reste maître (à son expiration, les drains et
+/// l'attente sont abandonnés — le lecteur du pipe est fermé, le groupe tué, rien ne
+/// bloque). Rend le code de sortie de l'enfant, ou la raison d'`errored`.
+async fn wait_with_drains(
+    ctx: &Arc<Ctx>,
+    child: &mut tokio::process::Child,
+    stdout: (tokio::process::ChildStdout, std::fs::File, &Path),
+    stderr: (tokio::process::ChildStderr, std::fs::File, &Path),
+    id: &str,
+) -> Result<std::process::ExitStatus, String> {
+    let (stdout, stdout_file, stdout_path) = stdout;
+    let (stderr, stderr_file, stderr_path) = stderr;
+    let cap = ctx.output_cap_bytes;
+    let mut drain_stdout = Box::pin(write_capped(
+        stdout,
+        tokio::fs::File::from_std(stdout_file),
+        cap,
+        stdout_path,
+    ));
+    let mut drain_stderr = Box::pin(write_capped(
+        stderr,
+        tokio::fs::File::from_std(stderr_file),
+        cap,
+        stderr_path,
+    ));
+    let mut wait_child = Box::pin(child.wait());
+    let mut drained_stdout: Option<Result<(), String>> = None;
+    let mut drained_stderr: Option<Result<(), String>> = None;
+    let mut exited: Option<Result<std::process::ExitStatus, std::io::Error>> = None;
+    let driven = tokio::time::timeout(
+        ctx.check_timeout,
+        std::future::poll_fn(|cx| {
+            use std::task::Poll;
+            if drained_stdout.is_none()
+                && let Poll::Ready(outcome) = drain_stdout.as_mut().poll(cx)
+            {
+                drained_stdout = Some(outcome);
+            }
+            if drained_stderr.is_none()
+                && let Poll::Ready(outcome) = drain_stderr.as_mut().poll(cx)
+            {
+                drained_stderr = Some(outcome);
+            }
+            if exited.is_none()
+                && let Poll::Ready(outcome) = wait_child.as_mut().poll(cx)
+            {
+                exited = Some(outcome);
+            }
+            if drained_stdout.is_some() && drained_stderr.is_some() && exited.is_some() {
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        }),
+    )
+    .await;
+    // Libère l'emprunt de `child` (et des pipes) porté par les futures.
+    drop((drain_stdout, drain_stderr, wait_child));
+    if driven.is_err() {
+        kill_process_group(child.id()).await;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(HealthError::Timeout {
+            id: id.to_string(),
+            secs: ctx.check_timeout.as_secs(),
+        }
+        .to_string());
+    }
+    if let Some(Err(reason)) = drained_stdout {
+        return Err(reason);
+    }
+    if let Some(Err(reason)) = drained_stderr {
+        return Err(reason);
+    }
+    match exited {
+        Some(Ok(status)) => Ok(status),
+        Some(Err(source)) => Err(source.to_string()),
+        None => Err("fin de verification sans statut (drain abandonne)".to_string()),
+    }
+}
+
+/// Erreur d'I/O sur un fichier de sortie rendu comme `ReportIo` (chemin dans le message),
+/// sémantique conservée de la création de fichier pré-spawn.
+fn report_io_msg(path: &Path, source: std::io::Error) -> String {
+    HealthError::ReportIo {
+        path: path.display().to_string(),
+        source,
+    }
+    .to_string()
+}
+
+/// Copie d'un flux de sortie vers son fichier, plafonnée à `cap` octets : les premiers
+/// `cap` octets sont écrits (troncature en TÊTE), puis UNE ligne marqueur
+/// `\n[TRONQUÉ — sortie plafonnée à <cap> octets]\n` est ajoutée si et seulement si du
+/// contenu débordait, puis le reste du flux est VIDÉ sans écriture jusqu'à EOF — jamais
+/// casser le pipe : l'enfant ne doit pas se bloquer sur un tuyau plein. Un flux sous le
+/// plafond est copié intégralement, sans marqueur.
+async fn write_capped<R>(
+    mut reader: R,
+    mut file: tokio::fs::File,
+    cap: u64,
+    path: &Path,
+) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+    let cap_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut written: usize = 0;
+    let mut truncated = false;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|source| report_io_msg(path, source))?;
+        if read == 0 {
+            return Ok(());
+        }
+        if truncated {
+            // Vidange sans écriture jusqu'à EOF (l'enfant doit pouvoir finir).
+            continue;
+        }
+        let take = written.saturating_add(read).saturating_sub(cap_bytes);
+        let keep = read.saturating_sub(take);
+        if keep > 0 {
+            file.write_all(&buffer[..keep])
+                .await
+                .map_err(|source| report_io_msg(path, source))?;
+            written = written.saturating_add(keep);
+        }
+        if take > 0 {
+            truncated = true;
+            let marker = format!("\n[TRONQUÉ — sortie plafonnée à {cap} octets]\n");
+            file.write_all(marker.as_bytes())
+                .await
+                .map_err(|source| report_io_msg(path, source))?;
         }
     }
 }
@@ -1337,6 +1494,7 @@ mod tests {
             max_parallel: 4,
             preliminary_issues: Vec::new(),
             niceness: None,
+            output_cap_bytes: crate::runner::DEFAULT_OUTPUT_CAP_BYTES,
         }
     }
 
@@ -2349,6 +2507,61 @@ mod tests {
             .await
             .expect("rapport rendu");
         assert_eq!(result(&report, "n").output_tail.trim(), "0");
+        fx.cleanup();
+    }
+
+    /// Scenario `sortie_plafonnee_tronquee_avec_marqueur` — troncature en tête + ligne
+    /// marqueur sur `<id>.stdout` et `<id>.stderr`, flux excédentaire vidé (pas de blocage
+    /// sur pipe plein), vérification `passed` ; sous le plafond, fichier intégral SANS
+    /// marqueur.
+    #[tokio::test]
+    async fn sortie_plafonnee_tronquee_avec_marqueur() {
+        let fx = Fixture::new("cap");
+        let mut opts = options(&fx);
+        opts.output_cap_bytes = 128;
+        // Fixture sans cargo : > 256 octets sur stdout (`seq 1 100`) puis > 256 sur stderr
+        // (`seq 200 300`), code 0.
+        let big = probe("big", &["sh", "-c", "seq 1 100; seq 200 300 1>&2"]);
+        // Seconde vérification : sortie tenant sous le plafond.
+        let small = probe("small", &["sh", "-c", "echo petit"]);
+        let report = run_checks(&opts, &[big, small])
+            .await
+            .expect("rapport rendu");
+        assert_eq!(result(&report, "big").status, CheckStatus::Passed);
+        assert_eq!(result(&report, "small").status, CheckStatus::Passed);
+        // Contenus complets attendus (identiques à ce que `seq` rend, déterministes).
+        let full_stdout: String = (1..=100_u32).map(|n| n.to_string() + "\n").collect();
+        let full_stderr: String = (200..=300_u32).map(|n| n.to_string() + "\n").collect();
+        assert!(
+            full_stdout.len() > 256 && full_stderr.len() > 256,
+            "fixtures > 256 octets : stdout {}, stderr {}",
+            full_stdout.len(),
+            full_stderr.len()
+        );
+        let marker = "\n[TRONQUÉ — sortie plafonnée à 128 octets]\n";
+        // `<id>.stdout` : exactement les 128 premiers octets + le marqueur, rien d'autre.
+        let got_stdout = std::fs::read(fx.out.join("big.stdout")).expect("big.stdout");
+        let mut want_stdout = full_stdout.as_bytes()[..128].to_vec();
+        want_stdout.extend_from_slice(marker.as_bytes());
+        assert_eq!(
+            got_stdout, want_stdout,
+            "stdout tronqué en tête, marqueur unique, plafond en décimal"
+        );
+        // `<id>.stderr` : même contrat.
+        let got_stderr = std::fs::read(fx.out.join("big.stderr")).expect("big.stderr");
+        let mut want_stderr = full_stderr.as_bytes()[..128].to_vec();
+        want_stderr.extend_from_slice(marker.as_bytes());
+        assert_eq!(
+            got_stderr, want_stderr,
+            "stderr tronqué en tête avec marqueur"
+        );
+        // Sous le plafond : fichier intégral, sans marqueur.
+        let got_small = std::fs::read(fx.out.join("small.stdout")).expect("small.stdout");
+        assert_eq!(got_small, b"petit\n", "sortie sous le plafond intégrale");
+        assert!(
+            !String::from_utf8_lossy(&got_small).contains("TRONQUÉ"),
+            "aucun marqueur sous le plafond"
+        );
         fx.cleanup();
     }
 }

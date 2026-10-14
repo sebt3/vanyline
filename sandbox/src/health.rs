@@ -45,7 +45,9 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use vanyline_health::checks::Check;
 use vanyline_health::report::{HealthReport, Issue, Severity};
-use vanyline_health::runner::{DEFAULT_TAIL_BYTES, RunOptions, run_checks};
+use vanyline_health::runner::{
+    DEFAULT_OUTPUT_CAP_BYTES, DEFAULT_TAIL_BYTES, RunOptions, run_checks,
+};
 
 use crate::AppState;
 use crate::LspManager;
@@ -561,6 +563,7 @@ impl CodeHealth {
             // ici, jamais le runner ne le déclenche lui-même.
             preliminary_issues,
             niceness: Some(NICENESS),
+            output_cap_bytes: DEFAULT_OUTPUT_CAP_BYTES,
         };
 
         match run_checks(&options, &checks).await {
