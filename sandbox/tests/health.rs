@@ -815,6 +815,206 @@ async fn base_invalide_refusee() {
     );
 }
 
+/// Scenario `git_non_lançable_rend_500` (ratifié 2026-10-14) : une `base`
+/// syntaxiquement valide dont `git rev-parse` NE PEUT PAS ÊTRE LANCÉ (cause
+/// serveur ici : `sandbox_root` inexistant, le spawn de `git` échoue en
+/// ENOENT — `GitRun::Spawn`) rend 500 et non 400 (400 reste réservé aux
+/// entrées client invalides), avec la base sticky laissée inchangée.
+#[tokio::test]
+async fn git_non_lancable_rend_500() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Racine volontairement JAMAIS créée : le spawn de `git rev-parse` échoue
+    // (dossier courant inexistant) ⇒ VNL-SBX-CH-002, pas VNL-SBX-CH-001.
+    let root = tmp.path().join("absent");
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 0, 0);
+    health.spawn_background();
+
+    let app = build_app(state);
+    let (status, json) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        r#"{"base": "main"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "git non lançable = cause serveur (500), corps : {json}"
+    );
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("VNL-SBX-CH-002")),
+        "corps porteur de VNL-SBX-CH-002, got: {json}"
+    );
+    assert!(
+        health.snapshot().base.is_none(),
+        "la base sticky est laissée inchangée"
+    );
+}
+
+/// Scenario `base_nul_efface_la_sticky` (ratifié 2026-10-14) : `{"base": null}`
+/// EFFACE la base sticky (jamais refusé, 202) ; les recalculs suivants n'ont
+/// plus de base et `HealthState.base` est `null`.
+#[tokio::test]
+async fn base_nul_efface_la_sticky() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 150, 0);
+    health.spawn_background();
+    wait_until("état fresh initial", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+
+    let app = build_app(state);
+    // Given la base sticky « origin/main » en place.
+    let (status, _) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        r#"{"base": "origin/main"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_until("new_code sur origin/main", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap
+                .report
+                .as_ref()
+                .is_some_and(|r| r.new_code.as_ref().is_some_and(|n| n.base == "origin/main"))
+    })
+    .await;
+
+    // When `{"base": null}` : 202 (un effacement n'est jamais refusé).
+    let (status, json) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        r#"{"base": null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "corps : {json}");
+    wait_until("effacement publié", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap.base.is_none()
+            && snap.report.as_ref().is_some_and(|r| r.new_code.is_none())
+    })
+    .await;
+
+    // Then une modification et son recalcul : toujours aucune vue `new_code`.
+    let published = health
+        .snapshot()
+        .computed_at
+        .expect("computed_at du recalcul d'effacement");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"nul\"\n").unwrap();
+    health.notify_modified();
+    wait_until("recalcul après effacement publié", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap.computed_at.is_some_and(|at| at > published)
+    })
+    .await;
+    let snap = health.snapshot();
+    assert_eq!(
+        snap.base, None,
+        "la base effacée ne revient pas au recalcul"
+    );
+    assert!(
+        snap.report.as_ref().expect("report").new_code.is_none(),
+        "pas de base ⇒ pas de vue new_code"
+    );
+}
+
+/// Scenario `base_absente_laisse_la_sticky` (ratifié 2026-10-14) : un corps
+/// `{}` (champ `base` absent, distinct de `null`) ne touche pas la base
+/// sticky ; le recalcul suivant garde sa vue `new_code` relative à
+/// `origin/main`. Verrou de non-régression : ce comportement doit survivre à
+/// l'adoption du double Option (`"base": null` = effacement).
+#[tokio::test]
+async fn base_absente_laisse_la_sticky() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree_with_origin(&root);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let (state, health) = health_on(&root, echo_source(&counter), 150, 0);
+    health.spawn_background();
+    wait_until("état fresh initial", || {
+        health.snapshot().phase == vanyline_sandbox::health::Phase::Fresh
+    })
+    .await;
+
+    let app = build_app(state);
+    let (status, _) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        r#"{"base": "origin/main"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_until("new_code sur origin/main", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap
+                .report
+                .as_ref()
+                .is_some_and(|r| r.new_code.as_ref().is_some_and(|n| n.base == "origin/main"))
+    })
+    .await;
+
+    // When `POST /refresh` avec corps `{}` (champ `base` absent) puis un recalcul.
+    let published = health
+        .snapshot()
+        .computed_at
+        .expect("computed_at du refresh poseur");
+    let (status, json) = request(
+        &app,
+        Method::POST,
+        "/code-health/refresh",
+        Some(bearer()),
+        "{}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "corps : {json}");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"absente\"\n").unwrap();
+    health.notify_modified();
+    wait_until("recalcul publié", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh
+            && snap.computed_at.is_some_and(|at| at > published)
+    })
+    .await;
+    let snap = health.snapshot();
+    // Then la vue `new_code` reste relative à `origin/main`.
+    let new_code = snap
+        .report
+        .as_ref()
+        .expect("report")
+        .new_code
+        .as_ref()
+        .expect("vue new_code conservée par le champ absent");
+    assert_eq!(
+        new_code.base, "origin/main",
+        "base sticky laissée inchangée"
+    );
+}
+
 /// Scenario `base_sticky_pour_les_recalculs` : `POST /code-health/refresh
 /// {"base": "origin/main"}` rend la base sticky ; le recalcul automatique qui
 /// suit une modification produit une vue `new_code` relative à `origin/main`.

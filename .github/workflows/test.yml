@@ -15,6 +15,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      # feature `test` (fixtures auth::test_support) JAMAIS active dans le graphe
+      # de production — la self-dépendance de dev qui l'active est exclue par
+      # no-dev (auth.sdd tâche « feature cargo test », workflows.sdd `Must`).
+      - name: Feature cargo `test` absente du graphe de production
+        run: |
+          cargo tree -e features -e=no-dev -p vanyline-sandbox \
+            | grep -q 'vanyline-sandbox feature "test"' && exit 1 || exit 0
 
   fmt:
     name: Rust fmt

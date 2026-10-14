@@ -39,6 +39,12 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
 /// peut pas déclencher de trafic sortant illimité).
 const FORCED_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Plancher d'intervalle des recharges déclenchées par l'expiration du cache
+/// (revue 2026-10-14, auth.sdd `Handles`) : même valeur que le refresh forcé —
+/// en échec (apiserver injoignable), une requête sur deux ne peut plus bloquer
+/// 5 s sur un connect timed-out entre deux tentatives rapprochées.
+const EXPIRED_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Timeout explicite de toute requête réseau du fichier (connect + lecture).
 const JWKS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -170,6 +176,12 @@ pub struct AuthState {
     /// borné à un toutes les 30 s. Le garde est tenu À TRAVERS le refresh :
     /// serialise aussi les tentatives concurrentes.
     last_forced_refresh: Mutex<Option<Instant>>,
+    /// Horodatage de la dernière TENTATIVE de recharge d'expiration (cache
+    /// périmé) ; même plancher de 30 s que le refresh forcé (revue
+    /// 2026-10-14, auth.sdd `Handles`) : en échec, une requête sur deux ne
+    /// peut plus bloquer 5 s sur un connect timed-out. Le verrou est tenu À
+    /// TRAVERS la tentative : sérialise les requêtes concurrentes.
+    last_expired_refresh: Mutex<Option<Instant>>,
     http: reqwest::Client,
 }
 
@@ -221,6 +233,7 @@ impl AuthState {
             config,
             cache: RwLock::new(None),
             last_forced_refresh: Mutex::new(None),
+            last_expired_refresh: Mutex::new(None),
             http,
         })
     }
@@ -327,18 +340,38 @@ impl AuthState {
 
     /// S'assure qu'un cache existe (périmé → recharge, échec CONSERVANT
     /// l'ancien cache). Rend `KeysUnavailable` seulement si aucun cache
-    /// n'existe du tout.
+    /// n'existe du tout. La recharge d'expiration est bornée par le même
+    /// plancher de 30 s que le refresh forcé (revue 2026-10-14) : en échec,
+    /// les requêtes suivantes dans la fenêtre retombent sur le cache conservé
+    /// sans nouvelle tentative réseau.
     async fn ensure_keys(&self) -> std::result::Result<(), AuthError> {
-        if self.cache_is_stale().await
-            && let Err(e) = self.refresh().await
-        {
-            tracing::error!("JWKS refresh failed, keeping previous cache if any: {e:#}");
+        if self.cache_is_stale().await {
+            self.throttled_expired_refresh().await;
         }
         if self.cache.read().await.is_some() {
             Ok(())
         } else {
             Err(AuthError::KeysUnavailable)
         }
+    }
+
+    /// Recharge déclenchée par l'expiration du cache : limitée à une tentative
+    /// toutes les 30 s (`EXPIRED_REFRESH_MIN_INTERVAL`), succès comme échec
+    /// consignant l'instant de tentative. `true` si une recharge a été tentée,
+    /// `false` si la fenêtre l'a bloquée (l'appelant retombe alors sur le cache
+    /// conservé, ou `KeysUnavailable` s'il n'y a aucun cache). Le verrou reste
+    /// tenu À TRAVERS la tentative : les requêtes concurrentes sont sérialisées
+    /// et tombent ensuite dans la fenêtre.
+    async fn throttled_expired_refresh(&self) -> bool {
+        let mut gate = self.last_expired_refresh.lock().await;
+        if gate.is_some_and(|prev| prev.elapsed() < EXPIRED_REFRESH_MIN_INTERVAL) {
+            return false;
+        }
+        *gate = Some(Instant::now());
+        if let Err(e) = self.refresh().await {
+            tracing::error!("JWKS refresh failed, keeping previous cache if any: {e:#}");
+        }
+        true
     }
 
     async fn cache_is_stale(&self) -> bool {
@@ -480,7 +513,7 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
 /// au chemin normal de `require_auth`. Il n'existe AUCUN mode de contournement.
 ///
 /// Jamais présent dans le binaire de production : `cfg(test)` ou la feature
-/// `test-support` du crate (auto-dev-dependence pour `sandbox/tests/`).
+/// `test` du crate (auto-dev-dependence pour `sandbox/tests/`).
 #[cfg(any(test, feature = "test"))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 // test_support = code de test (auth.sdd `Exposes`) : fixtures statiques dont
@@ -767,6 +800,7 @@ pub mod test_support {
                 fetched_at,
             })),
             last_forced_refresh: tokio::sync::Mutex::new(None),
+            last_expired_refresh: tokio::sync::Mutex::new(None),
             http: test_client(),
         }
     }
@@ -779,6 +813,7 @@ pub mod test_support {
             config,
             cache: tokio::sync::RwLock::new(None),
             last_forced_refresh: tokio::sync::Mutex::new(None),
+            last_expired_refresh: tokio::sync::Mutex::new(None),
             http: test_client(),
         }
     }

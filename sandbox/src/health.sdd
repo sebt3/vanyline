@@ -88,7 +88,10 @@ Exposes:
       sticky inchangée ; `"base": <ref>` = la ref devient la base STICKY des recalculs suivants
       (vue « code neuf » d'une MR) ; `"base": null` = EFFACE la base sticky (les recalculs
       suivants n'ont plus de base, vue `new_code` suspendue). 400 si `base` est invalide
-      (@HealthError::InvalidRef) — un effacement (`null`) n'est jamais refusé. Si un calcul est
+      (@HealthError::InvalidRef) — un effacement (`null`) n'est jamais refusé. Le double
+      @Option exige une désérisation sur mesure (le double @Option nu de serde_json ne
+      distingue pas absent de `null` — constat vérifié 2026-10-14, implémenté par
+      @deserialize_with). Si un calcul est
       déjà en cours : 202 et il est replanifié derrière lui (jamais deux calculs concurrents).
   Outil MCP `code_health` (famille de dispatch du sandbox, déclaré avec les outils LSP,
     ./tools_impl.rs) : arguments `{ "detail"?: "summary" | "issues" | "coverage", "path"?: string,
@@ -189,7 +192,9 @@ Tasks:
     nettoyage du test `calcul_echoue_ne_ment_jamais` peut retirer le poison d'une autre
     instance). Ajouter un identifiant d'instance (pid ou suffixe aléatoire) au chemin —
     amendement `Handles` à trancher (le compteur séquentiel `<n>` est contracté aujourd'hui).
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : 500 (cause serveur : git non lançable) ; 400 reste réservé aux entrées client invalides ; code et Scenario à aligner. (Question d'origine : @VNL-SBX-CH-002 au HTTP : 400 (choix du code à ce jour — « le client ne peut pas
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : 500 (cause serveur : git non lançable) ; 400 reste réservé aux entrées client invalides.
+    — FAIT 2026-10-14 (P2, validator PASS : mapping 500 sur RefCheckUnavailable, InvalidRef et
+    CH-003 restent 400, sticky intacte ; test `git_non_lançable_rend_500`). (Question d'origine : @VNL-SBX-CH-002 au HTTP : 400 (choix du code à ce jour — « le client ne peut pas
     être servi » traité comme refus) ou 500 (cause serveur : git non lançable) ? Trancher
     ; le code suit la spec.)
   [x] Câbler `notify_modified` + déclarer l'outil `code_health` — FAIT 2026-10-10
@@ -199,12 +204,18 @@ Tasks:
     propagation ; outil déclaré+dispatché+testé, plafond @bound_lines réel ; specs
     ../mcp.sdd, ../tools_impl.sdd, ../../../tools/src/mcp.sdd alignées 16→17 ;
     8 tests nouveaux, 505 verts).
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : la liste des déclencheurs est EXHAUSTIVE par contrat ; AJOUTER `lsp_rename` (câblage `notify_modified` en succès seul) + Scenario. (Question d'origine : @lsp_rename écrit des fichiers suivis mais N'EST PAS dans l'énumération des
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : la liste des déclencheurs est EXHAUSTIVE par contrat ; `lsp_rename` AJOUTÉ (succès seul).
+    — FAIT 2026-10-14 (P2, validator PASS : 13 sites `notify_modified` = liste exacte, grep
+    saturant ; test bidirectionnel `lsp_rename_notifie_en_succès_seul`). (Question d'origine : @lsp_rename écrit des fichiers suivis mais N'EST PAS dans l'énumération des
     déclencheurs ci-dessus (listée « outils MCP qui écrivent »). La liste est-elle
     EXHAUSTIVE par contrat (⇒ lsp_rename reste rattrapé par le sondage
     `health_poll_secs`, conforme) ou illustrative (⇒ l'ajouter aux déclencheurs et
     câble) ? Trancher.)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : `RefreshBody.base: Option<Option<String>>` — champ absent = inchangé, `"base": null` = efface ; contracter, tester, câbler. (Question d'origine : EFFACEMENT de la base sticky — trou de contrat rendu visible par H3b (validation
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : `RefreshBody.base: Option<Option<String>>` — champ absent = inchangé, `"base": null` = efface.
+    — FAIT 2026-10-14 (P2, validator PASS : double Option + `deserialize_with` (le double
+    Option nu de serde_json ne distingue pas absent de null, constat consigné au §Exposes) ;
+    Scenarios `base_nul_efface_la_sticky`, `base_absente_laisse_la_sticky`,
+    `base_invalide_refusee` non régressé). (Question d'origine : EFFACEMENT de la base sticky — trou de contrat rendu visible par H3b (validation
     2026-10-10) : `RefreshBody.base` est un `@Option<@str>` de serde, `{}`, corps absent
     et `{"base": null}` sont INDISTINGUABLES ⇒ aucun chemin pour revenir à « pas de
     base ». Depuis H3b la base peut venir du controller (`health_base_ref`) et survivre

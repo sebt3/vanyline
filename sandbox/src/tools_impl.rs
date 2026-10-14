@@ -2163,6 +2163,13 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                                     // l'absolu sinon — possible seulement en
                                     // cas de bug de `apply_workspace_edit`),
                                     // pas de re-confinement, pas d'URI ici.
+                                    // health.sdd `Handles` (liste EXHAUSTIVE,
+                                    // ratifié 2026-10-14) — le rename qui a
+                                    // MUTÉ des fichiers suivis est une écriture :
+                                    // notification en succès seul (les échecs
+                                    // rendent un `err_result` sans notifier ;
+                                    // `no rename` ci-dessus n'a rien écrit).
+                                    state.health.notify_modified();
                                     let rendered: Vec<(String, Vec<AppliedSite>)> = files
                                         .into_iter()
                                         .map(|f| {
@@ -3555,9 +3562,6 @@ fn diff_diagnostics(before: &[Value], after: &[Value]) -> DiagnosticsDiff {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    // tooling.sdd D3b — assertions de tests intactes : clippy::assert_is_empty
-    #![allow(clippy::assert_is_empty)]
     use super::*;
     use crate::auth::test_support;
     use crate::lsp::LspManager;
@@ -6891,6 +6895,94 @@ mod tests {
             counter.load(Ordering::SeqCst),
             2,
             "aucun recalcul déclenché par un échec d'écriture"
+        );
+    }
+
+    /// Scenario `lsp_rename_notifie_en_succès_seul` (health.sdd `Handles`,
+    /// liste EXHAUSTIVE ratifiée 2026-10-14) : le `lsp_rename` qui RÉUSSIT
+    /// (fichiers suivis mutés par `apply_workspace_edit`) notifie la
+    /// modification ; un `lsp_rename` qui échoue avant toute écriture n'en
+    /// notifie aucune — comportement succès-seul des autres sites. Même
+    /// mécanique que [`edit_and_check_notifies_health_on_success_only`] :
+    /// `with_timing` (cooldown 0, sondage coupé) + `CheckSource` compteuse.
+    #[tokio::test]
+    async fn lsp_rename_notifie_en_succes_seul() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (mut state, _tmpdir) = make_lsp_state("rename_notify").await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&counter);
+        let source: crate::health::CheckSource = Arc::new(move |_languages: &[String]| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            vec![vanyline_health::checks::Check {
+                id: "echo".to_string(),
+                kind: vanyline_health::report::CheckKind::Tests,
+                argv: vec!["echo".to_string(), "ok".to_string()],
+                cwd: String::new(),
+                output: vanyline_health::checks::OutputKind::None,
+                expand: None,
+                serial_group: Some("echo".to_string()),
+                after: None,
+            }]
+        });
+        let health = crate::health::CodeHealth::with_timing(
+            Arc::clone(&state.config),
+            source,
+            Duration::ZERO,
+            Duration::ZERO,
+            crate::health::empty_preliminary(),
+        );
+        state.health = Arc::clone(&health);
+        health.spawn_background();
+
+        // Premier calcul amorce le compteur (refresh forcé, même motif que
+        // `edit_and_check_notifies_health_on_success_only`).
+        health.refresh(None, None).await.unwrap();
+        wait_checks(&counter, 1, "premier calcul (refresh)").await;
+
+        // ── succès — rename appliqué (fichier muté) → notify → recalcul (1 → 2).
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_rename",
+                serde_json::json!({
+                    "path": "main.rs",
+                    "line": 1,
+                    "symbol": "main",
+                    "new_name": "X"
+                }),
+            ),
+        )
+        .await
+        .expect("lsp_rename timeout")
+        .expect("dispatch lsp_rename");
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "rename should be OK, got: {result}"
+        );
+        wait_checks(&counter, 2, "recalcul après rename réussi").await;
+
+        // ── échec — arguments invalides (`line` requis) : `err_result` AVANT
+        // toute écriture, donc aucune notification. Marge de grâce bornée :
+        // avec cooldown 0, un notify déclencherait le recalcul en quelques
+        // millisecondes.
+        let failed = dispatch_lsp(
+            &state,
+            "lsp_rename",
+            serde_json::json!({ "path": "main.rs", "new_name": "Y" }),
+        )
+        .await
+        .expect("dispatch lsp_rename (args invalides)");
+        assert!(
+            failed["isError"].as_bool().unwrap_or(false),
+            "`line` absent = erreur, got: {failed}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "aucun recalcul déclenché par un échec de lsp_rename"
         );
     }
 

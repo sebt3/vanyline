@@ -1,9 +1,17 @@
 //! Scenarios de `sandbox/src/auth.sdd` — un test par Scenario, taggé par son titre.
 //!
 //! Il n'existe AUCUN mode de contournement : chaque test présente un vrai jeton
-//! signé par une clé de test (`auth::test_support`, feature `test-support`).
+//! signé par une clé de test (`auth::test_support`, feature `test`).
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -580,6 +588,53 @@ async fn panne_jwks_conserve_l_ancien_cache() {
         .expect("l'échec de recharge doit conserver l'ancien cache");
     assert_eq!(info.subject, test_support::TEST_OWNER);
     assert_eq!(server.count(), 1, "la recharge périmé a bien été tentée");
+}
+
+/// Scénario `expiration_en_echec_plancher_de_30_s` (`auth.sdd`, contrat ajouté
+/// 2026-10-14) : cache périmé + serveur JWKS injoignable (recharge en échec) ⇒
+/// UNE seule tentative de recharge sur la fenêtre de 30 s (le même plancher
+/// d'intervalle que le refresh forcé par `kid`), l'ancien cache est conservé
+/// et continue de valider les jetons non expirés entre-temps.
+#[tokio::test]
+async fn expiration_en_echec_plancher_de_30_s() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = FakeJwks::spawn(FakeMode::Status(500)).await;
+    // Given un cache PÉRIMÉ (backdaté au-delà du TTL de 3600 s) contenant la
+    // bonne clé, et un serveur qui échoue toute recharge.
+    let auth = test_support::auth_state_with_jwks(
+        Arc::new(live_config(&server.url(), tmp.path())),
+        test_support::test_jwks(),
+        Some(Duration::from_secs(3601)),
+    );
+    let token = test_support::mint_owner_token(
+        test_support::TEST_OWNER,
+        test_support::TEST_AUDIENCE,
+        test_support::TEST_ISSUER,
+        3600,
+    );
+
+    // Premier jeton bien formé : une tentative de recharge a lieu, échoue,
+    // l'ancien cache conservé valide le jeton non expiré.
+    let info = auth
+        .validate_token(&token)
+        .await
+        .expect("l'échec de recharge conserve l'ancien cache");
+    assert_eq!(info.subject, test_support::TEST_OWNER);
+    assert_eq!(server.count(), 1, "la recharge périmé a bien été tentée");
+
+    // Second jeton à intervalle serré (< 30 s) : le plancher d'intervalle
+    // interdit la seconde tentative — sans lui, chaque requête repayerait le
+    // coût complet (jusqu'à 5 s de connect timed-out) contre un serveur en panne.
+    let info = auth
+        .validate_token(&token)
+        .await
+        .expect("le cache conservé continue de valider les jetons non expirés");
+    assert_eq!(info.subject, test_support::TEST_OWNER);
+    assert_eq!(
+        server.count(),
+        1,
+        "le plancher de 30 s interdit la seconde tentative d'expiration en échec"
+    );
 }
 
 /// Scénario `timeout_jwks_de_5_secondes` (`auth.sdd`).

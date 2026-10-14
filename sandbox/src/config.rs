@@ -120,19 +120,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse argv/env puis valide (helper de démarrage ; `main.rs` sépare les
-    /// deux autour de l'init tracing pour ne pas perdre les logs).
-    ///
-    /// # Errors
-    ///
-    /// Comme [`Config::validate`] : identité d'Owner ou source de clés
-    /// inexploitable.
-    pub fn parse_and_validate() -> Result<Self> {
-        let config = Self::parse();
-        config.validate()?;
-        Ok(config)
-    }
-
     /// Résolution de la source des clés de vérification : `File` si `jwks_file`
     /// est posé, sinon `Url` (valeur posée, sinon [`DEFAULT_JWKS_URL`]).
     #[must_use]
@@ -194,8 +181,6 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
     use super::*;
     use std::path::Path;
 

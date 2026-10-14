@@ -173,13 +173,22 @@ Must not:
     la construction du header `WWW-Authenticate` ne doit plus dépendre d'une URL d'opérateur.
 
 Tasks:
-  [ ] Refresh JWKS non borné quand le cache est périmé et l'apiserver injoignable (revue
+  [x] Refresh JWKS non borné quand le cache est périmé et l'apiserver injoignable (revue
     2026-10-14) : `ensure_keys` retente à CHAQUE requête (jusqu'à 5 s de blocage chacune), le
     throttle de 30 s ne couvrant que le refresh forcé par `kid` inconnu. Appliquer le même
     plancher d'intervalle aux rafraîchissements d'expiration en échec (cache ancien conservé).
-  [ ] Feature cargo `test` : la doc de `Cargo.toml` et de `test_support` parle de `test-support`
-    alors que la feature s'appelle `test` ; ajouter un contrôle CI (`cargo tree -e features`
-    sur le build release) prouvant qu'elle n'est jamais active en production.
+    — FAIT 2026-10-14 (P2, validator PASS : `EXPIRED_REFRESH_MIN_INTERVAL` 30 s, verrou tenu
+    à travers la tentative, Scenario `expiration_en_echec_plancher_de_30_s` vert, non-régression
+    de `panne_jwks_conserve_l_ancien_cache` vérifiée).
+  [x] Feature cargo `test` : la doc de `Cargo.toml` et de `test_support` parlait de
+    `test-support` alors que la feature s'appelle `test` ; ajouter un contrôle CI prouvant
+    qu'elle n'est jamais active en production.
+    — FAIT 2026-10-14 (P2, validator PASS : doc corrigée, zéro occurrence `test-support` hors
+    specs ; étape CI dans le job `test` de `test.yml` — la commande ratifiée est
+    `cargo tree -e features -e=no-dev -p vanyline-sandbox` sans ligne
+    `vanyline-sandbox feature "test"` (contractée dans `../../.github/workflows/workflows.sdd`
+    §Must ; le libellé initial « build release » désigne cette vérification no-dev, pas une
+    commande distincte).
   [x] Remplacer le code existant (modes `no_auth`/`static_token`/OIDC/groupes, @AccessLevel,
     @check_access, `oidc_*`, `public_url`, `oauth_metadata_url`) par ce contrat ; supprimer les
     décisions du 2026-09-27 qu'il remplace (RBAC Read/Admin « à rendre effectif »,

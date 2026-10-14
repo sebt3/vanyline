@@ -112,9 +112,9 @@ Must not:
   Employer `unwrap`/`expect`/`panic!`/`todo!`/`dbg!`/`println!`/`eprintln!` sur le
     chemin de production (harnais /tooling.sdd) — ./main.rs n'en contient aucun
     aujourd'hui ; la remontée d'erreur est exclusivement le `?` sur @anyhow::Result.
-  Appeler @Config::parse_and_validate : cette fonction (./config.rs) valide AVANT
-    l'init tracing et contredit la raison d'être de l'ordre en `Must` — ./main.rs fait
-    parse et validate séparés, autour de @telemetry::init.
+  Valider la configuration AVANT l'init tracing (@Config::parse_and_validate, un temps
+    proposée, SUPPRIMÉE 2026-10-14 — P2, ./config.sdd) : ./main.rs fait parse et validate
+    séparés, autour de @telemetry::init, pour que les erreurs de validation soient loggées.
   Installer un gestionnaire de signal, un arrêt gracieux (aucune poignée
     `with_graceful_shutdown` ni équivalent), une boucle de retry sur bind, ou un
     réordonnancement des étapes (par ex. binder avant de logger, ou valider avant
@@ -313,11 +313,11 @@ Tasks:
     parse @SocketAddr échoue, exit 1 — comportement accidentel jamais testé. Valider
     « non-vide » dans @Config::validate ou assumer (l'apiserver K8s et la CI n'envoient
     jamais d'env vides en pratique) ?
-  [?] @Config::parse_and_validate (./config.rs, ligne 93) n'a AUCUN appelant dans le
+  [x] @Config::parse_and_validate (./config.rs) n'avait AUCUN appelant dans le
     workspace (vérifié par grep le 2026-09-26) et son ordre (validate avant tracing)
-    contredit la raison d'être de ./main.rs. À traiter dans la spec ./config.rs :
-    supprimer ou re-documenter — signalé ici car ./main.rs en est le consommateur
-    naturel absent.
+    contredisait la raison d'être de ./main.rs.
+    — SUPPRIMÉE 2026-10-14 (P2, décision actée dans ./config.sdd §Exposes : aucun
+    appelant de production ; ./main.rs fait parse puis validate séparés).
   [?] Log de l'adresse écoutée : `listening on {addr}` (et `ops server listening
     on {addr}` côté ./lib.rs) affiche l'adresse DEMANDÉE, émis AVANT tout bind — avec
     un port `0` demandé, le log littéral porte `:0` et le port réellement attribué par

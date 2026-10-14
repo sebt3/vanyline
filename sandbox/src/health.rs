@@ -335,12 +335,14 @@ impl CodeHealth {
         }
     }
 
-    /// Recalcul forcé (spec : `@CodeHealth::refresh`). `base`, si fournie, est
-    /// VALIDÉE (garde syntaxique puis `git rev-parse --verify`, jamais
-    /// interpolée dans un shell) AVANT d'être posée comme sticky ; `languages`
-    /// remplace la détection pour les recalculs suivants. L'événement est
-    /// planifié derrière un calcul éventuellement en cours (jamais deux à la
-    /// fois).
+    /// Recalcul forcé (spec : `@CodeHealth::refresh`). `base` est un double
+    /// `Option` (décidé 2026-10-14) : `None` (champ absent) laisse la base
+    /// sticky inchangée ; `Some(None)` (`"base": null`) l'EFFACE (jamais
+    /// refusé) ; `Some(Some(candidate))` est VALIDÉE (garde syntaxique puis
+    /// `git rev-parse --verify`, jamais interpolée dans un shell) AVANT d'être
+    /// posée comme sticky. `languages` remplace la détection pour les
+    /// recalculs suivants. L'événement est planifié derrière un calcul
+    /// éventuellement en cours (jamais deux à la fois).
     ///
     /// # Errors
     ///
@@ -349,15 +351,17 @@ impl CodeHealth {
     /// lançable pour la vérifier.
     pub async fn refresh(
         &self,
-        base: Option<String>,
+        // health.sdd `Exposes` (décidé 2026-10-14) : le double `Option` EST le
+        // contrat — absent = inchangé, `Some(None)` = effacement, `Some(Some)` = pose.
+        #[allow(clippy::option_option)] base: Option<Option<String>>,
         languages: Option<Vec<String>>,
     ) -> Result<(), HealthError> {
-        if let Some(candidate) = &base {
+        if let Some(Some(candidate)) = &base {
             self.validate_base(candidate).await?;
         }
         {
             let mut f = self.fields();
-            if base.is_some() {
+            if let Some(base) = base {
                 f.base = base;
             }
             if languages.is_some() {
@@ -803,10 +807,41 @@ fn lsp_issue(root: &Path, uri: &str, diagnostic: &Value) -> Option<Issue> {
 
 /// Corps optionnel de `POST /code-health/refresh` :
 /// `{ "base": <ref git>?, "languages": [<nom>]? }`.
+///
+/// `base` est un double `Option` (décidé 2026-10-14, health.sdd `Exposes`) :
+/// champ ABSENT (`None`) = base sticky inchangée ; `"base": null`
+/// (`Some(None)`) = EFFACE la base sticky (jamais refusé) ; `"base": <ref>`
+/// (`Some(Some(ref))`) = la ref devient la base sticky des recalculs suivants.
+/// `serde_json` effondre un `null` explicite sur le `None` externe d'un
+/// `Option<Option<…>>` standard (vérifié expérimentalement) : le champ porte
+/// donc [`sticky_base`], qui ne court que lorsque le champ est PRÉSENT.
 #[derive(Debug, Deserialize)]
 struct RefreshBody {
-    base: Option<String>,
+    // health.sdd `Exposes` (décidé 2026-10-14) : le double `Option` EST le
+    // contrat (absent = inchangé, null = effacement, `<ref>` = pose).
+    #[allow(clippy::option_option)]
+    #[serde(default, deserialize_with = "sticky_base")]
+    base: Option<Option<String>>,
     languages: Option<Vec<String>>,
+}
+
+/// Désérialisation `base` du double `Option` : seulement appelée quand le
+/// champ est présent (`#[serde(default)]` couvre l'absence → `None`).
+/// `null` → `Some(None)` (effacement) ; chaîne → `Some(Some(ref))` (pose) ;
+/// tout autre type JSON → erreur de corps (`VNL-SBX-CH-003`, 400).
+#[allow(clippy::option_option)] // health.sdd `Exposes` (décidé 2026-10-14) : type de contrat.
+fn sticky_base<'de, D>(deserializer: D) -> std::result::Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    match serde_json::Value::deserialize(deserializer)? {
+        Value::Null => Ok(Some(None)),
+        Value::String(value) => Ok(Some(Some(value))),
+        other => Err(D::Error::custom(format!(
+            "`base` must be a git ref string or null, got {other}"
+        ))),
+    }
 }
 
 /// `GET /code-health` — 200 + `@HealthState`, TOUJOURS (jamais 404, y compris
@@ -817,7 +852,9 @@ pub async fn handle_get(State(state): State<AppState>) -> axum::Json<HealthState
 
 /// `POST /code-health/refresh` — 202 (recalcul immédiat, replanifié derrière un
 /// éventuel calcul en cours) ; 400 si `base` invalide (`@HealthError::InvalidRef`,
-/// base sticky inchangée).
+/// base sticky inchangée) ; 500 si `git` n'est pas lançable pour la vérifier
+/// (`@HealthError::RefCheckUnavailable`, cause serveur — ratifié 2026-10-14 :
+/// 400 reste réservé aux entrées client invalides).
 pub async fn handle_refresh(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
     let parsed: RefreshBody = if body.is_empty() {
         RefreshBody {
@@ -840,13 +877,18 @@ pub async fn handle_refresh(State(state): State<AppState>, body: axum::body::Byt
     };
     match state.health.refresh(parsed.base, parsed.languages).await {
         Ok(()) => StatusCode::ACCEPTED.into_response(),
-        Err(error @ (HealthError::InvalidRef { .. } | HealthError::RefCheckUnavailable { .. })) => {
-            (
-                StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({ "error": error.to_string() })),
-            )
-                .into_response()
-        }
+        // 400 = entrées client invalides ; 500 = cause serveur (git non
+        // lançable, VNL-SBX-CH-002) — ratifié 2026-10-14 (health.sdd `Raises`).
+        Err(error @ HealthError::InvalidRef { .. }) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+        Err(error @ HealthError::RefCheckUnavailable { .. }) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -860,8 +902,6 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::*;
 
     fn root() -> std::path::PathBuf {
