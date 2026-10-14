@@ -40,8 +40,8 @@ Structure:
     @read_todo_state, @build_session_context, @JsonSink (struct unitaire + impl
     @EventSink), @read_workspace_context, @process_turn, @result_to_assistant_message,
     @workspace_source_summary, @print_workspace_sources, @git_diff_stat,
-    @print_git_diff_stat, @resolve_context ; puis @mod tests (`cfg(test)`, 16 tests,
-    cartographiés en Tasks). Aucune struct d'état, aucune variable globale : l'état
+    @print_git_diff_stat, @resolve_context ; puis @mod tests (`cfg(test)`, 21 tests,
+    cartographiés en Tasks). Aucune struct d'état, Aucune struct d'état, aucune variable globale : l'état
     d'une session tient dans la @Conversation, le @SessionContext et la boucle locale.
     Le module est privé (`mod chat;` ./main.rs — crate binaire).
 
@@ -562,12 +562,25 @@ Tasks:
   [?] Motif du message d'erreur one-shot sur échec de résolution TUI (S7, 2026-10-13) :
     `try_build_turn_context` reprend le motif `VNL-CFG-*` existant du one-shot — valider
     que c'est le bon espace de codes pour cette erreur d'usage.
-  [ ] Scenarios one-shot sans test homonyme, constatés non annoncés par la revue S7
+  [x] Scenarios one-shot sans test homonyme, constatés non annoncés par la revue S7
     (validator 2026-10-14 ; dette préexistante, hors TUI) : `timeout_zero_desactive_la_limite`,
     `tour_reussi_persiste_deux_messages_et_le_todo`, `tool_calls_persistes_sans_id_et_absents_si_vides`,
     `historique_filtre_roles_et_perd_les_tool_calls`, `lecture_todo_sur_mutex_empoisonne_garde_la_valeur`.
     Les convertir en tests taggés (les deux premiers et le dernier sont testables en
     process ; `timeout_zero` contre le parsing/résolution de limite).
+    — **clos 2026-10-14, validator vert** : 2 tests process (`cli/tests/one_shot.rs`, mock
+    SSE loopback, binaire réel via @CARGO_BIN_EXE_vanyline) + 3 tests unité (@mod tests) ;
+    fidélité Scenario↔Then vérifiée par le validator (assertions sur durée ≥ 1 s / absence
+    VNL-CLI-001 / corps de requête reçu / is_poisoned + valeur rendue). 221 = 216 + 5,
+    clippy/fmt -p vanyline verts. Contre-épreuve Given : voir `[?]` « tool call sans
+    résultat » ci-dessous.
+  [?] Given « tool call sans résultat » de `tour_reussi_persiste_deux_messages_et_le_todo`
+    : inexécutable bout-en-bout avec rig-core 0.38 (le résultat d'un tool appelé est
+    toujours corrélé au tour, même en erreur de tool). Le test process pose donc un
+    @todowrite RÉSOLU ; l'absence de `result` (Some/None) est couverte côté unité par
+    `tool_calls_persistes_sans_id_et_absents_si_vides`. Trancher : reformuler le Given du
+    Scenario (deux niveaux d'assertion) ou le laisser énoncé tel quel (validator 2026-10-14
+    l'a qualifié acceptable, pas un écart bloquant).
   [?] Erreurs de tour invisibles : le bras @Err(_) du one-shot et le @break du REPL
     jettent l'@VnyError sans l'afficher. Un échec de résolution config
     (`VNL-CFG-003` — modèle/provider/toolset inconnu) ne produit AUCUNE sortie, seul

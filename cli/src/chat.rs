@@ -1131,4 +1131,286 @@ mod tests {
         let jwt = make_test_jwt(&serde_json::json!({ "exp": "tard" }));
         assert_eq!(jwt_exp_remaining(&jwt), None);
     }
+
+    // ── Dette de couverture — tâche « Scenarios one-shot sans test homonyme » ──
+
+    /// Scenario: `tool_calls_persistes_sans_id_et_absents_si_vides` — deux
+    /// `ToolCallRecord` (id, name, arguments, result) convertis : chaque
+    /// `vanyline_lib::ToolCall` persisté porte name/arguments/result mais
+    /// AUCUN `id` (abandonné à la persistance) ; avec zéro tool call, le champ
+    /// persisté est `None`.
+    #[test]
+    fn tool_calls_persistes_sans_id_et_absents_si_vides() {
+        let result = ChatTurnResult {
+            response_text: "reponse".to_string(),
+            tool_calls: vec![
+                vanyline_lib::event::ToolCallRecord {
+                    id: "id-interne-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "a.txt"}),
+                    result: Some("contenu".to_string()),
+                },
+                vanyline_lib::event::ToolCallRecord {
+                    id: "id-interne-2".to_string(),
+                    name: "todoread".to_string(),
+                    arguments: serde_json::json!({}),
+                    result: None,
+                },
+            ],
+        };
+        let msg = result_to_assistant_message(result);
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "reponse");
+        let calls = msg
+            .tool_calls
+            .as_ref()
+            .expect("deux tool calls persistes attendus");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments, serde_json::json!({"path": "a.txt"}));
+        assert_eq!(calls[0].result.as_deref(), Some("contenu"));
+        assert_eq!(calls[1].name, "todoread");
+        assert_eq!(calls[1].arguments, serde_json::json!({}));
+        assert_eq!(calls[1].result, None);
+        // AUCUN `id` sur le fil persiste (le champ n'existe pas dans
+        // vanyline_lib::ToolCall — verifie sur la forme serde).
+        let wire = serde_json::to_value(&msg).unwrap();
+        for call in wire["tool_calls"].as_array().unwrap() {
+            assert!(
+                call.get("id").is_none(),
+                "le champ id ne doit jamais paraitre en persistance ; obtenu: {call}"
+            );
+        }
+        // Zéro tool call → champ persiste None (pas une liste vide).
+        let vide = result_to_assistant_message(ChatTurnResult {
+            response_text: "x".to_string(),
+            tool_calls: Vec::new(),
+        });
+        assert!(
+            vide.tool_calls.is_none(),
+            "zéro tool call → champ persiste None"
+        );
+    }
+
+    /// Sink muet pour les tests — le rendu stdout/stderr EST le contrat des
+    /// sinks réels, teste ailleurs ; ici seul le declenchement de
+    /// `run_agent_turn` compte.
+    struct QuietSink;
+
+    #[async_trait]
+    impl EventSink for QuietSink {
+        async fn emit(&self, _event: ChatEvent) {}
+    }
+
+    /// Ecoute SSE loopback (modele simule au format OpenAI-compatible,
+    /// consommation de rig) : capte le corps de requete JSON recu et rend
+    /// `body` en réponse.
+    fn spawn_sse_mock_once(
+        listener: std::net::TcpListener,
+        body: String,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let addr = listener.local_addr().unwrap();
+        let captured: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            // Entetes puis corps de Content-Length octets (rig envoie un
+            // corps de taille fixe).
+            let mut content_length = 0usize;
+            let mut reader = std::io::BufReader::new(sock.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if std::io::BufRead::read_line(&mut reader, &mut line).unwrap() == 0
+                    || line == "\r\n"
+                    || line == "\n"
+                {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(rest) = lower.strip_prefix("content-length:") {
+                    content_length = rest.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut req = vec![0u8; content_length];
+            if content_length > 0 {
+                std::io::Read::read_exact(&mut reader, &mut req).unwrap();
+            }
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&req) {
+                cap.lock().unwrap().push(val);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes());
+            let _ = sock.write_all(body.as_bytes());
+            let _ = sock.flush();
+        });
+        (addr, captured)
+    }
+
+    /// Scenario: `historique_filtre_roles_et_perd_les_tool_calls` — une
+    /// `Conversation` contenant un message rôle `system`, un `user` et un
+    /// `assistant` avec `tool_calls` : `process_turn` ne transmet à
+    /// `run_agent_turn` que le couple user/assistant, et le message assistant
+    /// part en texte seul (`tool_calls` non rejoués). Observation par le corps
+    /// de requête recu par le mock SSE (modele simule en loopback).
+    #[tokio::test]
+    async fn historique_filtre_roles_et_perd_les_tool_calls() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}
+
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}
+
+data: [DONE]
+
+";
+        let (addr, captured) = spawn_sse_mock_once(listener, sse.to_string());
+
+        let global_dir = tempdir().unwrap();
+        std::fs::create_dir_all(global_dir.path().join("agents")).unwrap();
+        std::fs::write(
+            global_dir.path().join("agents").join("a1.md"),
+            "---\nmodel: m1\n---\nagent de test\n",
+        )
+        .unwrap();
+        write_config_yaml(
+            global_dir.path(),
+            &format!(
+                "providers:\n  mock:\n    type: openai-compatible\n    endpoint: http://{addr}\n    api_key: cle-test\nmodels:\n  m1:\n    provider: mock\n    model: modele-test\n"
+            ),
+        );
+        let store = FsConfigStore::new(Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        });
+        let ctx = vanyline_lib::session::SessionContext {
+            store: Arc::new(store),
+            sink: Arc::new(QuietSink),
+            local_tools: std::collections::HashMap::new(),
+            subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
+            model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let conv = vanyline_lib::Conversation {
+            id: uuid::Uuid::new_v4(),
+            agent: Some("a1".to_string()),
+            title: None,
+            messages: vec![
+                vanyline_lib::Message {
+                    role: "system".to_string(),
+                    content: "SYSTEME-INTERDIT".to_string(),
+                    tool_calls: None,
+                },
+                vanyline_lib::Message {
+                    role: "user".to_string(),
+                    content: "USER-ANCIEN".to_string(),
+                    tool_calls: None,
+                },
+                vanyline_lib::Message {
+                    role: "assistant".to_string(),
+                    content: "ASSISTANT-ANCIEN".to_string(),
+                    tool_calls: Some(vec![vanyline_lib::ToolCall {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "TOOLARG-INTERDIT"}),
+                        result: None,
+                    }]),
+                },
+            ],
+            todo: None,
+        };
+
+        let result = process_turn(&conv, "a1", &ctx, None, "MSG-COURANT")
+            .await
+            .expect("le tour simule doit reussir");
+        assert_eq!(result.response_text, "ok");
+
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "une seule requete de modele attendue");
+        assert_historique_transmis(&bodies[0]);
+    }
+
+    /// Assertions du Scenario `historique_filtre_roles_et_perd_les_tool_calls`
+    /// sur le corps de requête reçu par le mock : seul le couple user/assistant
+    /// est transmis (rôle `system` écarté, message `tool` absent) et le message
+    /// assistant part en texte seul (`tool_calls` non rejoués).
+    fn assert_historique_transmis(body: &serde_json::Value) {
+        let body_str = body.to_string();
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages en tableau dans la requete");
+        assert!(
+            !body_str.contains("SYSTEME-INTERDIT"),
+            "le role system doit etre ecarte de l'historique ; requis: {body_str}"
+        );
+        assert!(
+            !body_str.contains("TOOLARG-INTERDIT"),
+            "les tool_calls persistes ne doivent jamais etre rejoues ; requis: {body_str}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == "user" && m.to_string().contains("USER-ANCIEN")),
+            "le message user doit etre transmis ; requis: {body_str}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == "user" && m.to_string().contains("MSG-COURANT")),
+            "le message du tour courant doit etre transmis ; requis: {body_str}"
+        );
+        let assistants: Vec<&serde_json::Value> = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 1, "un seul message assistant transmis");
+        let assistant_str = assistants[0].to_string();
+        assert!(
+            assistant_str.contains("ASSISTANT-ANCIEN"),
+            "l'assistant est transmis en texte seul ; requis: {body_str}"
+        );
+        assert!(
+            !assistant_str.contains("tool_calls"),
+            "pas de tool_calls rejoues sur le message assistant ; obtenu: {assistant_str}"
+        );
+        assert!(
+            !messages.iter().any(|m| m["role"] == "tool"),
+            "aucun message role tool (resultat de tool call) ; requis: {body_str}"
+        );
+    }
+
+    /// Scenario: `lecture_todo_sur_mutex_empoisonne_garde_la_valeur` — un
+    /// `Mutex` de todo verrouille puis empoisonne par un panic interne :
+    /// `read_todo_state` rend la valeur posee avant le panic, sans propager le
+    /// panic (`PoisonError::into_inner`).
+    #[test]
+    fn lecture_todo_sur_mutex_empoisonne_garde_la_valeur() {
+        let shared = Arc::new(std::sync::Mutex::new(Some("etat-avant-panic".to_string())));
+        let for_thread = Arc::clone(&shared);
+        let handle = std::thread::spawn(move || {
+            let _guard = for_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("tool call en panic");
+        });
+        let join = handle.join();
+        assert!(
+            join.is_err(),
+            "l'harnais doit avoir empoisonne le mutex par un panic"
+        );
+        assert!(shared.is_poisoned(), "le mutex doit etre marque empoisonne");
+        assert_eq!(
+            read_todo_state(&shared),
+            Some("etat-avant-panic".to_string()),
+            "la valeur posee avant le panic doit etre rendue, sans panic propage"
+        );
+    }
 }
