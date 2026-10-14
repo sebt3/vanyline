@@ -7,7 +7,15 @@
 //! uniquement (convention de `rpc_stdio_smoke.rs` : la config de la machine
 //! n'est jamais lue ni touchée).
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

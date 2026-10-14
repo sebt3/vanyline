@@ -120,6 +120,11 @@ Handles:
     CONSERVE l'ancien cache. Sur `kid` inconnu : UN refresh forcé, limité à une fois toutes les
     30 s (borne l'amplification : un jeton poubelle à `kid` inconnu ne peut pas déclencher de
     trafic sortant illimité) ; le refresh n'a lieu qu'après `decode_header` réussi.
+    Plancher d'intervalle AUSSI sur les rafraîchissements d'expiration (revue 2026-10-14) :
+    quand le cache est périmé et que la recharge ÉCHOUE (apiserver injoignable), le même
+    plancher de 30 s s'applique entre deux tentatives — une requête sur deux ne peut plus
+    bloquer 5 s sur un connect timed-out ; l'ancien cache est conservé et continue de valider
+    les jetons non expirés entre-temps.
   Algorithmes : épinglés par le type de la clé du JWKS — RSA → RS256, EC P-256 → ES256 ; tout
     autre type ou toute incohérence entre l'`alg` du header et la clé → refus ; jamais `none`,
     `HS*`, ni une clé fournie par le jeton.
@@ -252,6 +257,15 @@ Scenario: kid_inconnu_un_refresh_puis_key_not_found
   Given un cache JWKS sans le `kid` du jeton, le serveur JWKS simulé ne l'ayant pas non plus
   When @validate_token reçoit ce jeton deux fois de suite à moins de 30 s
   Then le premier provoque exactement un refresh, le second aucun ; les deux rendent @KeyNotFound
+
+Scenario: expiration_en_echec_plancher_de_30_s
+  # Contrat ajouté 2026-10-14 (revue) : le plancher d'intervalle couvre aussi les
+  # rafraîchissements d'expiration en échec, pas seulement le refresh forcé par `kid`.
+  Given un cache JWKS périmé et un serveur JWKS injoignable (échec de recharge)
+  When @validate_token reçoit des jetons bien formés à intervalles serrés sur moins de 30 s
+  Then une seule tentative de recharge est émise sur la fenêtre (le plancher de 30 s s'applique
+    entre tentatives d'expiration en échec), l'ancien cache est conservé et valide les jetons
+    non expirés entre-temps
 
 Scenario: rotation_de_cle_acceptee_apres_refresh
   Given un cache JWKS périmé de l'ancienne clé et un serveur JWKS exposant désormais la nouvelle

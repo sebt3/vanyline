@@ -4,7 +4,15 @@
 //! enveloppe `VNL-MAINT-004` assertée sur un repo en échec (spec :
 //! `sandbox/src/maint.sdd`). Les validations de noms de branche et de
 //! sandbox vivent dans les unitaires de `src/maint.rs`.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

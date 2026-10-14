@@ -150,7 +150,6 @@ async fn discover_models(provider: &LlmProviderModel) -> Result<Vec<String>, App
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::db::entities::llm_providers::ActiveModel;
     use miryad_core::users::sync_group_memberships;

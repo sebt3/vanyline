@@ -53,7 +53,6 @@ impl MigratorTrait for Migrator {
 /// invisible aux tests unitaires qui ne touchent jamais une vraie connexion.
 #[cfg(test)]
 mod migrations_apply_cleanly {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     #[tokio::test]
     async fn full_migration_set_applies_against_a_real_schema() {
@@ -67,7 +66,7 @@ mod migrations_apply_cleanly {
             .all(&db)
             .await
             .expect("querying a freshly migrated table succeeds");
-        assert_eq!(count, [] as [crate::db::entities::skills::Model; 0]);
+        assert!(count.is_empty());
     }
 }
 
@@ -86,7 +85,6 @@ mod migrations_apply_cleanly {
 /// `miryad_workflow_definitions`.
 #[cfg(test)]
 mod workflow_migrations {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use sea_orm::{ConnectionTrait, QueryResult, Statement};
     use sea_orm_migration::MigratorTrait;
@@ -498,7 +496,6 @@ mod workflow_migrations {
 /// MIGRATION, indépendamment des entités `SeaORM` qui n'existent pas encore à ce stade.
 #[cfg(test)]
 mod system_migrations {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use sea_orm::{ConnectionTrait, QueryResult, Statement};
     use sea_orm_migration::MigratorTrait;

@@ -1,7 +1,15 @@
 //! Test dintegration : `SessionContext.extra_mcp` connecte bien un serveur
 //! MCP reel pendant un tour, independamment des toolsets de l'agent -- c'est
 //! le mecanisme sur lequel repose la toolbox (--toolbox, tache 05b).
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

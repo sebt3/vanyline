@@ -1,6 +1,14 @@
 //! Fix lib MCP (R3 + R12) — test d'intégration bout-en-bout, avec un vrai
 //! serveur MCP HTTP local (pas de mock) et le code réel de `vanyline-lib`.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

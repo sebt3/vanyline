@@ -391,7 +391,6 @@ fn derive_steps(lignes: Vec<JournalRow>) -> Vec<StepStatus> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::sync::Arc;
     use std::sync::Mutex;

@@ -19,7 +19,7 @@ license = "BSD-3-Clause"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-missing_docs = "warn"
+missing_docs = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }

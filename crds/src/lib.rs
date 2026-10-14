@@ -5,7 +5,15 @@
 //! (`owner_namespace_name`, `service_name`, `MCP_PORT`). Aucune logique de
 //! reconcile : le comportement observable est intégralement de la
 //! (dé)sérialisation. Contrat détaillé : `lib.sdd`.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::collections::BTreeMap;
 

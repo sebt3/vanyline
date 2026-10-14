@@ -4,10 +4,15 @@
 //! hadolint réellement installé sur la machine de test n'est JAMAIS utilisé.
 //! Framing `Content-Length` via `vanyline_sandbox::lsp::FrameReader` (pub,
 //! motif des tests de `lsp.rs`).
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// tooling.sdd D3c — assertions de tests intactes : clippy::assert_is_empty (précédent
-// D3a/D3b), la forme assert!() du fichier est délibérée (message d'échec explicite).
-#![allow(clippy::assert_is_empty)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

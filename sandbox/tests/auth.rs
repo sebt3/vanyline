@@ -172,7 +172,7 @@ fn render_missing_token() -> u64 {
 
 /// Scénario `jeton_owner_valide_atteint_le_handler` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_jeton_owner_valide_atteint_le_handler() {
+async fn jeton_owner_valide_atteint_le_handler() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
     let app = probe_app(app_state_with(auth, tmp.path()));
@@ -200,7 +200,7 @@ async fn scenario_jeton_owner_valide_atteint_le_handler() {
 
 /// Scénario `jeton_d_un_autre_owner_est_403` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_jeton_d_un_autre_owner_est_403() {
+async fn jeton_d_un_autre_owner_est_403() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
     let app = probe_app(app_state_with(auth, tmp.path()));
@@ -238,7 +238,7 @@ async fn scenario_jeton_d_un_autre_owner_est_403() {
 
 /// Scénario `jeton_du_pod_audience_apiserver_refuse` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_jeton_du_pod_audience_apiserver_refuse() {
+async fn jeton_du_pod_audience_apiserver_refuse() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
     let app = probe_app(app_state_with(auth, tmp.path()));
@@ -272,7 +272,7 @@ async fn scenario_jeton_du_pod_audience_apiserver_refuse() {
 
 /// Scénario `en_tete_absent_ou_mal_forme` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_en_tete_absent_ou_mal_forme() {
+async fn en_tete_absent_ou_mal_forme() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
     let app = probe_app(app_state_with(auth, tmp.path()));
@@ -327,7 +327,7 @@ async fn scenario_en_tete_absent_ou_mal_forme() {
 
 /// Scénario `jeton_non_jwt_ou_sans_kid_sans_reseau` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_jeton_non_jwt_ou_sans_kid_sans_reseau() {
+async fn jeton_non_jwt_ou_sans_kid_sans_reseau() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeJwks::spawn(FakeMode::Json(r#"{"keys":[]}"#.into())).await;
     let auth =
@@ -352,7 +352,7 @@ async fn scenario_jeton_non_jwt_ou_sans_kid_sans_reseau() {
 
 /// Scénario `audience_emetteur_expiration_non_conformes` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_audience_emetteur_expiration_non_conformes() {
+async fn audience_emetteur_expiration_non_conformes() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
 
@@ -393,7 +393,7 @@ async fn scenario_audience_emetteur_expiration_non_conformes() {
 
 /// Scénario `algorithmes_interdits` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_algorithmes_interdits() {
+async fn algorithmes_interdits() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
 
@@ -451,7 +451,7 @@ async fn scenario_algorithmes_interdits() {
 
 /// Scénario `kid_inconnu_un_refresh_puis_key_not_found` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_kid_inconnu_un_refresh_puis_key_not_found() {
+async fn kid_inconnu_un_refresh_puis_key_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeJwks::spawn(FakeMode::Json(r#"{"keys":[]}"#.into())).await;
     // cache injecté sans le kid du jeton, le serveur simulé ne l'a pas non plus
@@ -488,7 +488,7 @@ async fn scenario_kid_inconnu_un_refresh_puis_key_not_found() {
 
 /// Scénario `rotation_de_cle_acceptee_apres_refresh` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_rotation_de_cle_acceptee_apres_refresh() {
+async fn rotation_de_cle_acceptee_apres_refresh() {
     let tmp = tempfile::tempdir().unwrap();
     // le serveur expose désormais la nouvelle clé
     let server = FakeJwks::spawn(FakeMode::Json(test_support::rotated_jwks_json())).await;
@@ -516,7 +516,7 @@ async fn scenario_rotation_de_cle_acceptee_apres_refresh() {
 
 /// Scénario `panne_jwks_sans_cache_rend_503` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_panne_jwks_sans_cache_rend_503() {
+async fn panne_jwks_sans_cache_rend_503() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeJwks::spawn(FakeMode::Status(500)).await;
     let auth =
@@ -558,7 +558,7 @@ async fn scenario_panne_jwks_sans_cache_rend_503() {
 
 /// Scénario `panne_jwks_conserve_l_ancien_cache` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_panne_jwks_conserve_l_ancien_cache() {
+async fn panne_jwks_conserve_l_ancien_cache() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeJwks::spawn(FakeMode::Status(500)).await;
     // cache périmé contenant la bonne clé : la recharge échoue, l'ancien cache est conservé
@@ -584,7 +584,7 @@ async fn scenario_panne_jwks_conserve_l_ancien_cache() {
 
 /// Scénario `timeout_jwks_de_5_secondes` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_timeout_jwks_de_5_secondes() {
+async fn timeout_jwks_de_5_secondes() {
     let tmp = tempfile::tempdir().unwrap();
     let server = FakeJwks::spawn(FakeMode::Hang).await;
     let auth =
@@ -615,7 +615,7 @@ async fn scenario_timeout_jwks_de_5_secondes() {
 
 /// Scénario `formats_de_reponse` (`auth.sdd`).
 #[tokio::test]
-async fn scenario_formats_de_reponse() {
+async fn formats_de_reponse() {
     use axum::response::IntoResponse;
 
     let cases: Vec<(AuthError, u16, &str, &str, bool)> = vec![
@@ -694,7 +694,7 @@ async fn scenario_formats_de_reponse() {
 
 /// Scénario `aucun_contournement` (`auth.sdd`).
 #[test]
-fn scenario_aucun_contournement() {
+fn aucun_contournement() {
     // (a) aucune source de clés explicite hors cluster : sans matériel de
     //     vérification lisible (CA du cluster absent), AuthState::new échoue —
     //     jamais un serveur ouvert qui ne pourrait vérifier personne.
@@ -783,7 +783,7 @@ fn scenario_aucun_contournement() {
 /// `build_app` (contrat `Handles` de auth.sdd) — le handler d'émission de
 /// ticket lit l'`AuthInfo` en extensions.
 #[tokio::test]
-async fn scenario_require_auth_protege_le_routeur_build_app() {
+async fn require_auth_protege_le_routeur_build_app() {
     let tmp = tempfile::tempdir().unwrap();
     let auth = test_support::auth_state(Arc::new(test_support::test_config(tmp.path())));
     let app = build_app(app_state_with(auth, tmp.path()));

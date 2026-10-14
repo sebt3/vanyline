@@ -292,7 +292,6 @@ impl MiryadWorkflowStep for GateStep {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::workflow::steps::tests::{config_with_run, run_ctx};
     use serde_json::json;

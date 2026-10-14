@@ -82,7 +82,9 @@ Exposes:
     @JwksSource : `File` si `jwks_file` est posé, sinon `Url` (valeur posée, sinon
     @DEFAULT_JWKS_URL).
   @DEFAULT_JWKS_URL — `pub const &str`.
-  @Config::validate(&self) -> @anyhow::Result<()> ; @Config::parse_and_validate().
+  @Config::validate(&self) -> @anyhow::Result<()> — `parse_and_validate` SUPPRIMÉ
+    (décidé 2026-10-14 : aucun appelant de production, ./main.rs fait `parse` puis
+    `validate` séparés autour de l'init tracing pour ne pas perdre les logs).
 
 Raises:
   @Config::validate — @anyhow::Error (échec de démarrage) dans les cas, évalués dans cet

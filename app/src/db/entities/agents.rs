@@ -187,7 +187,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
     use miryad_core::resource::AccessPolicy;
@@ -386,7 +385,6 @@ mod tests {
 /// `docs/features/miryad-core-integration.md`).
 #[cfg(test)]
 mod resource_router_regression {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use axum::Router;
     use axum::body::Body;

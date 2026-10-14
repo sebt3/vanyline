@@ -314,7 +314,6 @@ pub async fn get_messages(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use axum::{
         Router,
@@ -429,7 +428,6 @@ mod tests {
 /// réussir et obtenir des ids distincts (cf. `docs/features/miryad-core-integration.md`).
 #[cfg(test)]
 mod id_regression {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use axum::extract::State;
     use miryad_core::auth::AuthUser;

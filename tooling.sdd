@@ -30,6 +30,9 @@ Can modify:
   ./cfgstore/src/lib.rs: ligne d'exemption `cfg(test)` seulement
   ./cli/tests/rpc_stdio_smoke.rs: ligne d'exemption du crate-test seulement
   ./sandbox/tests/maint.rs: ligne d'exemption du crate-test seulement
+  Tout crate d'intégration ./*/tests/*.rs: ligne d'exemption du crate-test seulement
+    (liste nominative devenues redondante — élargie à l'application de la ligne canonique
+    quatre lints, ratification 2026-10-14)
 
 Must:
   Porter dans `[workspace.lints.clippy]` du `Cargo.toml` racine : les groupes `pedantic` et
@@ -39,21 +42,45 @@ Must:
   Exclure `multiple_crate_versions` du harnais (`allow`) : les doublons de versions sont
   imposés par les dépendances amont (`kube`, `rig-core`, `sqlx`…) et `cargo update` ne les
   déduplique pas.
-  Porter dans `[workspace.lints.rust]` : `unsafe_code = "deny"` et `missing_docs = "warn"`
-  (le `warn` passe en `deny` quand la dette `missing_docs` est purgée — décision de
-  Sébastien). Niveau `deny` et non `forbid` : `forbid` rend impossible l'exemption ciblée
+  Porter dans `[workspace.lints.rust]` : `unsafe_code = "deny"` et `missing_docs = "deny"`
+  (bascule warn→deny faite sur GO Sébastien du 2026-10-14 — la purge était terminée partout
+  depuis D6 2026-10-09, le passage est sans coût ; le retirer plus tard est trivial. Le
+  `allow` des racines de crate garde les modules privés hors d'exigence — silence assumé,
+  pas d'extension de la purge aux mods privés). Niveau `deny` et non `forbid` : `forbid`
+  rend impossible l'exemption ciblée
   des trois sites `libc` légitimes (kill de groupe de processus dans `tools/src/command.rs`
   et `sandbox/src/ws/terminal.rs`, `set_var` sous verrou dans les tests de `cli`) ;
   chaque exemption porte un commentaire SAFETY d'une ligne.
   Faire hériter chaque membre du workspace via une table `[lints]` avec `workspace = true`
   à la racine de son `Cargo.toml`.
   Tolérer la famille panic/unwrap uniquement sous `cfg(test)` via
-  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` porté
-  par chaque racine de crate (y compris les bin cibles de `sandbox` et le crate de
-  `cli/src`) et par chaque crate d'intégration sous `tests/` — la ligne canonique est à
-  TROIS lints depuis la ratification Sébastien du 2026-10-07 (« tolérer la FAMILLE
-  panic/unwrap » inclut `clippy::panic` ; précédents `health`, `cfgstore`, `tools` ; les
-  racines encore à deux lints s'alignent au fil de leur purge).
+  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::assert_is_empty))]`
+  porté par chaque racine de crate portant du code sous `#[cfg(test)]` (y compris les bin
+  cibles de `sandbox` et le crate de
+  `cli/src`) et par chaque crate d'intégration sous `tests/` — restriction consignée
+  2026-10-14 : une racine sans AUCUN contenu `cfg(test)` (`sandbox/src/main.rs`,
+  `sandbox/src/bin/maint.rs`) n'a rien à tolérer et ne porte pas la ligne — la clause
+  porte sur la tolérance des tests, pas sur un formalisme vide ; la ligne canonique est à
+  QUATRE lints depuis la ratification Sébastien du 2026-10-14 : tolérer la FAMILLE
+  panic/unwrap (TROIS lints, ratifiés 2026-10-07) et, par la même ligne, le lint pedantic
+  `assert_is_empty` en code de test — la politique retenue est d'écrire
+  `assert!(x.is_empty())` dans les tests et d'exempter le lint, JAMAIS la forme machine
+  `assert_eq!(x, [] as [T; 0])` (laide et verbeuse, appliquée au caractère en D4/D5 et à
+  retirer mécaniquement). Les racines encore à deux ou trois lints s'alignent au fil de
+  leur purge. Forme physique : la ligne pleine excède `max_width` (107 > 100), rustfmt
+  l'impose multiligne (`cfg_attr(test, allow(…))` éclaté) — la multiligne EST la ligne
+  canonique (consigné 2026-10-14 après appli).
+  Nommer les fn de test issues d'un `Scenario` par le TITRE NU du Scenario (`<titre>`),
+  sans préfixe `scenario_` ni suffixe (ratifié 2026-10-14 ; la migration des 16
+  `fn scenario_*` de `sandbox/src/config.rs` et `sandbox/tests/auth.rs` est mécanique —
+  renommages sans assert modifié).
+  Traiter l'empoisonnement de mutex comme NON erreur là où l'état gardé ne porte aucune
+  invariant (busy/todo de `app/src/ws/chat.rs`) : `.lock()` suivi de
+  `.unwrap_or_else(std::sync::PoisonError::into_inner)` comme `lib/src/k8s.rs` — jamais
+  d'`allow(unwrap_used)` de prod sur ces sites (décidé 2026-10-14).
+  Garder les `mod tests` propres : aucun `#![allow(clippy::unwrap_used,
+  clippy::expect_used)]` redondant avec la ligne canonique de la racine — les allows de
+  `mod tests` ne survivent que là où la racine ne couvre pas (justification d'une ligne).
   Tenir à **zéro warning imputable au nouveau code** sur tout fichier touché par une tâche
   (`cargo clippy --workspace --all-targets`), la dette préexistante étant tracée en `Tasks`
   ci-dessous et ne devant jamais grossir.
@@ -204,15 +231,31 @@ Tasks:
     (lecture appliquée en D3c/D5 : les docs `missing_docs` des racines sont inévitables
     sous la tâche « Doc missing_docs purgée partout ») ou interdit-elle littéralement
     d'y toucher ? Ratifier la clarification d'une ligne si la première lecture tient.)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : UNE politique — exemption `cfg(test)` workspace (ligne canonique) ; abandonner `assert_eq!(x, [] as [T; 0])`. (Question d'origine : Style `assert_is_empty` : clippy 1.99 (pedantic, deny) prescrit la forme machine
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : UNE politique — exemption `cfg(test)`
+    workspace (ligne canonique) ; abandonner `assert_eq!(x, [] as [T; 0])`.
+    — FAIT 2026-10-14 (P1, validator PASS : ligne canonique quatre lints sur les 10 racines
+    portant du `cfg(test)` + les 10 crate-tests ; `crds` aligné 2→4 ; forme machine réduite
+    aux deux sites à message légitimes ; restriction consignée au §Must pour les racines
+    sans contenu `cfg(test)`). (Question d'origine : Style `assert_is_empty` : clippy 1.99 (pedantic, deny) prescrit la forme machine
     `assert_eq!(x, [] as [T; 0])` — appliquée au caractère en D4/D5, laide et verbeuse.
     Alternative : exemption ciblée marqueur sur ces sites (précédent sandbox/tests sous
     `#![allow]`). Trancher UNE politique pour tout le workspace.)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : titre nu `<titre>` partout ; renommer les `scenario_*` (mécanique). (Question d'origine : Nommage des fn de test : « test taggé par son titre » porte sur le TAG de
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : titre nu `<titre>` partout ; renommer
+    les `scenario_*` (mécanique).
+    — FAIT 2026-10-14 (P1, validator PASS : 16/16 renommés dans `sandbox/src/config.rs` et
+    `sandbox/tests/auth.rs`, diffs purs sur signatures, zéro `fn scenario_` résiduel). (Question d'origine : Nommage des fn de test : « test taggé par son titre » porte sur le TAG de
     commentaire, mais les fn oscillent entre `scenario_<titre>` (sandbox/tests/auth.rs,
     config.rs) et `<titre>` nu (app, cli, 5D). Deux coexistent dans `config.rs` même.
     Trancher un seul style ; la migration est mécanique (renommages sans assert modifié).)
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : retirer les allows redondants de `mod tests` ; remplacer les 3 `unwrap_used` de `ws/chat.rs` par `PoisonError::into_inner` (comme `lib/k8s.rs`). (Question d'origine : Dettes de nettoyage nées des purges (constatées par validator D5, préexistantes) :
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : retirer les allows redondants de
+    `mod tests` ; remplacer les 3 `unwrap_used` de `ws/chat.rs` par `PoisonError::into_inner`
+    (comme `lib/k8s.rs`).
+    — FAIT 2026-10-14 (P1, validator PASS : 44 allows `app/` retirés, tous sous `cfg(test)`
+    et couverts par la canonique ; 3 sites `chat.rs` convertis, allows de prod retirés,
+    Scenario `mutex_empoisonne_reutilise_la_garde` rouge-sous-l'ancien-code puis vert.
+    Reste hors quota : ~38 allows redondants hors `app/` (lib 7, sandbox 16, tools 4,
+    controller 6, crds 1, cfgstore 4) et le `#![allow]` bare de `sandbox/tests/auth.rs` —
+    purge au fil des packages suivants). (Question d'origine : Dettes de nettoyage nées des purges (constatées par validator D5, préexistantes) :
     ~14 `#![allow(clippy::unwrap_used, clippy::expect_used)]` de `mod tests` dans `app/`
     devenus REDONDANTS avec la ligne canonique trois lints de la racine — les retirer ;
     les 3 allows `unwrap_used` de prod `app/src/ws/chat.rs:70/90/327` (« mutex empoisonné »)
@@ -232,7 +275,10 @@ Tasks:
   [x] Doc `missing_docs` purgée partout — FAIT 2026-10-09 (0 diagnostic `missing_docs`
     sous cap sur le workspace entier, validation D6). La bascule en deny est l'objet du
     `[?]` ci-dessous.
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : GO — passer `missing_docs` en `deny` dans `[workspace.lints]`. (Question d'origine : Bascule `missing_docs = "deny"` dans `[workspace.lints]` : la purge est faite
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : GO — passer `missing_docs` en `deny`
+    dans `[workspace.lints]`.
+    — FAIT 2026-10-14 (P1, validator PASS : bascule warn→deny dans `[workspace.lints.rust]`,
+    batterie entière verte sous deny, zéro doc nouvelle nécessaire). (Question d'origine : Bascule `missing_docs = "deny"` dans `[workspace.lints]` : la purge est faite
     partout, le passage en deny est désormais sans coût — GO ? (contrevient seulement
     si un crate futur veut s'en dispenser ; le retirer plus tard est trivial.))
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : silence du `allow` racine ASSUMÉ — pas d'extension de la purge aux modules privés. (Question d'origine : Portée de `missing_docs` sur les mods privés neufs (S7 cli tui, 2026-10-13) : le

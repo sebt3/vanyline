@@ -1,6 +1,5 @@
 #[cfg(test)]
 pub(crate) mod test_support {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use miryad_core::auth::oidc::OidcLoginResult;
     use miryad_core::auth::{AuthError, MiryadAuthState, OidcClientTrait};
     use openidconnect::{CsrfToken, Nonce, PkceCodeVerifier};
@@ -65,7 +64,6 @@ pub(crate) mod test_support {
 /// aucun comportement — il fige les valeurs de `Returns` du contrat de `test_support`.
 #[cfg(test)]
 mod scenario_tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use miryad_core::auth::AuthError;
     use openidconnect::{Nonce, PkceCodeVerifier};

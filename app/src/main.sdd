@@ -46,7 +46,9 @@ Can read:
 
 Structure:
   Ligne 1 : exemption harnais `#![cfg_attr(test, allow(clippy::unwrap_used,
-    clippy::expect_used))]` — seule ligne de ./main.rs que ../../tooling.sdd autorise à
+    clippy::expect_used, clippy::panic, clippy::assert_is_empty))]` (multiligne rustfmt —
+    ligne canonique quatre lints, `../../tooling.sdd` ratifié 2026-10-14) — seule ligne de
+    ./main.rs que ../../tooling.sdd autorise à
     modifier dans ce fichier ; aucune autre exemption dans le corps.
   Déclarations de modules (9, toutes privées, sans `pub`) : `mod api; mod auth;
   mod config; mod config_store; mod db; mod error; mod k8s; mod migration; mod ws;` —

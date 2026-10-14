@@ -363,7 +363,6 @@ async fn retry_enregistrement(
 }
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use async_trait::async_trait;
     use miryad_core::resource::AccessPolicy;

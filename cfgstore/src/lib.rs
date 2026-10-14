@@ -2,7 +2,15 @@
 //! erreur unique à identifiants stables (`error`), résolution en couches
 //! global/workspace (`layers`), trait d'accès lecture/écriture (`store`) et
 //! son implémentation sur fichiers YAML (`fs_store`).
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 /// Types du domaine de la configuration : providers, modèles, serveurs MCP,
 /// toolsets, agents, skills — avec leurs formes de (dé)sérialisation.

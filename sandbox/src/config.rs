@@ -356,7 +356,7 @@ mod tests {
 
     // Scenario: cooldown_par_defaut
     #[test]
-    fn scenario_cooldown_par_defaut() {
+    fn cooldown_par_defaut() {
         let c = Config::try_parse_from(["vanyline-sandbox"]).unwrap();
         assert_eq!(c.health_cooldown_secs, 30);
         assert_eq!(c.health_poll_secs, 60);

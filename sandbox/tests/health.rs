@@ -48,7 +48,15 @@
 //! réelle à l'échelle 100:1 via `CodeHealth::with_timing` (30 s → 300 ms,
 //! 60 s → 300 ms), les marges d'observation étant elles-mêmes bornées.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,12 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 //! Santé du code d'un dépôt — la « synthèse verte/rouge » calculée par UN SEUL code,
 //! exécuté à l'identique en local (sandbox, cli) et au central (service de revue de MR).

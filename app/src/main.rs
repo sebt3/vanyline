@@ -1,7 +1,15 @@
 //! Binaire `vanyline-app` : SÉQUENCE de démarrage ordonnée (config → DB →
 //! migrations → OIDC → routeur) et assemblage du routeur racine — contrat :
 //! `main.sdd`.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 mod api;
 mod auth;
@@ -263,7 +271,6 @@ fn openapi_spec() -> utoipa::openapi::OpenApi {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

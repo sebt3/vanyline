@@ -4,7 +4,15 @@
 //! reconcileurs (Owner, Project, Sandbox, Application) (spec : `./main.sdd` ;
 //! les contrats de reconcile vivent dans les modules respectifs).
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 mod application;
 mod error;

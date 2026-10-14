@@ -22,6 +22,13 @@ Must:
   `cargo test -p vanyline-health --features ts-rs`, puis
   `git diff --exit-code -- packages/protocol/src/generated/`), et `coverage`
   (mesure de baseline, sans seuil, push sur `main` seulement).
+  Vérifier dans le job `test`, en ÉTAPE SUPPLÉMENTAIRE (décidé 2026-10-14, tâche
+  « feature cargo `test` » de `../../sandbox/src/auth.sdd`) : la feature `test` du crate
+  sandbox (fixtures `auth::test_support`) n'est JAMAIS active dans le graphe de
+  production — `cargo tree -e features -e=no-dev -p vanyline-sandbox` ne doit contenir
+  AUCUNE ligne `vanyline-sandbox feature "test"` (la self-dépendance de dev qui l'active
+  est exclue par `no-dev` ; l'étape est une prothèse de sûreté CI, pas une commande de
+  la batterie locale AGENTS.md).
   Executer les commandes strictement identiques à la batterie d'AGENTS.md — toute
   divergence CI/locale est un défaut de la CI.
   Tourner sur `push` et `pull_request` vers `main` pour tous les jobs de validation.

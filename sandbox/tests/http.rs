@@ -7,7 +7,15 @@
 //! ne sont pas couvertes ici ; en revanche le scrub du paramètre `ticket`
 //! par le `@TraceLayer` (lib.sdd `Must`) l'est, via un harnais de capture
 //! tracing local (`log_capture`).
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::process::Command;
 use std::sync::Arc;

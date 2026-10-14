@@ -86,14 +86,17 @@ Exposes:
     terminate la connexion). Contrat partagé avec ../error.sdd (« chemin WS log-only »).
   @run_socket — privé : corps de la connexion (auth utilisateur, contrôle conversation,
     boucle de lecture, see @Handles). Retourne @Result<(), @AppError>.
-  @try_acquire_busy — privé, `#[allow(clippy::unwrap_used)]` justifié (mutex empoisonné
-    = état corrompu, panic assumé) : `true` si l'id était absent (@HashSet::insert
+  @try_acquire_busy — privé, verrouillé via `.lock()` puis
+    `.unwrap_or_else(std::sync::PoisonError::into_inner)` (empoisonnement NON erreur —
+    décidé 2026-10-14, contrat `../../../tooling.sdd` ; aucun `allow(unwrap_used)` de prod) :
+    `true` si l'id était absent (@HashSet::insert
     inséré), `false` s'il était présent ; extrait de @run_socket pour être testable sans
     WS/DB (note R4 du commentaire source).
   @BusyGuard — privé : @Arc<@Mutex<@HashSet<@i32>>> + id ; @Drop retire l'id au
     drop (synchrone par design — `std::sync::Mutex` et non tokio, commentaire source),
-    donc nettoie aussi si la tâche de tour panique. `#[allow(clippy::unwrap_used)]`
-    sur @Drop::drop (Drop ne peut pas retourner de @Result).
+    donc nettoie aussi si la tâche de tour panique. `.unwrap_or_else(PoisonError::into_inner)`
+    sur le verrou de @Drop::drop (empoisonnement NON erreur, décidé 2026-10-14 — Drop ne
+    peut pas retourner de @Result et l'`into_inner` s'y applique pareil ; aucun allow).
   @ChannelSink — privé : implémente @EventSink ; @emit pousse sur un @mpsc::canal
     unbounded avec `let _ = self.tx.send(event)` — perte silencieuse si le récepteur
     est mort ; ne bloque jamais l'émetteur du tour. Remplace l'ancien @CollectingSink
@@ -110,8 +113,9 @@ Exposes:
   @resolve_extra_mcp — privé : résolution `extra_mcp` depuis @chat_contexts (branches
     exhaustives en @Handles).
   @handle_message — privé : un tour complet (agent, historique, persistance user,
-    @SessionContext, @run_agent_turn, persistance assistant, todo) ; porte
-    `#[allow(clippy::unwrap_used)]` pour le `todo_state.lock().unwrap()` final.
+    @SessionContext, @run_agent_turn, persistance assistant, todo) ; le verrou
+    `todo_state.lock()` passe par `.unwrap_or_else(PoisonError::into_inner)`
+    (décidé 2026-10-14, `../../../tooling.sdd` ; aucun allow).
   @tool_calls_for_persistence — privé pur : @[ToolCallRecord] →
     @vanyline_lib::ToolCall en DROPPANT le champ `id` (la persistance `messages.payload`
     ignore la corrélation ToolCall/ToolResult du flux vivant — commentaire source).
@@ -122,8 +126,9 @@ Exposes:
   @persist_message — privé : insert d'une ligne `vanyline_messages` + rafraîchissement
     manuel de `conversations.updated_at` ; retourne l'id inséré (`last_insert_id as
     i32`) — valeur jamais lue par les deux call-sites de CE fichier.
-  Module @tests — `#[cfg(test)]` avec `#![allow(clippy::unwrap_used,
-    clippy::expect_used)]` : 15 tests — 9 sur les fonctions pures
+  Module @tests — `#[cfg(test)]` sans allow local (couvert par la ligne canonique de
+    `app/src/main.rs`, politique `../../../tooling.sdd` ratifiée 2026-10-14) : 16 tests —
+    10 sur les fonctions pures
     (@tool_calls_for_persistence_drops_id_keeps_rest,
     @tool_calls_for_persistence_empty,
     @try_acquire_busy_first_call_succeeds_second_fails,
@@ -132,7 +137,8 @@ Exposes:
     @todo_to_persist_changed_some_from_none_returns_some,
     @todo_to_persist_unchanged_returns_none,
     @todo_to_persist_changed_to_none_does_not_null_previous,
-    @todo_to_persist_unchanged_none_is_none) + 6 @tokio::test sur @real_db couvrant
+    @todo_to_persist_unchanged_none_is_none, @mutex_empoisonne_reutilise_la_garde)
+    + 6 @tokio::test sur @real_db couvrant
     @resolve_extra_mcp (@hors_contexte_systeme_aucun_outil_aucun_jeton,
     @contexte_settings_resout_config_et_amorce_les_agents, @sandbox_hors_cluster_non_bloquante,
     @contexte_sandbox_sans_sandbox_name_signale_tool_unavailable_server_sandbox,
@@ -195,7 +201,11 @@ Returns:
     l'ordre @created_at ASC, éléments élagués exclus.
   @resolve_extra_mcp @Ok : @crate::system_agents::ContextTools { servers, unavailable,
     revocation } — @servers : 0 à 2 paires @(@McpServer, @McpSelection) selon la table de
-    ../system_agents.sdd (§Outils des agents système : `settings` → config seul ;
+  # Aligné 2026-10-14 (décision `../system_agents.sdd` ratifiée en revue) : le serveur
+  # sandbox porte le JWT du SA de l'Owner, JAMAIS le jeton d'API jetable (celui-ci est
+  # réservé aux serveurs de l'app elle-même — la sandbox n'accepte que le JWT de l'Owner
+  # selon `/sandbox/src/auth.sdd`).
+  ../system_agents.sdd (§Outils des agents système : `settings` → config seul ;
     `home`/`project` → config + domain ; `sandbox` → domain + sandbox (ou domain seul en
     panne sandbox, serveur marqué @unavailable) ; hors contexte agent système → vide).
     @unavailable : paires (nom du serveur, raison) rendues au client en @ToolUnavailable.
@@ -204,8 +214,9 @@ Returns:
     l'en-tête du jeton d'API jetable de l'utilisateur. Serveur sandbox : @McpServer {
     name: `"sandbox"`, transport: @McpTransport::HttpStreamable,
     url interne ClusterIP `http://{service}.{namespace}.svc:{MCP_PORT}/mcp` (construit
-    par la lib), en-tête d'autorisation du jeton d'accès sandbox (kind : `[?]`
-    ../system_agents.sdd) } + @McpSelection { server: `"sandbox"`, tools: vec![] }
+    par la lib), en-tête d'autorisation `Bearer <owner_token>` — JWT du SA de l'Owner
+    (audience `vanyline-sandbox`, demandé APRÈS la garde IDOR, `../system_agents.sdd`) }
+    + @McpSelection { server: `"sandbox"`, tools: vec![] }
     — `tools` vide = sélection de TOUS les tools (contrat @McpSelection de
     `../../../cfgstore/src/domain.rs`, doc « Vide = tous ("*") »).
 
@@ -232,11 +243,12 @@ Raises:
   @forward_events : @serde_json::to_string `.unwrap_or_default()` — une erreur de
     sérialisation (théorique, @ChatEvent est totalement sérialisable) enverrait un frame
     texte VIDE au client plutôt que de rompre (`Tasks` `[?]`).
-  @ChannelSink::emit et @send_* : aucune erreur (pertes `let _ =`). Panics possibles
-    sous le harnais : @try_acquire_busy/@BusyGuard::drop/@handle_message verrouillent
-    des @Mutex @std avec `.unwrap()` sous `#[allow(clippy::unwrap_used)]` justifié —
-    un mutex empoisonné (panique antérieure) propage la panique ; c'est le seul chemin
-    de panic du fichier hors `#[cfg(test)]`.
+  @ChannelSink::emit et @send_* : aucune erreur (pertes `let _ =`). Pas de chemin de panic
+    hors `#[cfg(test)]` : @try_acquire_busy/@BusyGuard::drop/@handle_message verrouillent
+    des @Mutex @std via `.unwrap_or_else(std::sync::PoisonError::into_inner)` — un mutex
+    empoisonné réutilise la garde au lieu de paniquer (empoisonnement NON erreur, décidé
+    2026-10-14, contrat `../../../tooling.sdd` ; les états gardés busy/todo ne portent
+    aucune invariant à préserver).
 
 Handles:
   Ordre exact de @run_socket : (1) @resolve_user(db, subject, email) — contrat
@@ -292,7 +304,9 @@ Handles:
       persistance assistant sur tour raté).
     8. @tool_calls_for_persistence (drop des `id`) puis @persist_message(assistant,
       response_text, tool_calls @None si liste vide) — APRÈS réussite seulement.
-    9. relecture de @ctx.todo_state (`.lock().unwrap()`) → @todo_to_persist(final,
+    9. relecture de @ctx.todo_state (`.lock()` puis
+      `.unwrap_or_else(std::sync::PoisonError::into_inner)`, décidé 2026-10-14) →
+      @todo_to_persist(final,
       initial) → si @Some : relecture de la conversation (absence →
       @ConversationNotFound, tour en échec APRÈS persistance du message assistant —
       voir `Tasks`) puis update de la colonne `todo`. Si @None : aucun update — l'état
@@ -324,9 +338,9 @@ Handles:
       - sandbox : @resolve_sandbox_server — toute panne → @unavailable.push((`"sandbox"`
         (littéral, quel que soit le motif), raison)) et le serveur domain du contexte est
         CONSERVÉ ; succès → paire @("sandbox", HttpStreamable, url interne ClusterIP
-        construite par @client.sandbox_mcp_url, en-tête d'autorisation du jeton du tour —
-        kind du jeton : `[?]` ../system_agents.sdd E1) + sélection tools vides (= tous
-        les tools). @resolve_sandbox_server, branches dans l'ordre :
+        construite par @client.sandbox_mcp_url, en-tête `Bearer <owner_token>` — JWT du SA
+        de l'Owner demandé APRÈS la garde IDOR, décidé 2026-10-14) + sélection tools vides
+        (= tous les tools). @resolve_sandbox_server, branches dans l'ordre :
         @data["sandbox_name"] absent/non-chaîne → raison `"contexte sandbox invalide
         (sandbox_name absent)"` ; @resolve_owner_name @Ok(@None) → raison `"aucun owner
         K8s associé à cet utilisateur"` ; @crate::k8s::client / @get_sandbox /
@@ -335,7 +349,9 @@ Handles:
         — garde IDOR obligatoire, même vérification que `api::sandboxes::get_sandbox`
         (sans elle, tout utilisateur authentifié ferait résoudre les tools MCP d'une
         sandbox d'autrui en la nommant dans @ChatContextInput à la création) ;
-        @sandbox_mcp_url en @Err → raison brute. Garde lue sur le vrai kube (aucune
+        @sandbox_mcp_url en @Err → raison brute ; @client.owner_token en @Err → raison
+        brute — le jeton n'est demandé qu'après la garde IDOR et l'URL résolue (décidé
+        2026-10-14, `../system_agents.sdd`). Garde lue sur le vrai kube (aucune
         couture d'injection : anti-mock kube ../k8s.sdd) → test cluster-manuel.
   @load_history : filtre @messages::Column::ConversationId, trie @CreatedAt ASC ;
     chaque `payload` est désérialisé en @vanyline_lib::Message ; payload JSON malformé
@@ -426,10 +442,10 @@ Must:
   - Construire @SessionContext avec : store scotché à l'utilisateur authentifié
       (@PgConfigStore::new(db, user_id)), `local_tools` vides,
       `subagent_depth_max = 1`, `model_override = @None`, todo semé depuis la colonne.
-  - Rester sans `println!`/`eprintln!`/`dbg!` ; les seuls `unwrap` de production sont
-      les 3 verrous @Mutex sous les 2 `#[allow(clippy::unwrap_used)]` commentés
-      (harnais `../../../tooling.sdd` : exemption justifiée citant la cause) ; le
-      module de tests garde son `#![allow]` confiné sous `#[cfg(test)]`.
+  - Rester sans `println!`/`eprintln!`/`dbg!` ; AUCUN `unwrap` de production (les trois
+      verrous @Mutex passent par `.unwrap_or_else(std::sync::PoisonError::into_inner)`,
+      empoisonnement NON erreur — décidé 2026-10-14, contrat `../../../tooling.sdd`) ; le
+      module de tests ne porte aucun allow (ligne canonique de la racine).
 
 Must not:
   - Exposer hors du fichier quoi que ce soit d'autre que @ws_chat_handler (rendre
@@ -601,6 +617,14 @@ Scenario: contexte sandbox sans sandbox_name signale ToolUnavailable server sand
     contexte — le tour continue sans la sandbox (test
     `contexte_sandbox_sans_sandbox_name_signale_tool_unavailable_server_sandbox`)
 
+Scenario: mutex_empoisonne_reutilise_la_garde
+  # Contrat tooling.sdd décidé 2026-10-14 : empoisonnement NON erreur sur busy/todo
+  # (`.unwrap_or_else(PoisonError::into_inner)`, aucun allow de prod).
+  Given le @Mutex busy dont la garde a été empoisonnée volontairement (poison du test)
+  When @try_acquire_busy insère un id, puis @BusyGuard est droppé
+  Then aucune panique : l'insertion et le retrait opèrent sur la garde récupérée
+    (test unitaire en `mod tests` de ws/chat.rs, empoisonnement via @Mutex::poison)
+
 Scenario: sandbox nommee hors du perimetre de l utilisateur est refusee
   # Requalifié en intégration CLUSTER-MANUEL 2026-10-14 : la garde lit Sandbox puis
   # Project via le client kube réel (`../k8s.sdd` : anti-mock kube, pas de seam
@@ -610,7 +634,9 @@ Scenario: sandbox nommee hors du perimetre de l utilisateur est refusee
     diffère de l'owner de l'utilisateur (cluster de test — convention anti-mock kube
     de ../k8s.sdd)
   When @resolve_extra_mcp résout
-  Then @ToolUnavailable { server: sandbox_name, reason: `"sandbox hors du périmètre de
+  Then @ToolUnavailable { server: `"sandbox"` — LITTÉRAL pour toutes les pannes sandbox,
+    décidé 2026-10-14 (le champ ne porte jamais le nom de la sandbox fautive) , reason:
+    `"sandbox hors du périmètre de
     cet utilisateur"` } est émis, @Ok rendu sans serveur de cette sandbox, et AUCUNE
     url MCP de cette sandbox n'est produite — la garde IDOR ne peut pas être
     court-circuitée par un contexte pointant une sandbox d'autrui
@@ -622,12 +648,10 @@ Scenario: contexte sandbox valide produit le serveur MCP sandbox tous tools
   When @resolve_extra_mcp résout
   Then la liste rendue a exactement une paire : @McpServer { name: `"sandbox"`,
     transport: @McpTransport::HttpStreamable, url interne `…/mcp` issue de
-    @sandbox_mcp_url, EN-TÊTE d'autorisation portant le jeton d'accès de la sandbox du
-    contexte} et @McpSelection { server: `"sandbox"`, tools:
+    @sandbox_mcp_url, EN-TÊTE `Bearer <owner_token>` portant le JWT du SA de l'Owner
+    (audience `vanyline-sandbox` — décidé 2026-10-14, la sandbox n'accepte que lui selon
+    `/sandbox/src/auth.sdd`)} et @McpSelection { server: `"sandbox"`, tools:
     `[]` } — tools vides = sélection de tous les tools ; aucun @ToolUnavailable
-    (quel jeton — utilisateur ou Owner-SA — : objet du `[?]` de ../system_agents.sdd, la
-    sandbox n'acceptant physiquement que le JWT de l'Owner selon
-    `/sandbox/src/auth.sdd`)
 
 Scenario: jeton_revoque_malgre_tour_en_erreur
   # Ajouté 2026-10-14 (S8) — contrat §Must « révoquer le jeton à la fin du tour, succès

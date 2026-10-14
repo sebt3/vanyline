@@ -1409,11 +1409,11 @@ mod tests {
     fn compute_status_worktrees_and_last_fetch_empty() {
         let project = make_project(None);
         let status_true = compute_status(&project, true);
-        assert_eq!(status_true.worktrees, [] as [std::string::String; 0]);
+        assert!(status_true.worktrees.is_empty());
         assert!(status_true.last_fetch.is_none());
 
         let status_false = compute_status(&project, false);
-        assert_eq!(status_false.worktrees, [] as [std::string::String; 0]);
+        assert!(status_false.worktrees.is_empty());
         assert!(status_false.last_fetch.is_none());
     }
 

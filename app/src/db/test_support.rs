@@ -1,5 +1,4 @@
 #![cfg(test)]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;

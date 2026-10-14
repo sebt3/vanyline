@@ -66,9 +66,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conve
 /// `false` si déjà occupée (l'appelant doit renvoyer une erreur busy sans
 /// spawn). Extrait de `run_socket` pour être testable sans WebSocket/DB
 /// (R4).
-#[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
 fn try_acquire_busy(busy: &Mutex<HashSet<i32>>, conversation_id: i32) -> bool {
-    let mut guard = busy.lock().unwrap();
+    let mut guard = busy
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if guard.contains(&conversation_id) {
         false
     } else {
@@ -86,9 +87,11 @@ struct BusyGuard {
 }
 
 impl Drop for BusyGuard {
-    #[allow(clippy::unwrap_used)] // Drop::drop ne peut pas retourner Result ; mutex empoisonne = panic attendu
     fn drop(&mut self) {
-        self.busy.lock().unwrap().remove(&self.conversation_id);
+        self.busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.conversation_id);
     }
 }
 
@@ -254,7 +257,6 @@ async fn resolve_extra_mcp(
 /// `run_agent_turn` empêche d'atteindre le `persist_message` final en cas
 /// d'échec). C'est cette sémantique qui fait référence — le RPC
 /// (`cli/src/rpc/handlers.rs`) est aligné dessus séparément.
-#[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
 #[allow(clippy::too_many_arguments)] // ws/chat.sdd handle_message : les 8 parametres sont le contrat du tour (2026-10-04)
 async fn handle_message(
     tx: &mpsc::UnboundedSender<ChatEvent>,
@@ -326,7 +328,11 @@ async fn handle_message(
     )
     .await?;
 
-    let current_todo = ctx.todo_state.lock().unwrap().clone();
+    let current_todo = ctx
+        .todo_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     if let Some(todo) = todo_to_persist(current_todo, todo_initial.as_ref()) {
         let mut active: crate::db::entities::conversations::ActiveModel =
             crate::db::entities::conversations::Entity::find_by_id(conversation_id)
@@ -446,7 +452,6 @@ async fn persist_message(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
@@ -510,6 +515,40 @@ mod tests {
             assert!(busy.lock().unwrap().contains(&conv));
         }
         assert!(!busy.lock().unwrap().contains(&conv));
+    }
+
+    /// Scenario ws/chat.sdd `mutex_empoisonne_reutilise_la_garde` (contrat
+    /// tooling.sdd decide 2026-10-14 : empoisonnement NON erreur sur busy —
+    /// `.unwrap_or_else(PoisonError::into_inner)`, aucun allow de prod).
+    #[test]
+    fn mutex_empoisonne_reutilise_la_garde() {
+        let busy = Arc::new(Mutex::new(HashSet::new()));
+        // Poison volontaire : un thread panique en detenant la garde (le
+        // seul chemin std qui empoisonne un Mutex).
+        let poison = Arc::clone(&busy);
+        let handle = std::thread::spawn(move || {
+            let _guard = poison.lock().unwrap();
+            panic!("poison volontaire (test)");
+        });
+        let _ = handle.join();
+        assert!(busy.is_poisoned(), "precondition : garde empoisonnee");
+        // try_acquire_busy insere sans paniquer sur la garde recuperee.
+        assert!(try_acquire_busy(&busy, 7));
+        assert!(!try_acquire_busy(&busy, 7));
+        // Le drop du BusyGuard retire sans paniquer lui non plus.
+        {
+            let _guard = BusyGuard {
+                busy: Arc::clone(&busy),
+                conversation_id: 7,
+            };
+        }
+        assert!(
+            !busy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&7),
+            "le retrait a opere sur la garde recuperee"
+        );
     }
 
     #[test]

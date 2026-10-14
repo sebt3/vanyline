@@ -5,7 +5,15 @@
 //! son propre helper [`encode_git_path`] et son jeu d'encodage [`GIT_ENCODE_SET`],
 //! le câblage des modules et les re-exports canoniques (cf. `./lib.sdd`). Le module
 //! `k8s` n'existe que sous la feature cargo `k8s`.
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use percent_encoding::SIMPLE_ENCODE_SET;
 use percent_encoding::define_encode_set;

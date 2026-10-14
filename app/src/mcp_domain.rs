@@ -1516,7 +1516,6 @@ async fn t_cancel_run(state: &AppState, principal: &AuthPrincipal, args: &Value)
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
     use crate::api;

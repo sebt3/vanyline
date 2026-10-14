@@ -16,7 +16,15 @@
 //! (`spawn_aux_startup` : `current_dir(sandbox_root)`) — ruff y trouve le
 //! `pyproject.toml`/`ruff.toml`/`.ruff.toml` du projet, zéro interpolation.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 use std::collections::HashMap;
 use std::process::ExitCode;

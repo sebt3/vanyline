@@ -278,9 +278,11 @@ Must:
     @Display de l'erreur sans préfixe ajouté par ce fichier — l'identifiant
     `VNL-K8S-001` vient de @VnyError, pas d'un formatage local).
   Garder la ligne `#![cfg_attr(test, allow(clippy::unwrap_used,
-    clippy::expect_used, clippy::panic, unsafe_code))]` limitée à `cfg(test)` (harnais
-    ../../tooling.sdd). La ligne = les trois lints canoniques RATIFIÉS le 2026-10-07
-    (« A » : `unwrap_used`, `expect_used`, `clippy::panic` — l'ajout de `panic` en
+    clippy::expect_used, clippy::panic, clippy::assert_is_empty, unsafe_code))]` limitée à
+    `cfg(test)` (harnais
+    ../../tooling.sdd). La ligne = les quatre lints canoniques RATIFIÉS le 2026-10-14
+    (« A » : `unwrap_used`, `expect_used`, `clippy::panic` ratifiés 2026-10-07,
+    `clippy::assert_is_empty` ajouté 2026-10-14 — l'ajout de `panic` en
     2026-10-09 aligne CE fichier sur la ratification, les panics de test y existent
     depuis toujours) + `unsafe_code`, exception propre à CE fichier déjà épinglée avant
     la ratification, couvrant les trois blocs `unsafe { set_var }` sous `cfg(test)` de

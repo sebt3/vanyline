@@ -3621,7 +3621,7 @@ mod tests {
             resolved.bin,
             "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
         );
-        assert_eq!(resolved.args, [] as [std::string::String; 0]);
+        assert!(resolved.args.is_empty());
     }
 
     #[test]

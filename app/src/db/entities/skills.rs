@@ -43,7 +43,6 @@ impl MiryadResource for Entity {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
     use miryad_core::resource::AccessPolicy;

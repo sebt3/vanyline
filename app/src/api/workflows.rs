@@ -1094,7 +1094,6 @@ pub async fn cancel_run(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
     use crate::db::entities::owner_links;

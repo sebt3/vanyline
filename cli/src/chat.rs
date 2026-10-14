@@ -776,7 +776,7 @@ mod tests {
         };
         let store = FsConfigStore::new(layers);
         let result = workspace_source_summary(&store).await;
-        assert_eq!(result, [] as [std::string::String; 0]);
+        assert!(result.is_empty());
     }
 
     // 2. workspace_layer_with_no_overrides_yields_empty_summary
@@ -790,7 +790,7 @@ mod tests {
         };
         let store = FsConfigStore::new(layers);
         let result = workspace_source_summary(&store).await;
-        assert_eq!(result, [] as [std::string::String; 0]);
+        assert!(result.is_empty());
     }
 
     // 3. workspace_agent_reported
@@ -921,7 +921,7 @@ mod tests {
             "l'en-tete authorization Bearer du tour doit être posé (jamais de headers vides)"
         );
         assert_eq!(selection.server, "toolbox");
-        assert_eq!(selection.tools, [] as [std::string::String; 0]);
+        assert!(selection.tools.is_empty());
         assert_eq!(ctx.subagent_depth_max, 1);
         assert_eq!(
             ctx.model_override.as_deref(),
@@ -976,7 +976,7 @@ mod tests {
             Some("Bearer jeton-de-test")
         );
         assert_eq!(selection.server, "toolbox");
-        assert_eq!(selection.tools, [] as [std::string::String; 0]);
+        assert!(selection.tools.is_empty());
         // Même logique que le cas non-json : local_tools vides, toolbox dans extra_mcp
     }
 

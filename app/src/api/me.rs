@@ -29,7 +29,6 @@ pub async fn handler_me(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use axum::{
         Router,

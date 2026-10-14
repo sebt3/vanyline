@@ -389,7 +389,6 @@ pub(crate) fn dynamic_to_json(value: &rhai::Dynamic) -> Value {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use miryad_core::workflow::MiryadWorkflowStep;
     use miryad_core::workflow::RunInfo as EngineRunInfo;

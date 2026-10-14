@@ -106,7 +106,6 @@ pub async fn purge_older_than(db: &DatabaseConnection, days: i64) -> Result<u64,
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
     use crate::db::test_support::real_db;

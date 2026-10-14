@@ -5,7 +5,13 @@
 
 #![cfg_attr(
     test,
-    allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, unsafe_code)
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty,
+        unsafe_code
+    )
 )]
 
 mod chat;

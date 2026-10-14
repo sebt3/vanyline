@@ -130,7 +130,6 @@ fn libelle_portee(scope: RunScope) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use miryad_core::workflow::StepDefinition;
 

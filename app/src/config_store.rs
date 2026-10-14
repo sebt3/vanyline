@@ -307,7 +307,6 @@ impl ConfigStore for PgConfigStore {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn sample_provider(
@@ -570,7 +569,7 @@ mod tests {
             mcp: serde_json::Value::Null,
         };
         let toolset = domain_toolset(&row);
-        assert_eq!(toolset.local_tools, [] as [String; 0]);
+        assert!(toolset.local_tools.is_empty());
         assert!(toolset.mcp.is_empty());
     }
 
@@ -758,7 +757,7 @@ mod tests {
             serde_json::json!([]),
         );
         let result = domain_agent_record(&agent, &[row]).unwrap();
-        assert_eq!(result.toolsets, [] as [String; 0]);
+        assert!(result.toolsets.is_empty());
     }
 
     // 28. domain_agent_record_invalid_skills_json_defaults_auto

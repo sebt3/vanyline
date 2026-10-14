@@ -3,7 +3,15 @@
 //! recherche de fichiers et de motifs (`search`), bornage de sortie
 //! (`output`) et déclarations JSON des schémas d'outils (`mcp`). Erreur
 //! unique à identifiants stables `VNL-TLS-*` (`error`).
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::assert_is_empty
+    )
+)]
 
 /// Exécution de commandes shell bornées (timeout, sortie bornée tête+queue).
 pub mod command;
