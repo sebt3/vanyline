@@ -90,20 +90,20 @@ Tasks:
     figée par chat.sdd/main.sdd (aucun flag TUI) et le défaut « molette activée » est en
     dur. Élargir la grammaire d'un flag global `--no-mouse`, ou retirer le drapeau du
     départ et assumer la molette toujours active ?
-  [?] Panique dans la tâche de tour (S7, 2026-10-13) : non détectée par la boucle — le
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : DÉTECTER — poller le `JoinHandle`, effet « tour interrompu » (jamais `Running` à vie) ; Scenario + test. (Question d'origine : Panique dans la tâche de tour (S7, 2026-10-13) : non détectée par la boucle — le
     `JoinHandle` n'est pas pollé, le canal mpsc fermé par la chute de la tâche se traduit
     par une fin de flux mais l'état reste `Running` si la panique n'a pas rendu de
     résultat. Contracter la détection (poll du handle, effet « tour interrompu ») dans
-    §Tour, ou assumer (le cas est une bug de notre code, pas un événement utilisateur) ?
-  [?] @TuiSession hors §Exposes (revue S7, 2026-10-14) : la struct réelle porte
+    §Tour, ou assumer (le cas est une bug de notre code, pas un événement utilisateur) ?)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ — ajouter `toolbox` et `mouse` à §Exposes. (Question d'origine : @TuiSession hors §Exposes (revue S7, 2026-10-14) : la struct réelle porte
     `toolbox` (requis par le §Must « jeton du toolbox par tour » de `../chat.sdd` — le
     §Exposes est inachevé sur ce point) et `mouse` (départ du `[?]` souris, en dur à
-    `true`). Ratifier ces deux champs dans §Exposes ?
-  [?] Ligne finale de sortie « par le backend » (§Handles Sortie vs code, revue S7,
+    `true`). Ratifier ces deux champs dans §Exposes ?)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : reformuler §Sortie en « une ligne finale écrite après restauration, hors écran alternatif ». (Question d'origine : Ligne finale de sortie « par le backend » (§Handles Sortie vs code, revue S7,
     2026-10-14) : le code l'écrit via `std::io::Write` APRÈS restauration de l'écran
     (commentaire « hors backend » assumé — le harnais `print_stdout` interdit d'écrire
     dans le backend après sa chute). Reformuler §Sortie en « une ligne finale écrite après
-    restauration, hors écran alternatif », ou exiger le backend ?
+    restauration, hors écran alternatif », ou exiger le backend ?)
   [ ] Convertir chaque Scenario en test (`TestBackend` pour la vue, tests unitaires purs pour
     l'état).
 

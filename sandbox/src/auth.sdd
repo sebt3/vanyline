@@ -168,6 +168,13 @@ Must not:
     la construction du header `WWW-Authenticate` ne doit plus dépendre d'une URL d'opérateur.
 
 Tasks:
+  [ ] Refresh JWKS non borné quand le cache est périmé et l'apiserver injoignable (revue
+    2026-10-14) : `ensure_keys` retente à CHAQUE requête (jusqu'à 5 s de blocage chacune), le
+    throttle de 30 s ne couvrant que le refresh forcé par `kid` inconnu. Appliquer le même
+    plancher d'intervalle aux rafraîchissements d'expiration en échec (cache ancien conservé).
+  [ ] Feature cargo `test` : la doc de `Cargo.toml` et de `test_support` parle de `test-support`
+    alors que la feature s'appelle `test` ; ajouter un contrôle CI (`cargo tree -e features`
+    sur le build release) prouvant qu'elle n'est jamais active en production.
   [x] Remplacer le code existant (modes `no_auth`/`static_token`/OIDC/groupes, @AccessLevel,
     @check_access, `oidc_*`, `public_url`, `oauth_metadata_url`) par ce contrat ; supprimer les
     décisions du 2026-09-27 qu'il remplace (RBAC Read/Admin « à rendre effectif »,
@@ -185,10 +192,10 @@ Tasks:
     (`https://192.168.60.222:6443/…`) : NE PAS l'utiliser, la sandbox lit `jwks_url` (défaut
     `https://kubernetes.default.svc/openid/v1/jwks`). Repli ConfigMap/`jwks_file` conservé
     pour un autre cluster.
-  [?] Lier le jeton au pod (`boundObjectRef` de TokenRequest) : invalide le jeton à la
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : NON RETENU en v1 (TTL 900 s) ; à reconsidérer si les jetons circulent plus que prévu. (Question d'origine : Lier le jeton au pod (`boundObjectRef` de TokenRequest) : invalide le jeton à la
     suppression du pod, au prix d'une demande de jeton par sandbox (UID de pod connu
     d'`app`). Non retenu en v1 ; à reconsidérer si les jetons d'un Owner circulent plus que
-    prévu.
+    prévu.)
   [x] Convertir chaque Scenario en test taggé par son titre (`test_support` fournit clés et
     jetons) ; les tests des autres specs qui s'authentifiaient en `no_auth` ou `static_token`
     présentent désormais un jeton de test valide pour l'Owner configuré. FAIT 2026-10-08,

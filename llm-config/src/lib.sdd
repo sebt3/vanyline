@@ -80,9 +80,9 @@ Tasks:
   [?] Préfixe de tables : conserver `vanyline_*` (aucune migration de données) ou nommer
     neutre pour un service non-vanyline ? Aucune donnée réelle à préserver aujourd'hui
     (cf. architecture.md, « Stockage »), c'est donc le bon moment si l'on veut renommer.
-  [?] `PgConfigStore` renvoie `CfgStoreError` ; `app/src/error.rs` porte le `From` vers
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : le `From<CfgStoreError>` reste dans `app/` ; le crate n'expose que `CfgStoreError`. (Question d'origine : `PgConfigStore` renvoie `CfgStoreError` ; `app/src/error.rs` porte le `From` vers
     `AppError` : confirmer que ce `From` reste dans `app/` et que le crate n'expose que
-    `CfgStoreError`.
+    `CfgStoreError`.)
   [ ] Déplacer fichier par fichier, avec son `.sdd`, en gardant la batterie de tests verte à
     chaque étape ; amender /app/src/*.sdd et /vanyline.sdd (liste des crates) au moment du
     déplacement, pas avant.

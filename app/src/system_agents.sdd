@@ -88,29 +88,26 @@ Must not:
   Permettre la suppression ou la modification du prompt d'un agent système par le CRUD générique.
 
 Tasks:
-  [?] Jeton du serveur `sandbox` en contexte `sandbox` (S8, validator 2026-10-14) :
-    `Exposes`/`Handles` contractent le jeton de l'Owner pour ce serveur, mais
-    l'implémentation lui injecte le jeton d'API utilisateur jetable — et
-    `/sandbox/src/auth.sdd` n'accepte PHYSIQUEMENT que le JWT SA de l'Owner (audience
-    `vanyline-sandbox`) : en cluster, ce serveur répondra 401. Le §Must de
-    `../ws/chat.sdd` dit quant à lui « jeton d'API jetable de l'utilisateur » sans
-    distinguer. Corriger le code vers `owner_token` (`vanyline-lib` feature `k8s`, déjà
-    consommé par `workflow/steps`) — ou ratifier le jeton utilisateur (alors la sandbox
-    resterait injoignable par ce chemin, et il faut le dire) ? Arbitrage explicite dû.
-  [?] `default_model` pointant un fournisseur supprimé (S8, validator 2026-10-14) :
+  [x] Jeton du serveur `sandbox` en contexte `sandbox` (S8, validator 2026-10-14) : TRANCHÉ
+    par revue 2026-10-14 — jeton de l'Owner (`owner_token`), jamais le jeton d'API
+    utilisateur (la sandbox n'accepte que le JWT du SA de l'Owner, et un jeton valide côté app
+    ne quitte pas l'app). Demandé APRÈS la garde IDOR ; échec ⇒ serveur `unavailable`, non
+    bloquant. Test `sandbox_porte_le_jeton_de_l_owner`. Reste : le §Must de `../ws/chat.sdd`
+    dit encore « jeton d'API jetable » pour ce serveur — à aligner (`[ ]` ws/chat.sdd).
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : rendre `NoModelProfile` (l'utilisateur reconfigure) ; aligner le commentaire du code ; ajouter un Scenario. (Question d'origine : `default_model` pointant un fournisseur supprimé (S8, validator 2026-10-14) :
     l'implémentation rend `LlmProviderNotFound` alors que le commentaire dit « comme sans
     réglage » (`NoModelProfile`) — aucun Scenario ne contracte ce cas. Rendre
     `NoModelProfile` (l'utilisateur doit reconfigurer) ou une erreur dédiée explicite ?
-    Puis aligner le commentaire.
-  [?] Rendu de `NoModelProfile` (S8, 2026-10-13) : `error.sdd` ne contracte pas cette
+    Puis aligner le commentaire.)
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ — 422 `UnprocessableReference(NoModelConfigured)`, marqueur `VNL-LLM-008` réutilisé, aucune variante dédiée. (Question d'origine : Rendu de `NoModelProfile` (S8, 2026-10-13) : `error.sdd` ne contracte pas cette
     variante — l'implémentation rend `AppError::UnprocessableReference(VnyError::
     NoModelConfigured)` (422, marqueur `VNL-LLM-008` réutilisé, aucun type local). Ratifier,
-    ou créer une variante dédiée `error.sdd` (nouveau code `VNL-*`) ?
-  [?] Nom des lignes d'agent système (S8, 2026-10-13) : non contracté ; retenu nom = clé
+    ou créer une variante dédiée `error.sdd` (nouveau code `VNL-*`) ?)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : PRÉFIXER — nom = `system-<clé>` (`system-config`, `system-home`…) pour ne pas heurter `UNIQUE (owner_id, name)` ; code, Scenarios et lookup `system_agent_for` à aligner. (Question d'origine : Nom des lignes d'agent système (S8, 2026-10-13) : non contracté ; retenu nom = clé
     (`config`, `home`, `project`, `sandbox`) — mais l'`UNIQUE (owner_id, name)` de la
     migration m20260825_000006 refuse alors l'amorçage si l'utilisateur a déjà un agent
     ordinaire de ce nom. Préfixer (`system-config`…) ? Assumer la collision (l'amorçage
-    échoue et l'utilisateur renomme) ? Ou relaxer l'unique sur `name` ?
+    échoue et l'utilisateur renomme) ? Ou relaxer l'unique sur `name` ?)
   [-] TRANCHÉ (2026-10-04) : modèle par défaut global = réglage `default_model`, configurable par
     l'API avec un jeton d'administrateur et par l'interface pour les utilisateurs qui en ont les
     droits (../db/entities/app_settings.sdd).

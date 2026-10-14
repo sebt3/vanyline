@@ -202,6 +202,13 @@ Returns:
     mcp_servers, skills, toolsets, model_profiles, agents) — CRUD monté en CHEMINS
     COMPLETS `/api/v1/{resource-kebab}` et `/api/v1/{resource-kebab}/{id}` (chemins
     attestés par le test de @openapi_spec, le frontend les appelle littéralement).
+  - @merge(@mcp_config_router()) — monté revue 2026-10-14 (part `[x]` de la tâche « Moteur
+    de workflow et MCP » ci-dessous) : `miryad_core::mcp::@mcp_router` sur @route
+    `"/mcp"`, `POST` seul, registre @McpToolRegistry (@OutputFormat::Json) avec les SIX
+    entités de configuration dans l'ordre llm_providers, mcp_servers, skills, toolsets,
+    model_profiles, agents — CRUD de la configuration par MCP avec l'identité de l'appelant
+    (401 sans jeton, jamais 404 ; test `mcp_config_monte_et_authentifie`) ; sans collision
+    avec `/mcp/domain` (chemins distincts, pas de préfixe partagé en service).
   - @merge(mcp_domain::@mcp_domain_router()) — monté M1 2026-10-11 (avant les deux
     @nest) ; le routeur interne porte @route(`"/mcp/domain"`, @post(@handle)) : MCP de
     domaine JSON-RPC 2.0 POST seul, extracteur @AuthPrincipal (cookie OU jeton), 21
@@ -380,17 +387,25 @@ Depends on:
     opérationnels de `GET /health`, `LISTEN_ADDR`, `STATIC_DIR`.
 
 Tasks:
-  [?] Amorçage des agents système (S8, 2026-10-13) : le point d'appel contracté est
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : appeler AUSSI `ensure_system_agents` (idempotent) à la création de conversation en contexte `settings` (`api/conversations.rs`) ; pas de hook miryad-core amont. (Question d'origine : Amorçage des agents système (S8, 2026-10-13) : le point d'appel contracté est
     `ensure_system_agents` à la PREMIÈRE CONNEXION d'un utilisateur, mais `auth_router` de
     miryad-core ne prête aucun hook de login. L'implémentation branche l'amorçage idempotent
     dans `ws/chat.rs::resolve_extra_mcp` (contextes système seulement) — la voie
     `api/conversations.rs` (création de conversation en contexte `settings`) n'est pas
     couverte. Trancher : hook miryad-core (amont), amorçage aussi à la création de
-    conversation, ou assumption du point actuel ?
+    conversation, ou assumption du point actuel ?)
   [ ] Moteur de workflow et MCP (2026-10-04) : démarrer `workflow::start_runtime` après les
+    [x] Part `POST /mcp` FAITE (revue 2026-10-14) : `mcp_config_router()` monte
+      `miryad_core::mcp::mcp_router` avec les SIX ressources de configuration ; test
+      `mcp_config_monte_et_authentifie` (401 sans jeton, 200 `tools/list` ≥ 30 outils).
+      Restent : entités `project_workflows`/`workflow_runs`/`app_settings` au `resource_router`
+      et au registre MCP, `ensure_system_agents`, purge quotidienne des runs.
     migrations quand `VNL_RESTATE_ADMIN_URL` est posée (../workflow/runtime.sdd) ; monter
     `miryad_core::mcp::mcp_router` (`POST /mcp`, CRUD de la configuration + définitions de
-    workflow + rattachements, lecture seule des runs) ET `mcp_domain_router` (`POST /mcp/domain`) ;
+    workflow + rattachements, lecture seule des runs) — FAITE pour la part « CRUD de la
+    configuration » (six ressources, voir `[x]` ci-dessus et §Exposes) ; RESTE à y ajouter
+    définitions de workflow, rattachements et lecture seule des runs — ET monter
+    `mcp_domain_router` (`POST /mcp/domain`, fait M1 2026-10-11) ;
     ajouter les entités `project_workflows`, `workflow_runs` et `app_settings` au `resource_router` (CRUD
     générique) et les trois migrations (../migration/mod.sdd) ; appeler `ensure_system_agents` à la
     première connexion d'un utilisateur ; planifier `workflow_runs::purge_older_than(30)` une fois

@@ -117,6 +117,11 @@ Tasks:
   [x] `vanyline-crds` : `owner_namespace_name`, `OwnerStatus.namespace` (/crds/src/lib.sdd).
     — fait 2026-10-06 (étape 4a), validator scopé vert.
   [x] Droits du controller (`/deploy/controller/controller.yaml`) : `namespaces`
+    CORRIGÉ revue 2026-10-14 : le controller ne détient PAS `serviceaccounts/token` (règle
+    cluster-wide retirée — elle permettait de forger un jeton pour n'importe quel SA du
+    cluster) ; le verbe `bind` (resourceNames) suffit à lier @APP_SCOPE_CLUSTER_ROLE.
+    [ ] À vérifier sur un cluster réel au prochain cycle release : création du RoleBinding
+    `vanyline-app` réussie avec `bind` seul.
     (get, list, watch, create, patch, delete), `rolebindings` (déjà), et le droit de lier
     @APP_SCOPE_CLUSTER_ROLE (`bind` sur ce ClusterRole, ou détenir ses droits) ; créer le
     ClusterRole @APP_SCOPE_CLUSTER_ROLE (projects, sandboxes : get, list, watch, create, delete,

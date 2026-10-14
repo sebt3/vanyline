@@ -582,6 +582,9 @@ Depends on:
     `../../../tooling.sdd` (harnais clippy/fmt).
 
 Tasks:
+  [ ] Erreurs du relais (revue 2026-10-14) : `error_for_status()?` / `RequestError` sur
+    `ws_ticket` et `git_proxy` peut exposer l'URL interne de la sandbox au navigateur —
+    vérifier la conversion `AppError` et ne rendre qu'un identifiant `VNL-SBX-*` opaque.
   [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
   [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 (../../../sandbox/src/auth.sdd) : remplacer
     `user.id_token` par `VnlK8sClient::owner_token` dans @ws_ticket et @git_proxy ; donner au SA

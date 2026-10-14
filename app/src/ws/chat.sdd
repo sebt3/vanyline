@@ -711,6 +711,9 @@ Depends on:
     et du harnais `../../../tooling.sdd` (unwrap/allow, pas de print).
 
 Tasks:
+  [ ] Aligner le §Must « jeton d'API jetable de l'utilisateur » sur la décision 2026-10-14 :
+    le serveur `sandbox` porte le jeton de l'Owner (cf. `../system_agents.sdd`) ; seuls
+    `vanyline-config` et `vanyline-domain` portent le jeton jetable.
   [ ] Contextes `settings`/`home`/`project` et agents système (2026-10-04) : les Scenario « contexte
     hors sandbox donne zéro tool » sont à réécrire (ces contextes donnent désormais les outils de
     leur agent système) ; ajouter les Scenario de révocation de jeton et de non-fuite.
@@ -751,13 +754,13 @@ Tasks:
     `?` et ABORT le tour. Aligner commentaire et code (le remonter explicitement comme
     bloquant, ou le replier en @ToolUnavailable + liste vide) — et arbitrer le 500-vs-404
     déjà `[?]` dans ../db/entities/chat_contexts.sdd.
-  [?] Champ `server` de @ToolUnavailable sandbox : depuis @crate::system_agents::context_tools
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : littéral `"sandbox"` (comportement du code) ; réécrire le Scenario « hors du périmètre » en conséquence. (Question d'origine : Champ `server` de @ToolUnavailable sandbox : depuis @crate::system_agents::context_tools
     (2026-10-14) le code est unifié sur le littéral `"sandbox"` pour TOUTES les pannes
     (@unavailable.push, quel que soit le motif) — mais le Scenario « sandbox nommée hors
     du périmètre » (et l'ancien §Handles) portaient `server: sandbox_name` (le nom).
     Standardiser sur le littéral (réécrire le Scenario — choisi par le code actuel) ou
     sur le nom de la sandbox fautiver (modifier @context_tools) ? Le frontend affiche ce
-    champ : « sandbox » générique vs nom précis, à trancher.
+    champ : « sandbox » générique vs nom précis, à trancher.)
   [?] `forward_events` : @serde_json::to_string `.unwrap_or_default()` enverrait un
     frame texte VIDE sur échec de sérialisation (théorique). Préférer un log + saut de
     l'événement ? Le frontend consommerait aujourd'hui `""` comme une erreur JSON côté

@@ -41,11 +41,11 @@ Exposes:
     `Sandbox` : `agent`, `rhai`, `shell`, `gate`.
 
 Tasks:
-  [?] `subworkflow` (kind natif de miryad-core, embarque un sous-DAG en ligne) n'est
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : refus MAINTENU en v1 (`MRD-WORKFLOW-004`, explicite) ; à rouvrir quand un besoin de sous-DAG apparaît (portée à décider alors). (Question d'origine : `subworkflow` (kind natif de miryad-core, embarque un sous-DAG en ligne) n'est
     PAS dans l'énumération d'@allowed_kinds, donc @materialize le refuse dans les deux
     portées (validation W1 2026-10-10). L'autoriser, et dans quelle(s) portée(s) — un
     sous-DAG n'exige a priori pas de sandbox ? Trancher avant ./steps/, sinon tout
-    workflow qui l'utilise meurt en `MRD-WORKFLOW-004`.
+    workflow qui l'utilise meurt en `MRD-WORKFLOW-004`.)
 
 Raises:
   @WorkflowError::InvalidDag (`MRD-WORKFLOW-004`, 422) — step dont le `kind` n'est pas autorisé

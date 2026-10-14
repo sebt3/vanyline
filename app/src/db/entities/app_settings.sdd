@@ -26,7 +26,8 @@ Exposes:
   `impl MiryadResource` : `resource_name() == "app-settings"`, lecture `AccessPolicy::Public`,
     écriture `AccessPolicy::AdminOnly`, aucune colonne propriétaire. Hooks `before_create` et
     `before_update` : la clé doit être connue (`default_model` en v1) et la valeur valide pour sa
-    clé, sinon `HookError` (422) :
+    clé, sinon `HookError` (422) avec code contracté — `VNL-SET-001` (clé inconnue), `VNL-SET-002`
+    (valeur invalide pour sa clé) :
     - `default_model` : `{ "provider_id": <entier>, "model": <chaîne non vide>, "options"?: <objet> }`
       où `provider_id` désigne un fournisseur LLM existant ; `options` sont les paramètres du
       profil (température, etc.).
@@ -46,10 +47,10 @@ Must not:
     dans leurs entités (profils, agents).
 
 Tasks:
-  [?] Codes des HookError (S8, 2026-10-13) : non contractés par la spec ; retenus
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTÉS — `VNL-SET-001` (clé inconnue), `VNL-SET-002` (valeur invalide). (Question d'origine : Codes des HookError (S8, 2026-10-13) : non contractés par la spec ; retenus
     `VNL-SET-001` (clé inconnue) et `VNL-SET-002` (valeur invalide), sur le motif « code
     applicatif libre du hook » déjà posé par `VNL-WFA-001` (`./project_workflows.sdd`).
-    Contracter ces deux codes ici ?
+    Contracter ces deux codes ici ?)
 
 Scenario: contrat_de_ressource
   Given l'entité
@@ -59,7 +60,7 @@ Scenario: contrat_de_ressource
 Scenario: cle_inconnue
   Given un corps `{key: "autre", value: {}}`
   When `before_create`
-  Then `HookError` (422)
+  Then `HookError` (422) code `VNL-SET-001`
 
 Scenario: default_model_valide
   Given `{key: "default_model", value: {provider_id: 1, model: "qwen3.6:35b-a3b"}}`
@@ -69,7 +70,7 @@ Scenario: default_model_valide
 Scenario: default_model_invalide
   Given une valeur sans `model`, puis avec `provider_id` non numérique
   When `before_create`
-  Then `HookError` dans les deux cas
+  Then `HookError` code `VNL-SET-002` dans les deux cas
 
 Scenario: ecriture_reservee_aux_admins
   Given un utilisateur ordinaire

@@ -586,7 +586,7 @@ Must not:
     line: &@str) -> @Option<@String>` (./mod.rs l'appelle mot pour mot).
 
 Tasks:
-  [?] Invariant de sérialisation des réponses (fusionne l'ancien `[?]` « ~90 expects
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ comme contrat positif — une réponse bâtie sur des types `Serialize` fermés ne peut pas échouer ; les `.expect` sont des surfaces de panic contractées ; les allows D6c deviennent des exemptions justifiées (réécrire leur ancrage). (Question d'origine : Invariant de sérialisation des réponses (fusionne l'ancien `[?]` « ~90 expects
     passés au travers du harnais ? » — la réponse à sa question interne est : oui, le
     fichier était bien compté, 100 uniques dont ~68 sites d'expect, tous traités en D6c
     sous allows « en attente de CE [?] ») : le `Must not` ci-dessus interdit déjà le
@@ -597,7 +597,7 @@ Tasks:
     convertit les allows D6c en exemptions justifiées et ferme CE [?] ? Ou propager :
     le returning `@Option<@String>`/`@String` de chaque handler devrait changer de
     forme, contrat que CE fichier ne pose pas (et ./mod.sdd fige @handle_line mot pour
-    mot). Lié aux `[?]` canaux de ../main.sdd l.541/547.
+    mot). Lié aux `[?]` canaux de ../main.sdd l.541/547.)
   [ ] Dériver les Scenario non couverts en tests taggés par leur titre :
     assertion de la clé `"source"` (listes + `skills/get`), `skills/get` happy
     path, timeout 10 s de `config/mcpServers/test`, réponses nominales K8s

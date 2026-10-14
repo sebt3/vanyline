@@ -121,9 +121,9 @@ Tasks:
   [ ] Remplacer le code existant par ce contrat (voir `Purpose`) ; le controller pose
     `VNL_OWNER_SUBJECT`, `VNL_TOKEN_ISSUER`, et les sondes visent le port `ops` — cf.
     /controller/src/sandbox.sdd.
-  [?] `parse_and_validate` : aucun appelant de production (./main.rs fait parse puis validate
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : SUPPRIMER (aucun appelant de production). (Question d'origine : `parse_and_validate` : aucun appelant de production (./main.rs fait parse puis validate
     séparés autour de l'init tracing pour ne pas perdre les logs). Recommandation : supprimer
-    (fonction interne de démarrage, sans rapport avec les outils MCP).
+    (fonction interne de démarrage, sans rapport avec les outils MCP).)
   [ ] `sandbox_root` : défaut aligné sur `/home/vanyline/workspace` (décision 2026-10-04) ;
     mettre à jour `/deploy/sandbox/sandbox-test.yaml` (qui pose `/workspace`) et les tests.
   [?] `@Config` dérive `Clone` ; vérifier avant nettoyage que seuls les tests des modules pairs

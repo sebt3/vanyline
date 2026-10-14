@@ -231,16 +231,18 @@ Handles:
     accidentel documenté, non béni (cf. `[?]`)
 
 Tasks:
+  [ ] `--restate-image` / `RESTATE_IMAGE` : défaut `:latest` (revue 2026-10-14) — épingler un
+    tag (ou digest) ; le moteur de workflow ne doit pas dériver à un redémarrage du controller.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-26 (comportement actuel du code, rien de
     nouveau n'est supposé).
-  [?] Liste des drapeaux obsolète depuis S6c (2026-10-13) : `--restate-image` /
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : amender la liste (quatorze) et le Scenario ; épingler le défaut de `--restate-image`. (Question d'origine : Liste des drapeaux obsolète depuis S6c (2026-10-13) : `--restate-image` /
     `RESTATE_IMAGE` a été ajouté au code (défaut
     `docker.restate.dev/restatedev/restate:latest`, image du StatefulSet Restate des
     Applications, contrat dans ./application.sdd) — la spec dit encore « 13 drapeaux » et le
     Scenario `cli_aide_liste_les_treize_drapeaux` énumère treize flags. Amender la liste
     (quatorze) et le Scenario ; par la même occasion, trancher l'épinglement du défaut
-    (`:latest` non versionné — même famille de question que l'asymétrie `v` ci-dessous).
+    (`:latest` non versionné — même famille de question que l'asymétrie `v` ci-dessous).)
   [?] `print!` du mode `--crds` (ligne 144) SANS `#[allow(clippy::print_stdout)]` alors que
     `print_stdout` est `deny` dans `[workspace.lints.clippy]` : le harnais ne semble pas mordre
     (CI clippy verrouillée verte, cf. /tooling.sdd ; mécanisme d'exonération non identifié —

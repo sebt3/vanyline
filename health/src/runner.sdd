@@ -119,8 +119,8 @@ Tasks:
     tests seulement, assertions distinctes lignes commitées/non commitées ; discrimination
     prouvée par mutation two-dot `merge-base..HEAD` ⇒ rouge 2≠4, restaurée mot pour mot ;
     97 tests health verts).
-  [?] Une sortie stdout de gigaoctets (clippy très bruyant) remplit `out_dir` : plafond de
-    taille du fichier à décider.
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : PLAFONNER le fichier de sortie (64 MiB par défaut) avec troncature + marqueur ; contracter et tester. (Question d'origine : Une sortie stdout de gigaoctets (clippy très bruyant) remplit `out_dir` : plafond de
+    taille du fichier à décider.)
   [?] Isolation des artefacts (`CARGO_TARGET_DIR`, caches) : passe par `env` ; la stratégie de
     cache (sccache, `target/` partagé) est un sujet séparé, à valider par mesure sur le
     workspace vanyline avant spec.

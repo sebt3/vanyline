@@ -335,29 +335,29 @@ Tasks:
     netpol du namespace d'application ; sans lui les règles ne matchent rien) ; le nom
     du Service est `<nom CR nu>-restate` (@restate_service_name de ./sandbox.sdd — PAS
     @application_name).
-  [?] Restate en StatefulSet mono-nœud sans réplication : suffisant pour un cluster de
-    développement/homelab ; la haute disponibilité (cluster Restate) est hors périmètre.
-  [?] Env interne du conteneur `restated` non contractée (interprétation posée S6c,
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ — mono-nœud, HA hors périmètre. (Question d'origine : Restate en StatefulSet mono-nœud sans réplication : suffisant pour un cluster de
+    développement/homelab ; la haute disponibilité (cluster Restate) est hors périmètre.)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTER la table d'env du conteneur `restated` dans cette spec (elle conditionne tout changement d'image). (Question d'origine : Env interne du conteneur `restated` non contractée (interprétation posée S6c,
     2026-10-13) : `RESTATE_CLUSTER_NAME`, `RESTATE_BOOTSTRAP_CLUSTER`,
     `RESTATE_INGRESS_SOCKET`, `RESTATE_ADMIN_SOCKET`, `RESTATE_WORKER_SOCKET`,
     `RESTATE_DATA_DIR=/var/restate` — la spec ne nomme que l'image, les ports et le volume.
-    Contracter ces variables dans cette spec (elles conditionnent tout changement d'image) ?
-  [?] Noms dérivés non contractés (S6c, 2026-10-13) : la NetworkPolicy s'appelle
+    Contracter ces variables dans cette spec (elles conditionnent tout changement d'image) ?)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTER les noms de ports du Service (`ingress` 8080, `admin` 9070, `worker` 5122 — le DNS en dépend) ; le nom de la NetworkPolicy reste un détail d'implémentation. (Question d'origine : Noms dérivés non contractés (S6c, 2026-10-13) : la NetworkPolicy s'appelle
     `<application>-restate-netpol` et les ports du Service sont nommés `ingress` (8080),
-    `admin` (9070), `worker` (5122). À contracter ou à assommer comme détail d'implémentation ?
-  [?] Table d'env du Deployment `app` amendée (S6c, 2026-10-13) : la table contractée
+    `admin` (9070), `worker` (5122). À contracter ou à assommer comme détail d'implémentation ?)
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONFIRMÉ — 12 variables avec `spec.restate`, les deux URL Restate en fin de liste. (Question d'origine : Table d'env du Deployment `app` amendée (S6c, 2026-10-13) : la table contractée
     (« exactement 10 variables », ordre de construction exact) ne positionnait pas les deux
     URL internes ; `VNL_RESTATE_ADMIN_URL` et `VNL_RESTATE_INGRESS_URL` sont ajoutées EN FIN
     de liste (après `COOKIE_SECRET`), soit 12 variables quand `spec.restate` est posée.
-    Position figée où confirmée ?
-  [?] Ordonnancement de @reconcile et deletion (S6c, 2026-10-13) : la séquence contractée
+    Position figée où confirmée ?)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : place confirmée (après l'Ingress, avant le status) ; le retrait de `spec.restate` supprime StatefulSet/Service/netpol mais CONSERVE le PVC (journal des runs) : `persistentVolumeClaimRetentionPolicy` Retain, purge manuelle ; à contracter et tester. (Question d'origine : Ordonnancement de @reconcile et deletion (S6c, 2026-10-13) : la séquence contractée
     (7 étapes) ne plaçait pas le bloc restate — inséré après l'Ingress, avant le status ; et
     « sans `spec.restate`, aucune de ces ressources n'existe » est rendu par SUPPRESSION
     conditionnelle des trois ressources (StatefulSet, Service, netpol — patron netpol egress
     de ./sandbox.sdd), donc un retrait du champ `restate` éteint le moteur et libère les
     ressources. Confirmer la place et la sémantique destructive du retrait (le PVC du
     volumeClaimTemplate survit à la suppression du StatefulSet par défaut K8s — trancher
-    aussi son sort) ?
+    aussi son sort) ?)
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [?] @deployment_phase filtre reasons `"Failed"`/`"ProgressDeadlineExceeded"` sur la

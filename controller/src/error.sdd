@@ -250,10 +250,10 @@ Tasks:
     hors cluster) ; les effets réels du helper finalizer kube-rs sur les variantes de
     contrôle relèvent des tests d'intégration cluster non mockés du crate (conventions
     projet), pas de tests unitaires d'ici. — fait 2026-10-06 (étape 4b), 7 tests, validator vert.
-  [?] Ratification des gabarits `VNL-CTL-007..010` (choix de l'implémentation 4b, verrouillés
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ — les textes anglais de `Exposes` `VNL-CTL-007..010` sont le contrat. (Question d'origine : Ratification des gabarits `VNL-CTL-007..010` (choix de l'implémentation 4b, verrouillés
     par le test `display_exhaustif_des_marqueurs_vnl_ctl`) : les textes anglais de `Exposes`
     deviennent-ils le contrat définitif, ou Sébastien impose-t-il d'autres formulations
-    (dans ce cas tests à revoir) ?
+    (dans ce cas tests à revoir) ?)
   [?] Comportement exact de @kube::runtime::finalizer (kube 4) sur l'erreur retournée par
     la fermeture en phase Cleanup : le code de ./project.rs et ./sandbox.rs (et leurs
     commentaires « un `Ok` retire le finalizer, donc on renvoie `Err` ») suppose une

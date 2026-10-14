@@ -83,10 +83,13 @@ Exposes:
     `GET /code-health` — 200 + @HealthState, TOUJOURS (jamais 404, y compris pendant le tout
       premier calcul : `phase: "computing"`, `report: null`).
     `POST /code-health/refresh` — corps optionnel `{ "base": <ref git>?, "languages": [<nom>]? }` ;
-      202, recalcul immédiat sans attendre le délai de calme ; `base`, si fourni, devient la
-      base STICKY des recalculs suivants (vue « code neuf » d'une MR) ; 400 si `base` est
-      invalide (@HealthError::InvalidRef). Si un calcul est déjà en cours : 202 et il est
-      replanifié derrière lui (jamais deux calculs concurrents).
+      202, recalcul immédiat sans attendre le délai de calme. Sémantique de `base`
+      (@RefreshBody.base : `@Option<@Option<@str>>`, décidé 2026-10-14) : champ ABSENT = base
+      sticky inchangée ; `"base": <ref>` = la ref devient la base STICKY des recalculs suivants
+      (vue « code neuf » d'une MR) ; `"base": null` = EFFACE la base sticky (les recalculs
+      suivants n'ont plus de base, vue `new_code` suspendue). 400 si `base` est invalide
+      (@HealthError::InvalidRef) — un effacement (`null`) n'est jamais refusé. Si un calcul est
+      déjà en cours : 202 et il est replanifié derrière lui (jamais deux calculs concurrents).
   Outil MCP `code_health` (famille de dispatch du sandbox, déclaré avec les outils LSP,
     ./tools_impl.rs) : arguments `{ "detail"?: "summary" | "issues" | "coverage", "path"?: string,
     "limit"?: integer }` ; lecture seule ; rend du TEXTE BORNÉ (même plafond que les autres
@@ -100,8 +103,10 @@ Handles:
   (fonction pure « chemins → langages » partagée avec `vanyline-maint detect`,
   ./maint.sdd) sauf `languages` fourni à `/refresh` ; vérifications = presets des langages
   (@checks_for_languages), langages sans preset rapportés dans `unchecked_languages`.
-  Déclencheurs de modification (@CodeHealth::notify_modified) : outils MCP qui écrivent
-  (`write_file`, `edit_file`, `delete_file`, `edit_and_check`), opérations
+  Déclencheurs de modification (@CodeHealth::notify_modified) — liste EXHAUSTIVE par contrat
+  (ratifié 2026-10-14 ; hors cette liste le sondage `health_poll_secs` reste le rattrape) :
+  outils MCP qui écrivent (`write_file`, `edit_file`, `delete_file`, `edit_and_check`,
+  `lsp_rename` — ajouté 2026-10-14, en SUCCÈS SEUL comme les autres sites), opérations
   d'écriture de `/ws/fs` (`write`, `edit`, `delete`, `mkdir`, `rename` — `mkdir` et
   `rename_file` ne vivent qu'ici, la famille MCP filesystem n'a pas ces deux noms :
   énumération re-formulée 2026-10-10 après validation H2, le fond est inchangé),
@@ -162,9 +167,10 @@ Raises:
     `base` refusée par la garde syntaxique (vide, préfixe `-`, espace, NUL, retour ligne —
     la base ne vit qu'en argv, jamais interpolée dans un shell) ou par
     `git rev-parse --verify`. La base sticky est laissée inchangée.
-  @HealthError::RefCheckUnavailable (@VNL-SBX-CH-002, 400 — statut sous le `[?]`
-    « 002 : 400 ou 500 ? » ci-dessous) — `git rev-parse` non lançable : la base n'a pas
-    pu être vérifiée ; CE fichier refuse plutôt que de calculer sur une base non validée.
+  @HealthError::RefCheckUnavailable (@VNL-SBX-CH-002, 500 — cause serveur : `git rev-parse`
+    non lançable, ratifié 2026-10-14 ; 400 reste réservé aux entrées client invalides) —
+    la base n'a pas pu être vérifiée ; CE fichier refuse plutôt que de calculer sur une base
+    non validée.
   400 + corps @Json `{"error": "VNL-SBX-CH-003: …"}` — corps JSON invalide sur
     `/code-health/refresh` (les erreurs d'@HealthError rendent le même corps, message
     @Display verbatim). Corps absent = légal (202).
@@ -173,7 +179,8 @@ Raises:
     le sondage rattrape), aucun runtime au @spawn_background (005), calcul échoué (006),
     détection de langages échouée ⇒ sélection vide (007). Jamais silencieux.
   Codes HTTP : 200 (@GET /code-health, @HealthState ci-dessus), 202 (refresh accepté et
-    planifié), 400 (les trois ci-dessus), 401/403 (./auth.sdd, garde du routeur).
+    planifié), 400 (entrées client invalides : @VNL-SBX-CH-001 et @VNL-SBX-CH-003), 500
+    (@VNL-SBX-CH-002, cause serveur), 401/403 (./auth.sdd, garde du routeur).
   Horodatages @HealthState (@computed_at, @stale_since) : millisecondes unix (@u64).
 
 Tasks:
@@ -182,9 +189,9 @@ Tasks:
     nettoyage du test `calcul_echoue_ne_ment_jamais` peut retirer le poison d'une autre
     instance). Ajouter un identifiant d'instance (pid ou suffixe aléatoire) au chemin —
     amendement `Handles` à trancher (le compteur séquentiel `<n>` est contracté aujourd'hui).
-  [?] @VNL-SBX-CH-002 au HTTP : 400 (choix du code à ce jour — « le client ne peut pas
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : 500 (cause serveur : git non lançable) ; 400 reste réservé aux entrées client invalides ; code et Scenario à aligner. (Question d'origine : @VNL-SBX-CH-002 au HTTP : 400 (choix du code à ce jour — « le client ne peut pas
     être servi » traité comme refus) ou 500 (cause serveur : git non lançable) ? Trancher
-    ; le code suit la spec.
+    ; le code suit la spec.)
   [x] Câbler `notify_modified` + déclarer l'outil `code_health` — FAIT 2026-10-10
     (validator-PASS : 12 sites succès-seul — tools_impl write_file/edit_file/delete_file/
     edit_and_check, ops `write`/`edit`/`delete`/`mkdir`/`rename` de `/ws/fs`,
@@ -192,19 +199,19 @@ Tasks:
     propagation ; outil déclaré+dispatché+testé, plafond @bound_lines réel ; specs
     ../mcp.sdd, ../tools_impl.sdd, ../../../tools/src/mcp.sdd alignées 16→17 ;
     8 tests nouveaux, 505 verts).
-  [?] @lsp_rename écrit des fichiers suivis mais N'EST PAS dans l'énumération des
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : la liste des déclencheurs est EXHAUSTIVE par contrat ; AJOUTER `lsp_rename` (câblage `notify_modified` en succès seul) + Scenario. (Question d'origine : @lsp_rename écrit des fichiers suivis mais N'EST PAS dans l'énumération des
     déclencheurs ci-dessus (listée « outils MCP qui écrivent »). La liste est-elle
     EXHAUSTIVE par contrat (⇒ lsp_rename reste rattrapé par le sondage
     `health_poll_secs`, conforme) ou illustrative (⇒ l'ajouter aux déclencheurs et
-    câble) ? Trancher.
-  [?] EFFACEMENT de la base sticky — trou de contrat rendu visible par H3b (validation
+    câble) ? Trancher.)
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : `RefreshBody.base: Option<Option<String>>` — champ absent = inchangé, `"base": null` = efface ; contracter, tester, câbler. (Question d'origine : EFFACEMENT de la base sticky — trou de contrat rendu visible par H3b (validation
     2026-10-10) : `RefreshBody.base` est un `@Option<@str>` de serde, `{}`, corps absent
     et `{"base": null}` sont INDISTINGUABLES ⇒ aucun chemin pour revenir à « pas de
     base ». Depuis H3b la base peut venir du controller (`health_base_ref`) et survivre
     toute la vie du pod (branche par défaut supprimée ⇒ `new-code` `errored` à vie,
     sans API de correction hors recréation). Mécanisme explicite à décider : sentinelle
     `Option<Option<@str>>` (`"base": null` efface), champ dédié, ou refus assumé du cas.
-    Décision de contrat — trancher avant code.
+    Décision de contrat — trancher avant code.)
   [x] Verrou unitaire du site `edit_and_check` — FAIT 2026-10-10 (validator-vert :
     `edit_and_check_notifies_health_on_success_only` dans les `mod tests` de
     ./tools_impl.rs, bidirectionnel succès⇒1→2 / échec-avant-écriture⇒figé, preuve par
@@ -297,6 +304,28 @@ Scenario: base_sticky_pour_les_recalculs
   Given `POST /code-health/refresh {"base": "origin/main"}` puis une modification
   When le recalcul automatique s'exécute
   Then il produit une vue `new_code` relative à `origin/main`
+
+Scenario: base_nul_efface_la_sticky
+  Given une base sticky `origin/main` en place
+  When `POST /code-health/refresh {"base": null}` puis une modification et son recalcul
+  Then 202 ; le recalcul n'a plus de base (pas de vue `new_code`) et @HealthState.base est `null`
+
+Scenario: base_absente_laisse_la_sticky
+  Given une base sticky `origin/main` en place
+  When `POST /code-health/refresh` avec corps `{}` (champ `base` absent) puis un recalcul
+  Then la vue `new_code` reste relative à `origin/main`
+
+Scenario: git_non_lançable_rend_500
+  Given un `POST /code-health/refresh` avec une `base` syntaxiquement valide mais dont
+    `git rev-parse` ne peut pas être lancé (cause serveur)
+  When le refus @VNL-SBX-CH-002 survient
+  Then le statut HTTP est 500 (pas 400) et la base sticky est laissée inchangée
+
+Scenario: lsp_rename_notifie_en_succès_seul
+  Given un état `fresh`
+  When un outil `lsp_rename` réussit (fichiers suivis mutés), puis un `lsp_rename` qui échoue
+  Then le succès notifie la modification (recalcul après le délai de calme) ; l'échec
+    ne notifie rien (comportement succès-seul des autres sites)
 
 Scenario: code_neuf_inclut_le_worktree_non_commite
   Given une base `origin/main`, un commit puis une modification non commitée d'une autre ligne

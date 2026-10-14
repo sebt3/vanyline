@@ -128,11 +128,11 @@ Tasks:
     là le worker interroge `GET /jobs/{job_id}` à intervalle régulier dans le step, et les
     délais Restate du service `StepDispatcher` (`inactivity_timeout`, `abort_timeout`) sont
     relevés à l'enregistrement pour couvrir la durée maximale d'un job (24 h).
-  [?] Persistance de l'état des jobs au redémarrage du pod : sans objet (les processus meurent
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : sans objet, 404 → échec du nœud est le comportement voulu. (Question d'origine : Persistance de l'état des jobs au redémarrage du pod : sans objet (les processus meurent
     avec le pod) ; le 404 → échec du nœud est le comportement voulu. À reconsidérer seulement
-    si des jobs détachés du pod deviennent un besoin.
-  [?] Plafonds (4 simultanés, 20 conservés, 3 600 s, 24 h) : valeurs de départ, à ajuster à
-    l'usage ; les rendre configurables seulement si un besoin réel apparaît.
+    si des jobs détachés du pod deviennent un besoin.)
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : valeurs de départ assumées ; configurables seulement sur besoin réel. (Question d'origine : Plafonds (4 simultanés, 20 conservés, 3 600 s, 24 h) : valeurs de départ, à ajuster à
+    l'usage ; les rendre configurables seulement si un besoin réel apparaît.)
   [x] Convertir chaque Scenario en test taggé par son titre — FAIT 2026-10-10
     (validation S6a : ./tests/jobs.rs, 14/14 Scenario taggés + 4 appoints = 18,
     stables ×4, assertions d'effets réels — kill du groupe prouvé par /proc du

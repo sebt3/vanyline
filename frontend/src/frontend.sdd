@@ -72,10 +72,10 @@ Must not:
   Introduire un écran non responsive autre que l'IDE.
 
 Tasks:
-  [?] Seuil de l'IDE : `lg` (1024 px). Une tablette en paysage passe-t-elle ? À confirmer à l'usage.
-  [?] Rafraîchissement de la vue mobile (santé du code) : interrogation périodique (10 s pendant un
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : `lg` (1024 px) validé, à confirmer à l'usage. (Question d'origine : Seuil de l'IDE : `lg` (1024 px). Une tablette en paysage passe-t-elle ? À confirmer à l'usage.)
+  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : interrogation périodique en v1. (Question d'origine : Rafraîchissement de la vue mobile (santé du code) : interrogation périodique (10 s pendant un
     calcul, 30 s sinon) ou poussée par le WebSocket d'états de sandbox existant (`/api/ws/sandbox-state`) ?
-    Recommandation : interrogation en v1.
+    Recommandation : interrogation en v1.)
   [ ] Mettre à jour `docs/architecture.md`, section « Frontend — shell IDE Vue » (écrans, responsivité).
 
 Scenario: ide_redirige_sous_lg
