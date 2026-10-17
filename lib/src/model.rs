@@ -144,31 +144,85 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Scenario `build_ollama_model_sans_cle_reussit`.
+    #[test]
+    fn build_ollama_model_sans_cle_reussit() {
+        let provider = sample_provider(ProviderType::Ollama, "http://localhost:11434");
+        let profile = sample_profile(serde_json::Map::new());
+        assert!(build_ollama_model(&provider, &profile).is_ok());
+    }
+
+    /// Scenario `build_ollama_model_avec_cle_reussit`.
+    #[test]
+    fn build_ollama_model_avec_cle_reussit() {
+        let provider = Provider {
+            name: "p".to_string(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://localhost:11434".to_string(),
+            api_key: Some("secret".to_string()),
+        };
+        let profile = sample_profile(serde_json::Map::new());
+        assert!(build_ollama_model(&provider, &profile).is_ok());
+    }
+
+    /// Scenario `build_ollama_model_cle_invalide_en_en_tete_rejetee`.
+    #[test]
+    fn build_ollama_model_cle_invalide_en_en_tete_rejetee() {
+        let provider = Provider {
+            name: "p".to_string(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://localhost:11434".to_string(),
+            api_key: Some("cla\nir".to_string()),
+        };
+        let profile = sample_profile(serde_json::Map::new());
+        let err = build_ollama_model(&provider, &profile).err().unwrap();
+        assert!(err.to_string().contains("VNL-LLM-006"), "{err}");
+    }
+
+    /// Scenario `build_openai_compat_model_sans_cle_reussit`.
+    #[test]
+    fn build_openai_compat_model_sans_cle_reussit() {
+        let provider = sample_provider(ProviderType::OpenaiCompatible, "http://localhost:8080");
+        let profile = sample_profile(serde_json::Map::new());
+        assert!(build_openai_compat_model(&provider, &profile).is_ok());
+    }
+
+    /// Scenario `constructeurs_ne_roulent_aucun_reseau_au_build`.
+    #[test]
+    fn constructeurs_ne_roulent_aucun_reseau_au_build() {
+        let profile = sample_profile(serde_json::Map::new());
+        let ollama = sample_provider(ProviderType::Ollama, "http://127.0.0.1:1");
+        let compat = sample_provider(ProviderType::OpenaiCompatible, "http://127.0.0.1:1");
+        assert!(build_ollama_model(&ollama, &profile).is_ok());
+        assert!(build_openai_compat_model(&compat, &profile).is_ok());
+    }
+
+    /// Scenario `agent_params_passthrough`.
     #[test]
     fn agent_params_passthrough() {
-        let profile = sample_profile(serde_json::Map::new());
-        let params = agent_params(&profile);
+        let params = agent_params(&sample_profile(serde_json::Map::new()));
         assert_eq!(params.temperature, Some(0.7));
         assert_eq!(params.max_tokens, Some(4096));
         assert_eq!(params.additional_params, None);
     }
 
+    /// Scenario `agent_params_avec_options`.
     #[test]
-    fn agent_params_with_options() {
+    fn agent_params_avec_options() {
         let options = serde_json::json!({"num_ctx": 65536, "top_k": 20})
             .as_object()
             .unwrap()
             .clone();
-        let profile = sample_profile(options);
-        let params = agent_params(&profile);
+        let params = agent_params(&sample_profile(options));
         assert_eq!(
             params.additional_params,
             Some(serde_json::json!({"num_ctx": 65536, "top_k": 20}))
         );
     }
 
+    /// Scenario `agent_params_profil_minimal`.
     #[test]
-    fn agent_params_minimal_profile() {
+    fn agent_params_profil_minimal() {
         let profile = ModelProfile {
             name: "m".to_string(),
             provider: "p".to_string(),
@@ -181,5 +235,19 @@ mod tests {
         assert_eq!(params.temperature, None);
         assert_eq!(params.max_tokens, None);
         assert_eq!(params.additional_params, None);
+    }
+
+    /// Scenario `agent_params_options_imbriquees_verbatim`.
+    #[test]
+    fn agent_params_options_imbriquees_verbatim() {
+        let options = serde_json::json!({"nested": {"flag": true}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let params = agent_params(&sample_profile(options));
+        assert_eq!(
+            params.additional_params,
+            Some(serde_json::json!({"nested": {"flag": true}}))
+        );
     }
 }

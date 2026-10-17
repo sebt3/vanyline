@@ -141,14 +141,14 @@ mod tests {
 
     // 1. name_is_skill
     #[test]
-    fn name_is_skill() {
+    fn name_vaut_skill() {
         let skill_tool = SkillTool::new(noop_store(), noop_sink(), Vec::new());
         assert_eq!(skill_tool.name(), "skill");
     }
 
     // 2. definition_embeds_skill_index
     #[tokio::test]
-    async fn definition_embeds_skill_index() {
+    async fn definition_embarque_index_skills() {
         let available = vec![
             SkillMeta {
                 name: "pdf".to_string(),
@@ -171,7 +171,7 @@ mod tests {
 
     // 3. definition_empty_index_placeholder
     #[tokio::test]
-    async fn definition_empty_index_placeholder() {
+    async fn definition_index_vide_placeholder() {
         let skill_tool = SkillTool::new(noop_store(), noop_sink(), Vec::new());
         let def = skill_tool.definition(String::new()).await;
 
@@ -181,7 +181,7 @@ mod tests {
 
     // 4. call_success_returns_body_and_emits_skill_loaded
     #[tokio::test]
-    async fn call_success_returns_body_and_emits_skill_loaded() {
+    async fn call_succes_retourne_corps_et_emet_skill_loaded() {
         let store = Arc::new(InMemoryConfigStore {
             skill_bodies: Mutex::new({
                 let mut m = std::collections::HashMap::new();
@@ -281,5 +281,103 @@ mod tests {
             "attendu aucun événement, got {:?}",
             sink.events()
         );
+    }
+
+    fn pdf_meta(description: &str) -> SkillMeta {
+        SkillMeta {
+            name: "pdf".to_string(),
+            description: description.to_string(),
+        }
+    }
+
+    fn store_with_pdf_body() -> Arc<InMemoryConfigStore> {
+        Arc::new(InMemoryConfigStore {
+            skill_bodies: Mutex::new({
+                let mut m = std::collections::HashMap::new();
+                m.insert("pdf".to_string(), "# PDF skill\ncontent".to_string());
+                m
+            }),
+            ..Default::default()
+        })
+    }
+
+    /// Scenario `definition_skill_sans_description`.
+    #[tokio::test]
+    async fn definition_skill_sans_description() {
+        let tool = SkillTool::new(noop_store(), noop_sink(), vec![pdf_meta("")]);
+        let def = tool.definition(String::new()).await;
+        assert!(
+            def.description.contains("- pdf : \n"),
+            "{}",
+            def.description
+        );
+    }
+
+    /// Scenario `call_champ_name_manquant_rejete`.
+    #[tokio::test]
+    async fn call_champ_name_manquant_rejete() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = SkillTool::new(noop_store(), sink.clone(), Vec::new());
+        let err = tool.call(r#"{"n":"pdf"}"#.to_string()).await.unwrap_err();
+        assert!(matches!(err, rig_core::tool::ToolError::ToolCallError(_)));
+        assert!(err.to_string().contains("missing field"), "{err}");
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_skill_absent_de_l_index_rejete_sans_emit`.
+    #[tokio::test]
+    async fn call_skill_absent_de_l_index_rejete_sans_emit() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = SkillTool::new(store_with_pdf_body(), sink.clone(), Vec::new());
+        let err = tool
+            .call(r#"{"name":"pdf"}"#.to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, rig_core::tool::ToolError::ToolCallError(_)));
+        assert!(err.to_string().contains("VNL-CFG-003"), "{err}");
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_json_invalide_rejete_sans_emit`.
+    #[tokio::test]
+    async fn call_json_invalide_rejete_sans_emit() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = SkillTool::new(noop_store(), sink.clone(), Vec::new());
+        let err = tool.call("not json".to_string()).await.unwrap_err();
+        assert!(matches!(err, rig_core::tool::ToolError::ToolCallError(_)));
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_store_en_erreur_rejete_sans_emit`.
+    #[tokio::test]
+    async fn call_store_en_erreur_rejete_sans_emit() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = SkillTool::new(noop_store(), sink.clone(), vec![pdf_meta("PDF processing")]);
+        let err = tool
+            .call(r#"{"name":"pdf"}"#.to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, rig_core::tool::ToolError::ToolCallError(_)));
+        assert!(err.to_string().contains("VNL-CFG-003"), "{err}");
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_repetition_emet_skill_loaded_a_chaque_appel`.
+    #[tokio::test]
+    async fn call_repetition_emet_skill_loaded_a_chaque_appel() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = SkillTool::new(
+            store_with_pdf_body(),
+            sink.clone(),
+            vec![pdf_meta("PDF processing")],
+        );
+        let first = tool.call(r#"{"name":"pdf"}"#.to_string()).await.unwrap();
+        let second = tool.call(r#"{"name":"pdf"}"#.to_string()).await.unwrap();
+        assert_eq!(first, second);
+        let events = sink.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        for event in events {
+            assert!(matches!(event, ChatEvent::SkillLoaded { ref name } if name == "pdf"));
+        }
     }
 }

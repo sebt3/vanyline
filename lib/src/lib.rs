@@ -55,3 +55,54 @@ pub use prefixed_mcp::*;
 pub use types::*;
 
 pub use rig_core::tool::server::ToolServerHandle;
+
+#[cfg(test)]
+mod tests {
+    use super::encode_git_path;
+
+    /// Scenario `encode_git_path_preserve_separateurs_et_ascii_surs`.
+    #[test]
+    fn encode_git_path_preserve_separateurs_et_ascii_surs() {
+        assert_eq!(encode_git_path("branches/feature-x"), "branches/feature-x");
+        assert_eq!(
+            encode_git_path("refs/heads/feature_x.1~2"),
+            "refs/heads/feature_x.1~2"
+        );
+        assert_eq!(encode_git_path("status"), "status");
+    }
+
+    /// Scenario `encode_git_path_encode_espace_et_percent`.
+    #[test]
+    fn encode_git_path_encode_espace_et_percent() {
+        assert_eq!(
+            encode_git_path("branches/feature x"),
+            "branches/feature%20x"
+        );
+        assert_eq!(encode_git_path("a%20b"), "a%2520b");
+    }
+
+    /// Scenario `encode_git_path_encode_controles`.
+    #[test]
+    fn encode_git_path_encode_controles() {
+        assert_eq!(encode_git_path("a\tb\nc\rd"), "a%09b%0Ac%0Dd");
+    }
+
+    /// Scenario `encode_git_path_encode_non_ascii_octet_par_octet`.
+    #[test]
+    fn encode_git_path_encode_non_ascii_octet_par_octet() {
+        assert_eq!(encode_git_path("café/é"), "caf%C3%A9/%C3%A9");
+    }
+
+    /// Scenario `encode_git_path_ascii_imprimables_dangereux_passent`.
+    #[test]
+    fn encode_git_path_ascii_imprimables_dangereux_passent() {
+        let input = "#?&=+@[]\\<>{}^|;";
+        assert_eq!(encode_git_path(input), input);
+    }
+
+    /// Scenario `encode_git_path_entree_vide`.
+    #[test]
+    fn encode_git_path_entree_vide() {
+        assert_eq!(encode_git_path(""), "");
+    }
+}

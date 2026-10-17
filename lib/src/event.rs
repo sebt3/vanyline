@@ -785,4 +785,52 @@ mod tests {
         );
         std::fs::write(target, out).unwrap();
     }
+
+    /// Scenario `bloc_reasoning_non_extractible_nemet_rien`.
+    #[test]
+    fn bloc_reasoning_non_extractible_nemet_rien() {
+        let mut reasoning = Reasoning::redacted("r");
+        reasoning
+            .content
+            .push(rig_core::message::ReasoningContent::Encrypted("e".into()));
+        let mut acc = StreamAccumulator::new();
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::Reasoning(reasoning),
+        ));
+        assert!(events.is_empty(), "{events:?}");
+        assert!(!is_final);
+        assert!(acc.response_text.is_empty());
+        assert!(acc.tool_calls.is_empty());
+    }
+
+    /// Scenario `final_response_terminale_sans_emission`.
+    #[test]
+    fn final_response_terminale_sans_emission() {
+        let mut acc = StreamAccumulator::new();
+        let _ = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::text("bonjour"),
+        ));
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::FinalResponse(
+            rig_core::agent::FinalResponse::empty(),
+        ));
+        assert!(events.is_empty(), "{events:?}");
+        assert!(is_final);
+        assert_eq!(acc.response_text, "bonjour");
+    }
+
+    /// Scenario `items_hors_mapping_ignorés_silencieusement`.
+    #[test]
+    fn items_hors_mapping_ignorés_silencieusement() {
+        let mut acc = StreamAccumulator::new();
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::ToolCallDelta {
+                id: "prov-1".into(),
+                internal_call_id: "call-1".into(),
+                content: rig_core::streaming::ToolCallDeltaContent::Name("search".into()),
+            },
+        ));
+        assert!(events.is_empty(), "{events:?}");
+        assert!(!is_final);
+        assert!(acc.tool_calls.is_empty());
+    }
 }

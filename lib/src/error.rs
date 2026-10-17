@@ -103,3 +103,188 @@ impl From<vanyline_cfgstore::CfgStoreError> for VnyError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    /// Scenario `display_exhaustif_des_marqueurs_vnl`.
+    #[test]
+    fn display_exhaustif_des_marqueurs_vnl() {
+        let json_err = serde_json::from_str::<u8>("x").unwrap_err();
+        let json_expected = format!("VNL-JSON-001: JSON error: {json_err}");
+        let cases: Vec<(VnyError, String)> = vec![
+            (
+                VnyError::ConfigError("boom".into()),
+                "VNL-CFG-001: Configuration error: boom".into(),
+            ),
+            (
+                VnyError::LlmError("boom".into()),
+                "VNL-LLM-001: LLM provider error: boom".into(),
+            ),
+            (
+                VnyError::LlmProviderNotFound,
+                "VNL-LLM-002: LLM provider not found".into(),
+            ),
+            (
+                VnyError::UnknownProviderType("boom".into()),
+                "VNL-LLM-005: Unknown provider type: boom".into(),
+            ),
+            (
+                VnyError::ModelBuildError("boom".into()),
+                "VNL-LLM-006: Cannot build model: boom".into(),
+            ),
+            (
+                VnyError::NoProviderConfigured,
+                "VNL-LLM-007: No LLM provider configured".into(),
+            ),
+            (
+                VnyError::NoModelConfigured,
+                "VNL-LLM-008: No model configured".into(),
+            ),
+            (
+                VnyError::McpError("boom".into()),
+                "VNL-MCP-001: MCP server error: boom".into(),
+            ),
+            (
+                VnyError::UnknownServerType("boom".into()),
+                "VNL-MCP-003: Unknown server type: boom".into(),
+            ),
+            (
+                VnyError::SseNotImplemented,
+                "VNL-MCP-004: SSE transport not yet implemented".into(),
+            ),
+            (
+                VnyError::McpConnectError("s1".into(), "refusé".into()),
+                "VNL-MCP-005: Cannot connect to s1: refusé".into(),
+            ),
+            (
+                VnyError::McpToolsError("s1".into(), "refusé".into()),
+                "VNL-MCP-006: Cannot list tools from s1: refusé".into(),
+            ),
+            (
+                VnyError::AgentNotFound,
+                "VNL-AGT-001: Agent not found".into(),
+            ),
+            (
+                VnyError::IoError(std::io::Error::other("boom")),
+                "VNL-IO-001: I/O error: boom".into(),
+            ),
+            (VnyError::JsonError(json_err), json_expected),
+            (
+                VnyError::InternalError("boom".into()),
+                "VNL-INT-001: Internal error: boom".into(),
+            ),
+            (
+                VnyError::DuplicateName("agent", "dup".into()),
+                "VNL-CFG-002: Duplicate name 'dup' for agent".into(),
+            ),
+            (
+                VnyError::UnknownReference("model", "qwen".into()),
+                "VNL-CFG-003: Unknown model reference: 'qwen'".into(),
+            ),
+        ];
+        assert_eq!(cases.len(), 18, "18 variantes sans la feature k8s");
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+        #[cfg(feature = "k8s")]
+        {
+            assert_eq!(
+                VnyError::K8sConfigError("boom".into()).to_string(),
+                "VNL-K8S-001: Cannot reach Kubernetes cluster: boom"
+            );
+            assert_eq!(
+                VnyError::K8sApiError("boom".into()).to_string(),
+                "VNL-K8S-002: Kubernetes API error: boom"
+            );
+        }
+    }
+
+    /// Scenario `conversion_cfgstore_preserve_rendu_sur_trois_variantes`.
+    #[test]
+    fn conversion_cfgstore_preserve_rendu_sur_trois_variantes() {
+        use vanyline_cfgstore::CfgStoreError as C;
+        let pairs = [
+            (
+                C::Config("boom".into()),
+                VnyError::ConfigError("boom".into()),
+            ),
+            (
+                C::DuplicateName("agent", "dup".into()),
+                VnyError::DuplicateName("agent", "dup".into()),
+            ),
+            (
+                C::UnknownReference("model", "qwen".into()),
+                VnyError::UnknownReference("model", "qwen".into()),
+            ),
+        ];
+        for (source, expected) in pairs {
+            let source_display = source.to_string();
+            let converted = VnyError::from(source);
+            assert_eq!(converted.to_string(), expected.to_string());
+            assert_eq!(converted.to_string(), source_display);
+        }
+    }
+
+    /// Scenario `conversion_cfgstore_inconnue_degenere_en_config_error_double_marqueur`.
+    #[test]
+    fn conversion_cfgstore_inconnue_degenere_en_config_error_double_marqueur() {
+        let converted = VnyError::from(vanyline_cfgstore::CfgStoreError::ReadOnly);
+        assert!(matches!(converted, VnyError::ConfigError(_)));
+        assert_eq!(
+            converted.to_string(),
+            "VNL-CFG-001: Configuration error: VNL-CFG-009: Config store is read-only"
+        );
+    }
+
+    /// Scenario `conversions_from_io_et_json_generables_par_operateur_question`.
+    #[test]
+    fn conversions_from_io_et_json_generables_par_operateur_question() {
+        fn json_fail() -> Result<(), VnyError> {
+            serde_json::from_str::<u8>("x")?;
+            Ok(())
+        }
+        fn io_fail() -> Result<(), VnyError> {
+            Err::<(), std::io::Error>(std::io::Error::other("disque"))?;
+            Ok(())
+        }
+
+        let json = json_fail().unwrap_err();
+        assert!(matches!(json, VnyError::JsonError(_)));
+        assert!(json.source().is_some());
+        assert!(json.to_string().starts_with("VNL-JSON-001"));
+
+        let io = io_fail().unwrap_err();
+        assert!(matches!(io, VnyError::IoError(_)));
+        assert!(io.source().is_some());
+        assert!(io.to_string().starts_with("VNL-IO-001"));
+    }
+
+    /// Scenario `source_std_error_absente_sauf_io_et_json`.
+    #[test]
+    fn source_std_error_absente_sauf_io_et_json() {
+        let llm = VnyError::LlmError("x".into());
+        assert!(llm.source().is_none());
+
+        let io = VnyError::IoError(std::io::Error::other("disque"));
+        assert_eq!(
+            io.source().map(ToString::to_string).as_deref(),
+            Some("disque")
+        );
+    }
+
+    /// Scenario `rendu_inverse_des_champs_de_duplicate_name`.
+    #[test]
+    fn rendu_inverse_des_champs_de_duplicate_name() {
+        assert_eq!(
+            VnyError::DuplicateName("agent", "dup".into()).to_string(),
+            "VNL-CFG-002: Duplicate name 'dup' for agent"
+        );
+        assert_eq!(
+            VnyError::UnknownReference("model", "qwen".into()).to_string(),
+            "VNL-CFG-003: Unknown model reference: 'qwen'"
+        );
+    }
+}

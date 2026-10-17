@@ -75,3 +75,191 @@ pub struct Conversation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn conversation_json(todo: Option<&str>) -> Value {
+        let mut v = json!({
+            "id": "aaaaaaaa-0000-0000-0000-000000000001",
+            "agent": null,
+            "title": null,
+            "messages": []
+        });
+        if let Some(t) = todo {
+            v["todo"] = json!(t);
+        }
+        v
+    }
+
+    /// Scenario `tool_call_se_serialize_avec_result_null_et_sans_id`.
+    #[test]
+    fn tool_call_se_serialize_avec_result_null_et_sans_id() {
+        let call = ToolCall {
+            name: "read_file".into(),
+            arguments: json!({"path": "a"}),
+            result: None,
+        };
+        let v = serde_json::to_value(&call).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["arguments", "name", "result"]);
+        assert_eq!(v["result"], Value::Null);
+    }
+
+    /// Scenario `tool_call_roundtrip_json`.
+    #[test]
+    fn tool_call_roundtrip_json() {
+        let call = ToolCall {
+            name: "search".into(),
+            arguments: json!({"q": "x"}),
+            result: Some("42".into()),
+        };
+        let back: ToolCall = serde_json::from_str(&serde_json::to_string(&call).unwrap()).unwrap();
+        assert_eq!(back.name, "search");
+        assert_eq!(back.arguments, json!({"q": "x"}));
+        assert_eq!(back.result.as_deref(), Some("42"));
+    }
+
+    /// Scenario `message_omit_tool_calls_quand_none`.
+    #[test]
+    fn message_omit_tool_calls_quand_none() {
+        let msg = Message {
+            role: "user".into(),
+            content: "bonjour".into(),
+            tool_calls: None,
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v, json!({"role": "user", "content": "bonjour"}));
+    }
+
+    /// Scenario `message_accepte_tool_calls_absent_ou_null`.
+    #[test]
+    fn message_accepte_tool_calls_absent_ou_null() {
+        let absent: Message = serde_json::from_str(r#"{"role":"user","content":"x"}"#).unwrap();
+        assert!(absent.tool_calls.is_none());
+        let null: Message =
+            serde_json::from_str(r#"{"role":"user","content":"x","tool_calls":null}"#).unwrap();
+        assert!(null.tool_calls.is_none());
+    }
+
+    /// Scenario `message_ignore_champs_inconnus`.
+    #[test]
+    fn message_ignore_champs_inconnus() {
+        let msg: Message = serde_json::from_str(
+            r#"{"role":"user","content":"x","tool_calls":null,"future":"champ"}"#,
+        )
+        .unwrap();
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content, "x");
+    }
+
+    /// Scenario `message_roundtrip_avec_tool_calls_resolus`.
+    #[test]
+    fn message_roundtrip_avec_tool_calls_resolus() {
+        let msg = Message {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: Some(vec![ToolCall {
+                name: "t".into(),
+                arguments: json!({}),
+                result: Some("ok".into()),
+            }]),
+        };
+        let back: Message = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        let calls = back.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "t");
+        assert_eq!(calls[0].arguments, json!({}));
+        assert_eq!(calls[0].result.as_deref(), Some("ok"));
+    }
+
+    /// Scenario `message_accepte_role_hors_vocabulaire`.
+    #[test]
+    fn message_accepte_role_hors_vocabulaire() {
+        let msg: Message = serde_json::from_str(r#"{"role":"system-e","content":"y"}"#).unwrap();
+        assert_eq!(msg.role, "system-e");
+    }
+
+    /// Scenario `conversation_roundtrip_json_complet`.
+    #[test]
+    fn conversation_roundtrip_json_complet() {
+        let id = Uuid::new_v4();
+        let conv = Conversation {
+            id,
+            agent: Some("general".into()),
+            title: None,
+            messages: vec![Message {
+                role: "user".into(),
+                content: "salut".into(),
+                tool_calls: None,
+            }],
+            todo: Some("[{\"content\":\"t1\"}]".into()),
+        };
+        let back: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conv).unwrap()).unwrap();
+        assert_eq!(back.id, id);
+        assert_eq!(back.agent.as_deref(), Some("general"));
+        assert!(back.title.is_none());
+        assert_eq!(back.messages.len(), 1);
+        assert_eq!(back.messages[0].content, "salut");
+        assert_eq!(back.todo.as_deref(), Some("[{\"content\":\"t1\"}]"));
+    }
+
+    /// Scenario `conversation_todo_absent_vaut_none_par_defaut`.
+    #[test]
+    fn conversation_todo_absent_vaut_none_par_defaut() {
+        let conv: Conversation = serde_json::from_value(conversation_json(None)).unwrap();
+        assert!(conv.todo.is_none());
+    }
+
+    /// Scenario `conversation_omit_todo_et_accepte_todo_null`.
+    #[test]
+    fn conversation_omit_todo_et_accepte_todo_null() {
+        let conv: Conversation = serde_json::from_value(conversation_json(None)).unwrap();
+        let v = serde_json::to_value(&conv).unwrap();
+        assert!(v.get("todo").is_none());
+        let back: Conversation = serde_json::from_value(v).unwrap();
+        assert!(back.todo.is_none());
+
+        let mut with_null = conversation_json(None);
+        with_null["todo"] = Value::Null;
+        let null_back: Conversation = serde_json::from_value(with_null).unwrap();
+        assert!(null_back.todo.is_none());
+    }
+
+    /// Scenario `conversation_id_en_uuid_canonique_hyphen`.
+    #[test]
+    fn conversation_id_en_uuid_canonique_hyphen() {
+        let conv: Conversation = serde_json::from_value(conversation_json(None)).unwrap();
+        let v = serde_json::to_value(&conv).unwrap();
+        assert_eq!(v["id"], "aaaaaaaa-0000-0000-0000-000000000001");
+        assert_eq!(conv.id.to_string(), "aaaaaaaa-0000-0000-0000-000000000001");
+    }
+
+    /// Scenario `conversation_refuse_un_json_sans_messages`.
+    #[test]
+    fn conversation_refuse_un_json_sans_messages() {
+        let json = r#"{"id":"aaaaaaaa-0000-0000-0000-000000000001","agent":null,"title":null}"#;
+        assert!(serde_json::from_str::<Conversation>(json).is_err());
+    }
+
+    /// Scenario `conversation_messages_vide_autorisee`.
+    #[test]
+    fn conversation_messages_vide_autorisee() {
+        let conv = Conversation {
+            id: Uuid::new_v4(),
+            agent: None,
+            title: None,
+            messages: Vec::new(),
+            todo: None,
+        };
+        let back: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conv).unwrap()).unwrap();
+        assert!(back.messages.is_empty());
+        assert!(back.agent.is_none());
+        assert!(back.title.is_none());
+    }
+}

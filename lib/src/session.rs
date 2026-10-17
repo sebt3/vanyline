@@ -781,7 +781,7 @@ mod tests {
 
     // 1. success — full chain resolves, prompt contains agent prompt + toolset prompt
     #[tokio::test]
-    async fn resolve_turn_context_success() {
+    async fn resolve_tour_succes_sans_reseau() {
         let store = InMemoryConfigStore {
             providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
@@ -831,7 +831,7 @@ mod tests {
 
     // 2. unknown agent — empty store
     #[tokio::test]
-    async fn resolve_turn_context_unknown_agent() {
+    async fn resolve_tour_agent_inconnu_rejete() {
         let store = InMemoryConfigStore::default();
         let ctx = test_ctx(store);
         let result = resolve_turn_context(&ctx, "nope", None).await;
@@ -842,7 +842,7 @@ mod tests {
 
     // 3. unknown model — agent references non-existent model
     #[tokio::test]
-    async fn resolve_turn_context_unknown_model() {
+    async fn resolve_tour_modele_inconnu_rejete() {
         let store = InMemoryConfigStore {
             providers: Mutex::new(vec![Provider {
                 name: "p".to_string(),
@@ -874,7 +874,7 @@ mod tests {
 
     // 4. unknown provider — model references non-existent provider
     #[tokio::test]
-    async fn resolve_turn_context_unknown_provider() {
+    async fn resolve_tour_provider_inconnu_rejete() {
         let store = InMemoryConfigStore {
             providers: Mutex::new(vec![]),
             models: Mutex::new(vec![ModelProfile {
@@ -908,7 +908,7 @@ mod tests {
 
     // 5. unknown toolset — agent references non-existent toolset
     #[tokio::test]
-    async fn resolve_turn_context_unknown_toolset() {
+    async fn resolve_tour_toolset_inconnu_rejete() {
         let store = InMemoryConfigStore {
             providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
@@ -947,7 +947,7 @@ mod tests {
 
     // 6. workspace_context included
     #[tokio::test]
-    async fn resolve_turn_context_workspace_context_included() {
+    async fn resolve_tour_contexte_workspace_ajoute() {
         let store = InMemoryConfigStore {
             providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
@@ -995,7 +995,7 @@ mod tests {
 
     // 8. build_agent_sets_default_max_turns
     #[test]
-    fn build_agent_sets_default_max_turns() {
+    fn build_agent_defaut_max_turns() {
         let provider = crate::domain::Provider {
             name: "p".to_string(),
             provider_type: crate::domain::ProviderType::OpenaiCompatible,
@@ -1077,5 +1077,318 @@ mod tests {
         ];
         let result = dedupe_mcp_selections(&selections, &mut connected);
         assert_eq!(result.len(), 2);
+    }
+
+    // ---- Scenarios de session.sdd (un test par titre) ----
+
+    fn sess_agent(prompt: &str, toolsets: &[&str], skills: SkillSelection) -> Agent {
+        Agent {
+            name: "a".to_string(),
+            description: None,
+            mode: AgentMode::Primary,
+            model: "m".to_string(),
+            toolsets: toolsets.iter().map(|t| (*t).to_string()).collect(),
+            skills,
+            system_prompt: prompt.to_string(),
+        }
+    }
+
+    fn sess_toolset(name: &str, prompt: Option<&str>) -> Toolset {
+        Toolset {
+            name: name.to_string(),
+            description: None,
+            prompt: prompt.map(str::to_string),
+            local_tools: Vec::new(),
+            mcp: Vec::new(),
+        }
+    }
+
+    fn sess_skill(name: &str, description: &str) -> SkillMeta {
+        SkillMeta {
+            name: name.to_string(),
+            description: description.to_string(),
+        }
+    }
+
+    /// Scenario `assemble_prompt_agent_seul`.
+    #[test]
+    fn assemble_prompt_agent_seul() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::None);
+        assert_eq!(
+            assemble_system_prompt(&agent, &[], &[], None),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_ordre_toolsets_agent`.
+    #[test]
+    fn assemble_prompt_ordre_toolsets_agent() {
+        let agent = sess_agent("You are helpful.", &["b", "a"], SkillSelection::None);
+        let toolsets = [
+            sess_toolset("a", Some("PROMPT_A")),
+            sess_toolset("b", Some("PROMPT_B")),
+        ];
+        let out = assemble_system_prompt(&agent, &toolsets, &[], None);
+        let pos_b = out.find("PROMPT_B").unwrap();
+        let pos_a = out.find("PROMPT_A").unwrap();
+        assert!(pos_b < pos_a, "{out}");
+    }
+
+    /// Scenario `assemble_prompt_toolset_sans_prompt`.
+    #[test]
+    fn assemble_prompt_toolset_sans_prompt() {
+        let agent = sess_agent("You are helpful.", &["x", "y"], SkillSelection::None);
+        let toolsets = [sess_toolset("x", None), sess_toolset("y", None)];
+        assert_eq!(
+            assemble_system_prompt(&agent, &toolsets, &[], None),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_toolset_blanc`.
+    #[test]
+    fn assemble_prompt_toolset_blanc() {
+        let agent = sess_agent("You are helpful.", &["x"], SkillSelection::None);
+        let toolsets = [sess_toolset("x", Some("   "))];
+        assert_eq!(
+            assemble_system_prompt(&agent, &toolsets, &[], None),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_toolset_inconnu_ignore`.
+    #[test]
+    fn assemble_prompt_toolset_inconnu_ignore() {
+        let agent = sess_agent("You are helpful.", &["nonexistent"], SkillSelection::None);
+        assert_eq!(
+            assemble_system_prompt(&agent, &[], &[], None),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_jonction_blanc_unique`.
+    #[test]
+    fn assemble_prompt_jonction_blanc_unique() {
+        let agent = sess_agent("You are helpful.", &["b", "a"], SkillSelection::None);
+        let toolsets = [
+            sess_toolset("a", Some("PROMPT_A")),
+            sess_toolset("b", Some("PROMPT_B")),
+        ];
+        assert_eq!(
+            assemble_system_prompt(&agent, &toolsets, &[], None),
+            "You are helpful.\n\nPROMPT_B\n\nPROMPT_A"
+        );
+    }
+
+    /// Scenario `assemble_prompt_sans_section_skills`.
+    #[test]
+    fn assemble_prompt_sans_section_skills() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::None);
+        let skills = [
+            sess_skill("pdf", "PDF processing"),
+            sess_skill("web", "Web search"),
+        ];
+        let out = assemble_system_prompt(&agent, &[], &skills, None);
+        assert!(!out.contains("PDF processing"));
+        assert!(!out.contains("Web search"));
+    }
+
+    /// Scenario `assemble_prompt_skills_auto_ordre_catalogue`.
+    #[test]
+    fn assemble_prompt_skills_auto_ordre_catalogue() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::Auto);
+        let skills = [
+            sess_skill("pdf", "PDF processing"),
+            sess_skill("web", "Web search"),
+        ];
+        let out = assemble_system_prompt(&agent, &[], &skills, None);
+        let pdf = out.find("- pdf : PDF processing").unwrap();
+        let web = out.find("- web : Web search").unwrap();
+        assert!(pdf < web, "{out}");
+    }
+
+    /// Scenario `assemble_prompt_skills_nommes_filtre`.
+    #[test]
+    fn assemble_prompt_skills_nommes_filtre() {
+        let agent = sess_agent(
+            "You are helpful.",
+            &[],
+            SkillSelection::Named(vec!["web".to_string()]),
+        );
+        let skills = [
+            sess_skill("pdf", "PDF processing"),
+            sess_skill("web", "Web search"),
+        ];
+        let out = assemble_system_prompt(&agent, &[], &skills, None);
+        assert!(out.contains("- web : Web search"));
+        assert!(!out.contains("- pdf : PDF processing"));
+    }
+
+    /// Scenario `assemble_prompt_skills_nommes_ordre_catalogue`.
+    #[test]
+    fn assemble_prompt_skills_nommes_ordre_catalogue() {
+        let agent = sess_agent(
+            "You are helpful.",
+            &[],
+            SkillSelection::Named(vec!["web".to_string(), "pdf".to_string()]),
+        );
+        let skills = [
+            sess_skill("pdf", "PDF processing"),
+            sess_skill("web", "Web search"),
+        ];
+        let out = assemble_system_prompt(&agent, &[], &skills, None);
+        assert!(
+            out.find("- pdf :").unwrap() < out.find("- web :").unwrap(),
+            "{out}"
+        );
+    }
+
+    /// Scenario `assemble_prompt_skills_nommes_inconnus_sans_section`.
+    #[test]
+    fn assemble_prompt_skills_nommes_inconnus_sans_section() {
+        let agent = sess_agent(
+            "You are helpful.",
+            &[],
+            SkillSelection::Named(vec!["absent".to_string()]),
+        );
+        let skills = [sess_skill("pdf", "PDF processing")];
+        assert_eq!(
+            assemble_system_prompt(&agent, &[], &skills, None),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_skills_auto_catalogue_vide`.
+    #[test]
+    fn assemble_prompt_skills_auto_catalogue_vide() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::Auto);
+        assert_eq!(
+            assemble_system_prompt(&agent, &[], &[], None),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_contexte_workspace_en_queue`.
+    #[test]
+    fn assemble_prompt_contexte_workspace_en_queue() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::None);
+        let out = assemble_system_prompt(&agent, &[], &[], Some("# AGENTS.md\ncontent"));
+        assert!(out.ends_with("# AGENTS.md\ncontent"), "{out}");
+    }
+
+    /// Scenario `assemble_prompt_contexte_workspace_retrim`.
+    #[test]
+    fn assemble_prompt_contexte_workspace_retrim() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::None);
+        let out = assemble_system_prompt(&agent, &[], &[], Some("  # ctx  \n"));
+        let (_, last) = out.rsplit_once("\n\n").unwrap();
+        assert_eq!(last, "# ctx");
+    }
+
+    /// Scenario `assemble_prompt_contexte_workspace_blanc`.
+    #[test]
+    fn assemble_prompt_contexte_workspace_blanc() {
+        let agent = sess_agent("You are helpful.", &[], SkillSelection::None);
+        assert_eq!(
+            assemble_system_prompt(&agent, &[], &[], Some("   ")),
+            "You are helpful."
+        );
+    }
+
+    /// Scenario `assemble_prompt_quatre_sections_ordre_fixe`.
+    #[test]
+    fn assemble_prompt_quatre_sections_ordre_fixe() {
+        let agent = sess_agent("You are helpful.", &["shell"], SkillSelection::Auto);
+        let toolsets = [sess_toolset("shell", Some("## Shell tool"))];
+        let skills = [sess_skill("web", "Web search")];
+        let out = assemble_system_prompt(&agent, &toolsets, &skills, Some("# AGENTS.md\ncontent"));
+        let p1 = out.find("You are helpful.").unwrap();
+        let p2 = out.find("## Shell tool").unwrap();
+        let p3 = out.find("- web : Web search").unwrap();
+        let p4 = out.find("# AGENTS.md").unwrap();
+        assert!(p1 < p2 && p2 < p3 && p3 < p4, "{out}");
+    }
+
+    /// Scenario `assemble_prompt_prompt_agent_vide_sans_separateur_tete`.
+    #[test]
+    fn assemble_prompt_prompt_agent_vide_sans_separateur_tete() {
+        let agent = sess_agent("", &["a"], SkillSelection::None);
+        let toolsets = [sess_toolset("a", Some("PROMPT_A"))];
+        let out = assemble_system_prompt(&agent, &toolsets, &[], None);
+        assert_eq!(out, "PROMPT_A");
+        assert!(!out.starts_with('\n'));
+    }
+
+    /// Scenario `assemble_prompt_blanc_seul_assemble_vide`.
+    #[test]
+    fn assemble_prompt_blanc_seul_assemble_vide() {
+        let agent = sess_agent("   ", &[], SkillSelection::None);
+        assert_eq!(assemble_system_prompt(&agent, &[], &[], None), "");
+    }
+
+    /// Scenario `dedupe_local_tools_saute_deja_ajoutes`.
+    #[test]
+    fn dedupe_local_tools_saute_deja_ajoutes() {
+        let mut added: std::collections::HashSet<String> =
+            ["read_file".to_string()].into_iter().collect();
+        let kept = dedupe_local_tool_names(vec!["read_file", "write_file"], &mut added);
+        assert_eq!(kept, vec!["write_file"]);
+        assert!(added.contains("read_file") && added.contains("write_file"));
+        assert_eq!(added.len(), 2);
+    }
+
+    /// Scenario `dedupe_local_tools_garde_tout_ensemble_vide`.
+    #[test]
+    fn dedupe_local_tools_garde_tout_ensemble_vide() {
+        let mut added = std::collections::HashSet::new();
+        let kept = dedupe_local_tool_names(vec!["a", "b"], &mut added);
+        assert_eq!(kept, vec!["a", "b"]);
+        assert_eq!(added.len(), 2);
+    }
+
+    fn sess_mcp(server: &str) -> McpSelection {
+        McpSelection {
+            server: server.to_string(),
+            tools: Vec::new(),
+        }
+    }
+
+    /// Scenario `dedupe_mcp_saute_serveur_deja_connecte`.
+    #[test]
+    fn dedupe_mcp_saute_serveur_deja_connecte() {
+        let mut connected: std::collections::HashSet<String> =
+            ["server-a".to_string()].into_iter().collect();
+        let sels = [sess_mcp("server-a"), sess_mcp("server-b")];
+        let kept = dedupe_mcp_selections(&sels, &mut connected);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].server, "server-b");
+        assert!(connected.contains("server-a") && connected.contains("server-b"));
+    }
+
+    /// Scenario `dedupe_mcp_garde_tout_ensemble_vide`.
+    #[test]
+    fn dedupe_mcp_garde_tout_ensemble_vide() {
+        let mut connected = std::collections::HashSet::new();
+        let sels = [sess_mcp("server-a"), sess_mcp("server-b")];
+        let kept = dedupe_mcp_selections(&sels, &mut connected);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// Scenario `subagents_disponibles_excluent_primary`.
+    #[test]
+    fn subagents_disponibles_excluent_primary() {
+        let mut primary = sess_agent("", &[], SkillSelection::None);
+        primary.name = "primary".into();
+        let mut sub = primary.clone();
+        sub.name = "sub".into();
+        sub.mode = AgentMode::Subagent;
+        let mut all = primary.clone();
+        all.name = "all".into();
+        all.mode = AgentMode::All;
+        let names: Vec<String> = available_subagents(&[primary, sub, all])
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, vec!["sub", "all"]);
     }
 }

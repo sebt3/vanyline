@@ -369,7 +369,7 @@ mod tests {
     // ---- tool_matches ----
 
     #[test]
-    fn tool_matches_empty_patterns_matches_all() {
+    fn tool_matches_liste_vide_expose_tous() {
         assert!(tool_matches(&[], "anything"));
     }
 
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_matches_any_of_multiple_patterns() {
+    fn tool_matches_motifs_combines_en_ou() {
         assert!(tool_matches(
             &["foo".to_string(), "read_*".to_string()],
             "read_file"
@@ -394,14 +394,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_matches_invalid_pattern_matches_nothing() {
+    fn tool_matches_motif_malforme_fail_safe() {
         assert!(!tool_matches(&["[".to_string()], "x"));
     }
 
     // ---- selected_servers ----
 
     #[test]
-    fn selected_servers_only_referenced() {
+    fn selected_servers_une_paire_par_selection() {
         let all_servers = vec![
             DomainMcpServer {
                 name: "a".to_string(),
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_servers_unknown_reference_omitted() {
+    fn selected_servers_reference_sans_serveur_omit() {
         let all_servers = vec![DomainMcpServer {
             name: "a".to_string(),
             transport: McpTransport::HttpStreamable,
@@ -451,7 +451,7 @@ mod tests {
     // ---- select_local_tools ----
 
     #[test]
-    fn select_local_tools_found_and_missing() {
+    fn select_local_tools_trouves_absents_dans_ordre() {
         // Valeur `u8` : la fonction est générique sur `V` (testable sans
         // instancier de vrais ToolDyn), pas de sémantique attachée à la valeur.
         let mut available: HashMap<String, u8> = HashMap::new();

@@ -159,14 +159,14 @@ mod tests {
 
     // 1. name_is_todowrite
     #[test]
-    fn name_is_todowrite() {
+    fn name_vaut_todowrite() {
         let t = TodoWriteTool::new(empty_state());
         assert_eq!(t.name(), "todowrite");
     }
 
     // 2. name_is_todoread
     #[test]
-    fn name_is_todoread() {
+    fn name_vaut_todoread() {
         let t = TodoReadTool::new(empty_state());
         assert_eq!(t.name(), "todoread");
     }
@@ -249,5 +249,222 @@ mod tests {
         let t = TodoReadTool::new(state.clone());
         let result = t.call("not json".to_string()).await;
         assert!(result.is_err());
+    }
+
+    fn stored(state: &TodoState) -> Option<String> {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Scenario `todowrite_definition_figee`.
+    #[tokio::test]
+    async fn todowrite_definition_figee() {
+        let tool = TodoWriteTool::new(empty_state());
+        let def = tool.definition("p".into()).await;
+        assert_eq!(def.name, "todowrite");
+        assert_eq!(
+            def.description,
+            "Remplace toute la liste de taches par la liste fournie. "
+        );
+        assert_eq!(def.parameters["required"], serde_json::json!(["todos"]));
+        assert_eq!(def.parameters["properties"]["todos"]["type"], "array");
+        assert_eq!(
+            def.parameters["properties"]["todos"]["items"]["required"],
+            serde_json::json!(["content"])
+        );
+    }
+
+    /// Scenario `todoread_definition_figee`.
+    #[tokio::test]
+    async fn todoread_definition_figee() {
+        let tool = TodoReadTool::new(empty_state());
+        let def = tool.definition("p".into()).await;
+        assert_eq!(def.name, "todoread");
+        assert_eq!(
+            def.description,
+            "Renvoie la liste de taches courante (todowrite)."
+        );
+        assert_eq!(
+            def.parameters,
+            serde_json::json!({"type": "object", "properties": {}, "required": []})
+        );
+    }
+
+    /// Scenario `todowrite_remplace_tout_le_state`.
+    #[tokio::test]
+    async fn todowrite_remplace_tout_le_state() {
+        let state = seeded_state("[{\"content\":\"ancienne\"}]");
+        let tool = TodoWriteTool::new(state.clone());
+        let out = tool
+            .call(r#"{"todos":[{"content":"a","status":"pending"},{"content":"b"}]}"#.into())
+            .await
+            .unwrap();
+        assert!(out.contains("2 items"));
+        let value: serde_json::Value = serde_json::from_str(&stored(&state).unwrap()).unwrap();
+        let items = value.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(!stored(&state).unwrap().contains("ancienne"));
+    }
+
+    /// Scenario `todowrite_liste_vide_ecrit_some_vide`.
+    #[tokio::test]
+    async fn todowrite_liste_vide_ecrit_some_vide() {
+        let state = empty_state();
+        let out = TodoWriteTool::new(state.clone())
+            .call(r#"{"todos": []}"#.into())
+            .await
+            .unwrap();
+        assert_eq!(out, "todo list updated (0 items)");
+        assert_eq!(stored(&state).as_deref(), Some("[]"));
+    }
+
+    /// Scenario `todowrite_ne_revient_jamais_a_none`.
+    #[tokio::test]
+    async fn todowrite_ne_revient_jamais_a_none() {
+        let state = seeded_state("[{\"content\":\"x\"}]");
+        TodoWriteTool::new(state.clone())
+            .call(r#"{"todos": []}"#.into())
+            .await
+            .unwrap();
+        assert_eq!(stored(&state).as_deref(), Some("[]"));
+        let read = TodoReadTool::new(state).call("{}".into()).await.unwrap();
+        assert_eq!(read, "[]");
+    }
+
+    /// Scenario `todowrite_json_invalide_rejete_sans_effet`.
+    #[tokio::test]
+    async fn todowrite_json_invalide_rejete_sans_effet() {
+        let state = empty_state();
+        let err = TodoWriteTool::new(state.clone())
+            .call("not json".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, rig_core::tool::ToolError::ToolCallError(_)));
+        assert_eq!(stored(&state), None);
+    }
+
+    /// Scenario `todowrite_todos_non_tableau_rejete`.
+    #[tokio::test]
+    async fn todowrite_todos_non_tableau_rejete() {
+        let original = "[{\"content\":\"x\"}]";
+        let state = seeded_state(original);
+        let err = TodoWriteTool::new(state.clone())
+            .call(r#"{"todos":"pas-un-tableau"}"#.into())
+            .await;
+        assert!(err.is_err());
+        assert_eq!(stored(&state).as_deref(), Some(original));
+    }
+
+    /// Scenario `todowrite_elements_hors_schema_acceptes`.
+    #[tokio::test]
+    async fn todowrite_elements_hors_schema_acceptes() {
+        let state = empty_state();
+        let out = TodoWriteTool::new(state.clone())
+            .call(r#"{"todos":[42,null,{"status":"done"}]}"#.into())
+            .await
+            .unwrap();
+        assert!(out.contains("3 items"));
+        let value: serde_json::Value = serde_json::from_str(&stored(&state).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!([42, null, {"status": "done"}]));
+    }
+
+    /// Scenario `todoread_retourne_le_state_brut`.
+    #[tokio::test]
+    async fn todoread_retourne_le_state_brut() {
+        let raw = "[{\"content\":\"a\"},{\"content\":\"b\"}]";
+        let out = TodoReadTool::new(seeded_state(raw))
+            .call("{}".into())
+            .await
+            .unwrap();
+        assert_eq!(out, raw);
+    }
+
+    /// Scenario `todoread_sans_state_retourne_message`.
+    #[tokio::test]
+    async fn todoread_sans_state_retourne_message() {
+        let out = TodoReadTool::new(empty_state())
+            .call("{}".into())
+            .await
+            .unwrap();
+        assert_eq!(out, "no todo list yet");
+    }
+
+    /// Scenario `todoread_args_non_json_rejete_sans_effet`.
+    #[tokio::test]
+    async fn todoread_args_non_json_rejete_sans_effet() {
+        let original = "[{\"content\":\"a\"}]";
+        let state = seeded_state(original);
+        let err = TodoReadTool::new(state.clone())
+            .call("not json".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, rig_core::tool::ToolError::ToolCallError(_)));
+        assert_eq!(stored(&state).as_deref(), Some(original));
+    }
+
+    /// Scenario `todoread_accepte_nimporte_quel_json_valide`.
+    #[tokio::test]
+    async fn todoread_accepte_nimporte_quel_json_valide() {
+        let original = "[{\"content\":\"a\"}]";
+        let out = TodoReadTool::new(seeded_state(original))
+            .call("42".into())
+            .await
+            .unwrap();
+        assert_eq!(out, original);
+    }
+
+    /// Scenario `etat_partage_entre_clones_de_arc`.
+    #[tokio::test]
+    async fn etat_partage_entre_clones_de_arc() {
+        let state = empty_state();
+        let writer = TodoWriteTool::new(state.clone());
+        let reader = TodoReadTool::new(state.clone());
+        writer
+            .call(r#"{"todos":[{"content":"visible"}]}"#.into())
+            .await
+            .unwrap();
+        let out = reader.call("{}".into()).await.unwrap();
+        assert!(out.contains("visible"));
+    }
+
+    /// Scenario `reserialisation_normalisee`.
+    #[tokio::test]
+    async fn reserialisation_normalisee() {
+        let state = empty_state();
+        TodoWriteTool::new(state.clone())
+            .call(r#"{ "todos" : [ { "status": "in_progress", "content":  "x" } ] }"#.into())
+            .await
+            .unwrap();
+        assert_eq!(
+            stored(&state).as_deref(),
+            Some(r#"[{"content":"x","status":"in_progress"}]"#)
+        );
+    }
+
+    /// Scenario `mutex_poisonne_reste_utilisable`.
+    #[tokio::test]
+    async fn mutex_poisonne_reste_utilisable() {
+        let state = seeded_state("[{\"content\":\"tenu\"}]");
+        let poisoner = state.clone();
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("panique volontaire pour empoisonner le mutex");
+        });
+        assert!(handle.join().is_err());
+        assert!(state.is_poisoned());
+
+        let read = TodoReadTool::new(state.clone())
+            .call("{}".into())
+            .await
+            .unwrap();
+        assert_eq!(read, "[{\"content\":\"tenu\"}]");
+
+        TodoWriteTool::new(state.clone())
+            .call(r#"{"todos":[{"content":"neuf"}]}"#.into())
+            .await
+            .unwrap();
+        assert!(stored(&state).unwrap().contains("neuf"));
     }
 }

@@ -358,7 +358,7 @@ mod tests {
 
     // 5. call_depth_exceeded_rejected
     #[tokio::test]
-    async fn call_depth_exceeded_rejected() {
+    async fn call_profondeur_atteinte_rejete() {
         let store = Arc::new(InMemoryConfigStore {
             agents: Mutex::new(vec![Agent {
                 name: "sub".to_string(),
@@ -471,5 +471,149 @@ mod tests {
             "attendu aucun événement, got {:?}",
             sink.events()
         );
+    }
+
+    fn task_agent(name: &str, description: Option<&str>, mode: AgentMode) -> Agent {
+        Agent {
+            name: name.to_string(),
+            description: description.map(str::to_string),
+            mode,
+            model: "m".to_string(),
+            toolsets: vec![],
+            skills: SkillSelection::default(),
+            system_prompt: "prompt".to_string(),
+        }
+    }
+
+    fn task_ctx(
+        store: Arc<dyn ConfigStore>,
+        sink: Arc<dyn EventSink>,
+        depth_max: u8,
+    ) -> SessionContext {
+        SessionContext {
+            store,
+            sink,
+            local_tools: std::collections::HashMap::new(),
+            subagent_depth_max: depth_max,
+            extra_mcp: Vec::new(),
+            model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn store_with(agents: Vec<Agent>) -> Arc<InMemoryConfigStore> {
+        Arc::new(InMemoryConfigStore {
+            agents: Mutex::new(agents),
+            ..Default::default()
+        })
+    }
+
+    /// Scenario `definition_agent_sans_description`.
+    #[tokio::test]
+    async fn definition_agent_sans_description() {
+        let agents = vec![task_agent("bare", None, AgentMode::Subagent)];
+        let tool = TaskTool::new(task_ctx(sample_store(), sample_sink(), 1), 0, agents);
+        let def = tool.definition(String::new()).await;
+        assert!(
+            def.description.contains("- bare : (pas de description)"),
+            "{}",
+            def.description
+        );
+    }
+
+    /// Scenario `subagent_event_sink_enveloppe_les_evenements`.
+    #[tokio::test]
+    async fn subagent_event_sink_enveloppe_les_evenements() {
+        let recording = Arc::new(RecordingSink::new());
+        let wrapped = SubagentEventSink {
+            inner: recording.clone(),
+            subagent_id: "sub-1".to_string(),
+        };
+        wrapped
+            .emit(ChatEvent::Token {
+                content: "hi".to_string(),
+            })
+            .await;
+        let events = recording.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        match &events[0] {
+            ChatEvent::SubagentEvent { id, event } => {
+                assert_eq!(id, "sub-1");
+                assert!(matches!(**event, ChatEvent::Token { ref content } if content == "hi"));
+            }
+            other => panic!("SubagentEvent attendu, obtenu : {other:?}"),
+        }
+    }
+
+    /// Scenario `call_json_invalide_rejete`.
+    #[tokio::test]
+    async fn call_json_invalide_rejete() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = TaskTool::new(task_ctx(sample_store(), sink.clone(), 1), 0, vec![]);
+        let err = tool.call("pas du json".to_string()).await.unwrap_err();
+        assert!(matches!(err, ToolError::ToolCallError(_)));
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_garde_profondeur_avant_resolution`.
+    #[tokio::test]
+    async fn call_garde_profondeur_avant_resolution() {
+        let sink = Arc::new(RecordingSink::new());
+        let tool = TaskTool::new(task_ctx(sample_store(), sink.clone(), 1), 1, vec![]);
+        let err = tool
+            .call(r#"{"agent":"ghost","prompt":"x"}"#.to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("subagent depth limit (1) reached, cannot delegate further"),
+            "{err}"
+        );
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_agent_inconnu_rejete`.
+    #[tokio::test]
+    async fn call_agent_inconnu_rejete() {
+        let sink = Arc::new(RecordingSink::new());
+        let store = store_with(vec![task_agent("other", None, AgentMode::Subagent)]);
+        let tool = TaskTool::new(task_ctx(store, sink.clone(), 1), 0, vec![]);
+        let err = tool
+            .call(r#"{"agent":"nope","prompt":"x"}"#.to_string())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("VNL-CFG-003"), "{err}");
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_agent_dupliqué_rejete`.
+    #[tokio::test]
+    async fn call_agent_dupliqué_rejete() {
+        let sink = Arc::new(RecordingSink::new());
+        let store = store_with(vec![
+            task_agent("dup", None, AgentMode::Subagent),
+            task_agent("dup", None, AgentMode::Subagent),
+        ]);
+        let tool = TaskTool::new(task_ctx(store, sink.clone(), 1), 0, vec![]);
+        let err = tool
+            .call(r#"{"agent":"dup","prompt":"x"}"#.to_string())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("VNL-CFG-002"), "{err}");
+        assert!(sink.events().is_empty());
+    }
+
+    /// Scenario `call_mode_primary_rejete`.
+    #[tokio::test]
+    async fn call_mode_primary_rejete() {
+        let sink = Arc::new(RecordingSink::new());
+        let store = store_with(vec![task_agent("main", None, AgentMode::Primary)]);
+        let tool = TaskTool::new(task_ctx(store, sink.clone(), 1), 0, vec![]);
+        let err = tool
+            .call(r#"{"agent":"main","prompt":"x"}"#.to_string())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("primary agent"), "{err}");
+        assert!(sink.events().is_empty());
     }
 }
