@@ -434,4 +434,65 @@ mod tests {
         assert_eq!(status.conditions[0].type_, "Ready");
         assert_eq!(status.conditions[0].status, "True");
     }
+
+    #[test]
+    fn compute_status_observed_generation_reprise() {
+        let mut owner = make_owner(None, None);
+        owner.meta_mut().generation = Some(7);
+        let before = k8s_openapi::jiff::Timestamp::now();
+        let first = compute_status(&owner);
+        let second = compute_status(&owner);
+        let ready = &first.conditions[0];
+        assert_eq!(ready.observed_generation, Some(7));
+        // horodatage frais : posé à l'appel, pas figé à une valeur antérieure
+        assert!(ready.last_transition_time.0 >= before);
+        assert!(second.conditions[0].last_transition_time.0 >= ready.last_transition_time.0);
+    }
+
+    #[test]
+    fn compute_status_serialisation_merge_patch() {
+        let mut owner = make_owner(None, None);
+        // génération posée : sans elle, observedGeneration est omis (skip_serializing_if)
+        owner.meta_mut().generation = Some(1);
+        let status = compute_status(&owner);
+        let value = serde_json::to_value(&status).expect("serialisation du status");
+        let obj = value.as_object().expect("status en objet JSON");
+
+        assert_eq!(
+            obj.get("pvcName").and_then(|v| v.as_str()),
+            Some("owner-alice-home")
+        );
+        assert_eq!(
+            obj.get("serviceAccount").and_then(|v| v.as_str()),
+            Some("owner-alice")
+        );
+        assert_eq!(
+            obj.get("namespace").and_then(|v| v.as_str()),
+            Some("ns-alice")
+        );
+
+        let conditions = obj
+            .get("conditions")
+            .and_then(|v| v.as_array())
+            .expect("conditions en tableau");
+        assert_eq!(conditions.len(), 1);
+        let c = conditions[0].as_object().expect("condition en objet");
+        for key in [
+            "type",
+            "status",
+            "reason",
+            "message",
+            "lastTransitionTime",
+            "observedGeneration",
+        ] {
+            assert!(c.contains_key(key), "condition sans clé {key}");
+        }
+
+        // enveloppe Merge : aucun null d'effacement dans le status produit
+        let envelope = serde_json::json!({ "status": status });
+        assert!(
+            !envelope.to_string().contains("null"),
+            "null d'effacement présent"
+        );
+    }
 }

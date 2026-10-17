@@ -139,7 +139,7 @@ Tasks:
     besoin d'aucun appel `namespaces` ; si un besoin apparaît, un ClusterRole `get` avec
     `resourceNames` maintenus par le controller (liste des namespaces servis par l'Application)
     — `list`/`watch` ne se restreignent PAS par `resourceNames`, `get` seul est possible.
-  [ ] Convertir chaque Scenario en test taggé par son titre.
+  [x] Convertir chaque Scenario en test taggé par son titre. (Vérifié 2026-10-17 : les 13 Scenarios ont un test homonyme dans controller/src/namespace.rs `mod tests`, vert ; tests antérieurs à la discipline TTD, cf. .claude/memory/haiku-questions/controller.md)
 
 Done when:
   Chaque Scenario est couvert par un test vert ; la batterie complète est verte ; un Owner créé

@@ -2185,4 +2185,186 @@ mod tests {
             "RESTATE_DATA_DIR == mountPath du volume data"
         );
     }
+
+    // Scenarios de application.sdd sans test existant (tâche « Convertir en tests … »).
+
+    #[test]
+    fn tls_secret_name_suffixe_cert() {
+        assert_eq!(tls_secret_name("application-demo"), "application-demo-cert");
+        assert_eq!(tls_secret_name("sandbox-web"), "sandbox-web-cert");
+    }
+
+    #[test]
+    fn cert_manager_annotation_key_selon_kind() {
+        assert_eq!(
+            cert_manager_annotation_key(None),
+            "cert-manager.io/cluster-issuer"
+        );
+        assert_eq!(
+            cert_manager_annotation_key(Some("Issuer")),
+            "cert-manager.io/issuer"
+        );
+        assert_eq!(
+            cert_manager_annotation_key(Some("ClusterIssuer")),
+            "cert-manager.io/cluster-issuer"
+        );
+        assert_eq!(
+            cert_manager_annotation_key(Some("nimporte_quoi")),
+            "cert-manager.io/cluster-issuer"
+        );
+    }
+
+    #[test]
+    fn build_application_deployment_namespace_absent() {
+        let mut app = make_application("demo");
+        app.meta_mut().namespace = None;
+        let deployment = build_application_deployment(&app, TEST_APP_IMAGE);
+
+        assert_eq!(deployment.metadata.namespace, None);
+        let container = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .first()
+            .expect("should have 1 container");
+        let env = container.env.as_ref().expect("should have env");
+        let ns_env = env
+            .iter()
+            .find(|e| e.name == "VNL_K8S_NAMESPACE")
+            .expect("VNL_K8S_NAMESPACE present");
+        assert_eq!(ns_env.value.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn deployment_phase_available_true_prioritaire_sur_failed() {
+        let ts = || {
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ))
+        };
+        let conditions = Some(vec![
+            DeploymentCondition {
+                type_: "Available".to_string(),
+                status: "True".to_string(),
+                reason: Some("MinimumReplicasAvailable".to_string()),
+                message: None,
+                last_transition_time: ts(),
+                last_update_time: None,
+            },
+            DeploymentCondition {
+                type_: "Available".to_string(),
+                status: "False".to_string(),
+                reason: Some("Failed".to_string()),
+                message: None,
+                last_transition_time: ts(),
+                last_update_time: None,
+            },
+        ]);
+        assert_eq!(deployment_phase(conditions.as_ref()), "Running");
+    }
+
+    #[test]
+    fn compute_status_failed() {
+        let app = make_application("demo");
+        let status = compute_status(&app, "Failed");
+        assert_eq!(status.phase.as_deref(), Some("Failed"));
+        assert_eq!(status.conditions.len(), 1);
+        let ready = &status.conditions[0];
+        assert_eq!(ready.type_, "Ready");
+        assert_eq!(ready.status, "False");
+        assert_eq!(ready.reason, "NotReady");
+        assert_eq!(ready.message, "phase=Failed");
+    }
+
+    #[tokio::test]
+    async fn error_policy_requeue_trente_secondes() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = kube::Config::new(
+            "http://127.0.0.1:9"
+                .parse()
+                .expect("URI morte syntaxiquement valide"),
+        );
+        let client = Client::try_from(config).expect("client hors connexion");
+        let ctx = Arc::new(Context {
+            client,
+            default_image: TEST_APP_IMAGE.to_string(),
+            restate_image: String::new(),
+        });
+        let app = Arc::new(make_application("demo"));
+        let a = ControllerError::PurgePending {
+            project: "p".to_string(),
+        };
+        let b = ControllerError::Finalizer("boom".to_string());
+        assert_eq!(
+            error_policy(app.clone(), &a, ctx.clone()),
+            Action::requeue(Duration::from_secs(30))
+        );
+        assert_eq!(
+            error_policy(app, &b, ctx),
+            Action::requeue(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn owner_reference_controller_sur_tous_les_builders() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+
+        let app = make_application("demo");
+        let mut all: Vec<(&str, Option<Vec<OwnerReference>>)> = vec![
+            (
+                "service_account",
+                build_application_service_account(&app)
+                    .metadata
+                    .owner_references,
+            ),
+            (
+                "role",
+                build_application_role(&app).metadata.owner_references,
+            ),
+            (
+                "role_binding",
+                build_application_role_binding(&app)
+                    .metadata
+                    .owner_references,
+            ),
+            (
+                "deployment",
+                build_application_deployment(&app, TEST_APP_IMAGE)
+                    .metadata
+                    .owner_references,
+            ),
+            (
+                "service",
+                build_application_service(&app).metadata.owner_references,
+            ),
+            (
+                "ingress",
+                build_application_ingress(&app).metadata.owner_references,
+            ),
+            (
+                "cookie_secret",
+                build_cookie_secret(&app, "YWJj".to_string())
+                    .metadata
+                    .owner_references,
+            ),
+        ];
+        for (label, refs) in all.drain(..) {
+            let refs = refs.expect("ownerReferences posées");
+            assert_eq!(refs.len(), 1, "{label}: exactement une ownerReference");
+            let r: &OwnerReference = &refs[0];
+            assert_eq!(r.api_version, "vanyline.solidite.fr/v1alpha1", "{label}");
+            assert_eq!(r.kind, "Application", "{label}");
+            assert_eq!(r.name, "demo", "{label}");
+            assert_eq!(r.controller, Some(true), "{label}");
+            assert_eq!(
+                r.block_owner_deletion, None,
+                "{label}: block_owner_deletion non posé"
+            );
+        }
+    }
 }

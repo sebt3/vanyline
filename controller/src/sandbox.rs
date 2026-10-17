@@ -2206,6 +2206,11 @@ mod tests {
             lg.http_get.as_ref().unwrap().path,
             Some("/health".to_string())
         );
+        // timings des sondes (Scenario mcp_port_and_probes)
+        assert_eq!(rp.initial_delay_seconds, Some(5));
+        assert_eq!(rp.period_seconds, Some(10));
+        assert_eq!(lg.initial_delay_seconds, Some(5));
+        assert_eq!(lg.period_seconds, Some(10));
         assert_eq!(
             rp.http_get.as_ref().unwrap().port,
             IntOrString::Int(MCP_PORT)
@@ -2458,7 +2463,7 @@ mod tests {
 
     #[test]
     fn cache_mounts_and_env() {
-        // No caches specified -> default ["cargo", "pnpm"]
+        // No caches specified -> default ["cargo", "pnpm", "pip"] (effective_caches)
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None); // caches: None -> defaults
         let ctx = make_ctx();
@@ -2483,6 +2488,13 @@ mod tests {
             .expect("should have pnpm-store mount");
         assert_eq!(pnpm_mount.sub_path, Some("cache/pnpm-store".to_string()));
 
+        // pip (défaut 3e cache, scénario pod_caches_defaut_cargo_pnpm_pip)
+        let pip_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/project-cache/pip")
+            .expect("should have pip mount");
+        assert_eq!(pip_mount.sub_path, Some("cache/pip".to_string()));
+
         // Env vars
         let env = container.env.as_ref().expect("should have env");
         let cargo_home = env
@@ -2499,6 +2511,11 @@ mod tests {
             pnpm_dir.value,
             Some("/project-cache/pnpm-store".to_string())
         );
+        let pip_dir = env
+            .iter()
+            .find(|e| e.name == "PIP_CACHE_DIR")
+            .expect("should have PIP_CACHE_DIR");
+        assert_eq!(pip_dir.value, Some("/project-cache/pip".to_string()));
     }
 
     #[test]
@@ -2624,6 +2641,11 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "demo-branch");
         assert_eq!(refs[0].kind, "Sandbox");
+
+        // backoff et TTL du Job checkout (Scenario build_checkout_job_owner_reference)
+        let spec = job.spec.as_ref().expect("should have spec");
+        assert_eq!(spec.backoff_limit, Some(3));
+        assert_eq!(spec.ttl_seconds_after_finished, Some(3600));
     }
 
     // ===== build_worktree_remove_job =====
@@ -2675,6 +2697,16 @@ mod tests {
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].port, MCP_PORT);
         assert_eq!(ports[0].name, Some("mcp".to_string()));
+
+        // ownerReference Sandbox unique (Scenario build_sandbox_service_shape)
+        let refs = service
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "Sandbox");
+        assert_eq!(refs[0].name, "demo-branch");
     }
 
     // ===== build_sandbox_netpol =====
@@ -4547,6 +4579,163 @@ mod tests {
                 "npm_config_store_dir",
                 "/project-cache/pnpm-store".to_string()
             ))
+        );
+    }
+
+    // Scenarios de sandbox.sdd sans test existant (tâche « Convertir en tests unitaires … »).
+
+    fn offline_client() -> Client {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = kube::Config::new(
+            "http://127.0.0.1:9"
+                .parse()
+                .expect("URI morte syntaxiquement valide"),
+        );
+        Client::try_from(config).expect("client hors connexion")
+    }
+
+    fn offline_ctx() -> Arc<Context> {
+        Arc::new(Context {
+            client: offline_client(),
+            default_image: "img:tag".to_string(),
+            toolchain_image_rust: String::new(),
+            toolchain_image_node: String::new(),
+            toolchain_image_docker: String::new(),
+            toolchain_image_python: String::new(),
+            lsp_image_rust: String::new(),
+            lsp_image_node: String::new(),
+            lsp_image_docker: String::new(),
+            lsp_image_python: String::new(),
+        })
+    }
+
+    #[test]
+    fn agregat_collision_non_path_derniere_gagne() {
+        let a = make_rust_tc(std::collections::BTreeMap::from([(
+            "FOO".to_string(),
+            "from-a".to_string(),
+        )]));
+        let b = make_node_tc(std::collections::BTreeMap::from([(
+            "FOO".to_string(),
+            "from-b".to_string(),
+        )]));
+        let env = aggregate_toolchain_env(&[a, b]);
+        let foo: Vec<&EnvVar> = env.iter().filter(|e| e.name == "FOO").collect();
+        assert_eq!(foo.len(), 1, "une seule entrée FOO agrégée");
+        assert_eq!(
+            foo[0].value.as_deref(),
+            Some("from-b"),
+            "dernière toolchain gagnante"
+        );
+        let foo_idx = env.iter().position(|e| e.name == "FOO").expect("FOO");
+        let path_idx = env.iter().position(|e| e.name == "PATH").expect("PATH");
+        assert!(foo_idx > path_idx, "FOO posée après PATH");
+    }
+
+    #[test]
+    fn job_checkout_default_branch_vide_non_passe() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut project = make_project(None);
+        project.spec.default_branch = Some(String::new());
+        let job = build_checkout_job(&sandbox, &project, &make_job_ctx());
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let command = pod_spec.containers[0].command.as_ref().unwrap();
+        assert!(
+            !command.iter().any(|a| a == "--default-branch"),
+            "le vide est traité comme absent"
+        );
+    }
+
+    #[test]
+    fn status_failed_ready_false_not_running() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let status = compute_status(&sandbox, "Failed");
+        assert_eq!(status.phase.as_deref(), Some("Failed"));
+        let ready = &status.conditions[0];
+        assert_eq!(ready.type_, "Ready");
+        assert_eq!(ready.status, "False");
+        assert_eq!(ready.reason, "NotRunning");
+    }
+
+    #[test]
+    fn status_service_toujours_pose_et_generation_suivie() {
+        let mut sandbox = make_sandbox("demo-branch", vec![], None);
+        sandbox.meta_mut().generation = Some(3);
+        for phase in ["Provisioning", "Running", "Suspended", "Failed"] {
+            let status = compute_status(&sandbox, phase);
+            assert_eq!(
+                status.service.as_deref(),
+                Some("sandbox-demo-branch"),
+                "{phase}"
+            );
+            assert_eq!(status.conditions[0].observed_generation, Some(3), "{phase}");
+        }
+    }
+
+    #[tokio::test]
+    async fn error_policy_worktree_pending_requeue_dix_secondes() {
+        let err = ControllerError::WorktreeRemovalPending {
+            sandbox: "demo-branch".to_string(),
+        };
+        let action = error_policy(
+            Arc::new(make_sandbox("demo-branch", vec![], None)),
+            &err,
+            offline_ctx(),
+        );
+        assert_eq!(action, Action::requeue(Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn error_policy_project_not_ready_requeue_quinze_secondes() {
+        let err = ControllerError::ProjectNotReady {
+            project: "demo".to_string(),
+            sandbox: "demo-branch".to_string(),
+        };
+        let action = error_policy(
+            Arc::new(make_sandbox("demo-branch", vec![], None)),
+            &err,
+            offline_ctx(),
+        );
+        assert_eq!(action, Action::requeue(Duration::from_secs(15)));
+    }
+
+    #[tokio::test]
+    async fn error_policy_erreur_courante_requeue_trente_secondes() {
+        let sb = || Arc::new(make_sandbox("demo-branch", vec![], None));
+        let errors = [
+            ControllerError::OwnerNotReady {
+                owner: "alice".to_string(),
+                project: "demo".to_string(),
+            },
+            ControllerError::Finalizer("boom".to_string()),
+        ];
+        for err in &errors {
+            assert_eq!(
+                error_policy(sb(), err, offline_ctx()),
+                Action::requeue(Duration::from_secs(30))
+            );
+        }
+    }
+
+    #[test]
+    fn ingress_annotation_certmanager_ecrase_celle_de_l_application() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut app = make_application("main");
+        app.spec.ingress_annotations = BTreeMap::from([(
+            "cert-manager.io/cluster-issuer".to_string(),
+            "app-issuer-custom".to_string(),
+        )]);
+        let ingress = build_sandbox_ingress(&sandbox, &app);
+        let annotations = ingress
+            .metadata
+            .annotations
+            .expect("should have annotations");
+        assert_eq!(
+            annotations
+                .get("cert-manager.io/cluster-issuer")
+                .map(String::as_str),
+            Some(app.spec.tls_issuer_name.as_str()),
+            "la valeur dérivée de tls_issuer_name écrase l'annotation de l'Application"
         );
     }
 }

@@ -452,7 +452,7 @@ Tasks:
     `compute_status_running`, `compute_status_provisioning`, `test_generate_cookie_secret_value` —
     ils verrouillent les Scenarios homonymes (le dernier est à renommer au titre de son
     Scenario, cf. tâche suivante).
-  [ ] Convertir en tests taggés par leur titre les Scenarios sans test existant :
+  [x] Convertir en tests taggés par leur titre les Scenarios sans test existant (fait 2026-10-17, controller/src/application.rs `mod tests` ; passent d'emblée, cf. .claude/memory/haiku-questions/controller.md) :
     `tls_secret_name_suffixe_cert`, `cert_manager_annotation_key_selon_kind`,
     `build_application_deployment_namespace_absent`,
     `deployment_phase_available_true_prioritaire_sur_failed`, `compute_status_failed`,

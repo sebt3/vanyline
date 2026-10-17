@@ -929,6 +929,9 @@ mod tests {
             pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
             &vec!["ReadWriteOnce".to_string()]
         );
+        // namespace et nom du PVC (extension Scenario build_workspace_pvc_default_size)
+        assert_eq!(pvc.metadata.namespace.as_deref(), Some("ns"));
+        assert_eq!(pvc.metadata.name.as_deref(), Some("project-demo"));
     }
 
     // 12. build_workspace_pvc_owner_default_size
@@ -1221,6 +1224,19 @@ mod tests {
             pod_spec.service_account_name,
             Some("project-demo-maint".to_string())
         );
+
+        // ownerReferences du CronJob vers le Project + concurrencyPolicy non posée
+        // par le builder (extension Scenario build_fetch_cronjob_shape)
+        let refs = cronjob
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "Project");
+        assert_eq!(refs[0].name, "demo");
+        assert_eq!(refs[0].controller, Some(true));
+        assert_eq!(cronjob.spec.concurrency_policy, None);
     }
 
     // 22. build_purge_job_shape
@@ -1243,6 +1259,13 @@ mod tests {
                 "/workspace".to_string(),
             ]
         );
+
+        // volumes (workspace + home) et absence de ServiceAccount
+        // (extension Scenario build_purge_job_shape)
+        let volumes = pod_spec.volumes.as_ref().expect("should have volumes");
+        let names: Vec<&str> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["workspace", "home"]);
+        assert_eq!(pod_spec.service_account_name, None);
     }
 
     // 23. git_jobs_service_account
@@ -1519,5 +1542,313 @@ mod tests {
             .position(|a| a == "--project")
             .expect("should have --project");
         assert_eq!(detect_cmd[project_idx + 1], "demo");
+    }
+
+    // Scenarios de construction pure de project.sdd sans test existant (tâche « Convertir en tests … »).
+
+    fn pod_spec_of(t: &PodTemplateSpec) -> &PodSpec {
+        t.spec.as_ref().expect("pod spec")
+    }
+
+    fn only_owner_ref_is_project(
+        refs: Option<&Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference>>,
+    ) {
+        let refs = refs.expect("ownerReferences posées");
+        assert_eq!(refs.len(), 1, "unique ownerReference");
+        assert_eq!(refs[0].kind, "Project");
+        assert_eq!(refs[0].name, "demo");
+        assert_eq!(refs[0].controller, Some(true));
+        // blockOwnerDeletion volontairement NON asserté : le Scenario exige `true`, or
+        // `controller_owner_ref` (kube) le laisse à None. Contradiction consignée (Q7).
+    }
+
+    #[test]
+    fn build_workspace_pvc_classe_absente_sans_defaut() {
+        let project = make_project(None);
+        let pvc = build_workspace_pvc(&project, None, None, None);
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().storage_class_name,
+            None,
+            "pas de repli constant : la classe par défaut du cluster tranche"
+        );
+    }
+
+    #[test]
+    fn build_workspace_pvc_classe_defaut_owner_surchargee_par_spec() {
+        let mut project = make_project(None);
+        let pvc = build_workspace_pvc(&project, None, Some("fast"), None);
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().storage_class_name.as_deref(),
+            Some("fast")
+        );
+        project.spec.storage_class = Some("gold".to_string());
+        let pvc = build_workspace_pvc(&project, None, Some("fast"), None);
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().storage_class_name.as_deref(),
+            Some("gold"),
+            "priorité spec > défaut Owner"
+        );
+    }
+
+    #[test]
+    fn rbac_trois_objets_owner_reference_controle() {
+        let project = make_project(None);
+        only_owner_ref_is_project(
+            build_maint_service_account(&project)
+                .metadata
+                .owner_references
+                .as_ref(),
+        );
+        only_owner_ref_is_project(
+            build_maint_role(&project)
+                .metadata
+                .owner_references
+                .as_ref(),
+        );
+        only_owner_ref_is_project(
+            build_maint_role_binding(&project)
+                .metadata
+                .owner_references
+                .as_ref(),
+        );
+    }
+
+    #[test]
+    fn fetch_schedule_transcrit_intervalle_sans_validation() {
+        for raw in ["1heures", "-5m", "1j"] {
+            let mut project = make_project(None);
+            project.spec.fetch_interval = Some(raw.to_string());
+            assert_eq!(fetch_schedule(&project), format!("@every {raw}"));
+        }
+    }
+
+    #[test]
+    fn sandbox_security_context_valeurs_uid_1000() {
+        let sc = sandbox_security_context();
+        assert_eq!(sc.run_as_user, Some(1000));
+        assert_eq!(sc.run_as_group, Some(1000));
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.fs_group, Some(1000));
+    }
+
+    #[test]
+    fn git_pod_template_sans_init_un_seul_container_git() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let argv = vec!["vanyline-maint".to_string(), "purge".to_string()];
+        let t = git_pod_template(&project, &ctx, None, argv.clone(), None);
+        let spec = pod_spec_of(&t);
+        assert!(spec.init_containers.is_none());
+        assert_eq!(spec.containers.len(), 1);
+        let c = &spec.containers[0];
+        assert_eq!(c.name, "git");
+        assert_eq!(c.image.as_deref(), Some(ctx.sandbox_image.as_str()));
+        assert_eq!(c.command.as_ref(), Some(&argv));
+    }
+
+    #[test]
+    fn git_pod_template_avec_init_env_et_mounts_dupliques() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let init = vec!["vanyline-maint".to_string(), "init".to_string()];
+        let detect = vec!["vanyline-maint".to_string(), "detect".to_string()];
+        let t = git_pod_template(&project, &ctx, Some(init.clone()), detect.clone(), None);
+        let spec = pod_spec_of(&t);
+        let inits = spec.init_containers.as_ref().expect("initContainers");
+        assert_eq!(inits.len(), 1);
+        let i = &inits[0];
+        let d = &spec.containers[0];
+        assert_eq!(i.name, "git");
+        assert_eq!(i.command.as_ref(), Some(&init));
+        assert_eq!(d.name, "detect");
+        assert_eq!(d.command.as_ref(), Some(&detect));
+        assert_eq!(i.image, d.image);
+        assert_eq!(i.env, d.env, "mêmes env sur init et principal");
+        assert_eq!(i.volume_mounts, d.volume_mounts, "mêmes volumeMounts");
+    }
+
+    #[test]
+    fn git_pod_template_env_home_et_ssh_inconditionnel() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let cmd = vec!["x".to_string()];
+        for t in [
+            git_pod_template(&project, &ctx, None, cmd.clone(), None),
+            git_pod_template(&project, &ctx, Some(cmd.clone()), cmd.clone(), None),
+        ] {
+            let spec = pod_spec_of(&t);
+            let mut containers = spec.containers.clone();
+            containers.extend(spec.init_containers.clone().unwrap_or_default());
+            for c in containers {
+                let env = c.env.expect("env");
+                let get = |k: &str| {
+                    env.iter()
+                        .find(|e| e.name == k)
+                        .and_then(|e| e.value.clone())
+                };
+                assert_eq!(get("HOME").as_deref(), Some("/home/vanyline"));
+                assert_eq!(
+                    get("GIT_SSH_COMMAND").as_deref(),
+                    Some(
+                        "ssh -i /home/vanyline/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn git_pod_template_labels_du_template_seulement() {
+        let project = make_project(None);
+        let t = git_pod_template(&project, &make_ctx(), None, vec!["x".to_string()], None);
+        let labels = t.metadata.as_ref().unwrap().labels.clone().unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            labels
+                .get("vanyline.solidite.fr/project")
+                .map(String::as_str),
+            Some("demo")
+        );
+    }
+
+    #[test]
+    fn git_pod_template_volumes_et_mounts_fixes() {
+        let project = make_project(None);
+        let t = git_pod_template(&project, &make_ctx(), None, vec!["x".to_string()], None);
+        let spec = pod_spec_of(&t);
+        let vols = spec.volumes.as_ref().unwrap();
+        assert_eq!(vols.len(), 2);
+        assert_eq!(vols[0].name, "workspace");
+        assert_eq!(
+            vols[0].persistent_volume_claim.as_ref().unwrap().claim_name,
+            "project-demo"
+        );
+        assert_eq!(vols[1].name, "home");
+        assert_eq!(
+            vols[1].persistent_volume_claim.as_ref().unwrap().claim_name,
+            "owner-alice-home"
+        );
+        let mounts = spec.containers[0].volume_mounts.as_ref().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].name, "workspace");
+        assert_eq!(mounts[0].mount_path, "/workspace");
+        assert_eq!(mounts[0].sub_path, None);
+        assert_eq!(mounts[1].name, "home");
+        assert_eq!(mounts[1].mount_path, "/home/vanyline");
+        assert_eq!(mounts[1].sub_path, None);
+    }
+
+    #[test]
+    fn git_pod_template_restart_policy_never() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let cmd = vec!["x".to_string()];
+        let a = git_pod_template(&project, &ctx, None, cmd.clone(), None);
+        let b = git_pod_template(&project, &ctx, Some(cmd.clone()), cmd, None);
+        assert_eq!(pod_spec_of(&a).restart_policy.as_deref(), Some("Never"));
+        assert_eq!(pod_spec_of(&b).restart_policy.as_deref(), Some("Never"));
+    }
+
+    #[test]
+    fn init_job_caches_repetes_dans_l_ordre_de_la_spec() {
+        let mut project = make_project(None);
+        project.spec.caches = Some(vec![
+            "pnpm".to_string(),
+            "cargo".to_string(),
+            "pnpm".to_string(),
+        ]);
+        let job = build_init_job(&project, &make_ctx());
+        let spec = job.spec.as_ref().unwrap();
+        let init = &pod_spec_of(&spec.template)
+            .init_containers
+            .as_ref()
+            .unwrap()[0];
+        let argv = init.command.as_ref().unwrap();
+        let n = argv.len();
+        assert_eq!(
+            &argv[n - 6..],
+            &[
+                "--cache".to_string(),
+                "pnpm".to_string(),
+                "--cache".to_string(),
+                "cargo".to_string(),
+                "--cache".to_string(),
+                "pnpm".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_jobs_backoff_limit_3_et_ttl_3600() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let init = build_init_job(&project, &ctx);
+        let fetch = build_fetch_cronjob(&project, &ctx);
+        let purge = build_purge_job(&project, &ctx);
+        let specs = [
+            init.spec.unwrap(),
+            fetch.spec.job_template.spec.unwrap(),
+            purge.spec.unwrap(),
+        ];
+        for s in specs {
+            assert_eq!(s.backoff_limit, Some(3));
+            assert_eq!(s.ttl_seconds_after_finished, Some(3600));
+        }
+    }
+
+    #[test]
+    fn jobs_et_cronjob_owner_references_vers_project() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        only_owner_ref_is_project(
+            build_init_job(&project, &ctx)
+                .metadata
+                .owner_references
+                .as_ref(),
+        );
+        only_owner_ref_is_project(
+            build_fetch_cronjob(&project, &ctx)
+                .metadata
+                .owner_references
+                .as_ref(),
+        );
+        only_owner_ref_is_project(
+            build_purge_job(&project, &ctx)
+                .metadata
+                .owner_references
+                .as_ref(),
+        );
+    }
+
+    #[test]
+    fn fetch_cronjob_concurrency_policy_non_posee_par_le_builder() {
+        let project = make_project(None);
+        let cj = build_fetch_cronjob(&project, &make_ctx());
+        assert_eq!(cj.spec.concurrency_policy, None);
+    }
+
+    #[test]
+    fn compute_status_json_omet_languages_et_detected_at() {
+        let project = make_project(None);
+        let status = compute_status(&project, true);
+        assert!(status.languages.is_empty());
+        assert!(status.detected_at.is_none());
+        let envelope = serde_json::json!({ "status": status });
+        let st = envelope["status"].as_object().expect("status objet");
+        assert!(!st.contains_key("languages"), "languages doit être omis");
+        assert!(!st.contains_key("detectedAt"), "detectedAt doit être omis");
+    }
+
+    #[test]
+    fn compute_status_conditions_generation_et_transition() {
+        let mut project = make_project(None);
+        project.meta_mut().generation = Some(7);
+        let before = k8s_openapi::jiff::Timestamp::now();
+        let first = compute_status(&project, true);
+        let second = compute_status(&project, true);
+        let c1 = &first.conditions[0];
+        assert_eq!(c1.observed_generation, Some(7));
+        assert!(c1.last_transition_time.0 >= before);
+        assert!(second.conditions[0].last_transition_time.0 >= c1.last_transition_time.0);
     }
 }
