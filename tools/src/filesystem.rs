@@ -1717,4 +1717,169 @@ mod tests {
             other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
+
+    /// Scenario `read_file_budget_octets_tronque_avant_budget_lignes`.
+    #[tokio::test]
+    async fn read_file_budget_octets_tronque_avant_budget_lignes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("long.txt");
+        let content: String = (0..200)
+            .map(|i| format!("{i:03}{}", "x".repeat(197)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(&file, &content).await.unwrap();
+
+        let result = read_file(ReadFileOptions {
+            path: file.to_string_lossy().to_string(),
+            limit: 200,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        assert!(result.contains("[truncated"));
+        let body = result
+            .rsplit_once("\n[truncated")
+            .map_or(result.as_str(), |(body, _)| body);
+        assert!(body.len() <= output::READ_MAX_BYTES, "{}", body.len());
+        let content_lines = body.lines().count();
+        assert!(content_lines < 200, "{content_lines} lignes de contenu");
+    }
+
+    /// Scenario `read_file_fichier_vide_offset_non_zero_refuse`.
+    #[tokio::test]
+    async fn read_file_fichier_vide_offset_non_zero_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("vide.txt");
+        tokio::fs::write(&file, "").await.unwrap();
+
+        let err = read_file(ReadFileOptions {
+            path: file.to_string_lossy().to_string(),
+            offset: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+        match err {
+            ToolsError::InvalidArgument { name, reason } => {
+                assert_eq!(name, "offset");
+                assert_eq!(reason, "file is empty");
+            }
+            other => panic!("InvalidArgument attendu, obtenu : {other:?}"),
+        }
+    }
+
+    /// Scenario `read_file_non_utf8_remonte_vnl_tls_009`.
+    #[tokio::test]
+    async fn read_file_non_utf8_remonte_vnl_tls_009() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("binaire.bin");
+        tokio::fs::write(&file, [0xFF_u8, 0xFE]).await.unwrap();
+
+        let err = read_file(ReadFileOptions {
+            path: file.to_string_lossy().to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ToolsError::Io { .. }), "{err:?}");
+        assert!(err.to_string().starts_with("VNL-TLS-009"));
+    }
+
+    /// Scenario `edit_file_occurrences_non_chevauchees`.
+    #[tokio::test]
+    async fn edit_file_occurrences_non_chevauchees() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("aaaa.txt");
+        tokio::fs::write(&file, "aaaa").await.unwrap();
+
+        let err = edit_file(EditFileOptions {
+            path: file.to_string_lossy().to_string(),
+            old_string: "aa".into(),
+            new_string: "b".into(),
+            replace_all: false,
+        })
+        .await
+        .unwrap_err();
+
+        match err {
+            ToolsError::EditAmbiguous { count, .. } => assert_eq!(count, 2),
+            other => panic!("EditAmbiguous attendu, obtenu : {other:?}"),
+        }
+    }
+
+    /// Scenario `edit_file_old_string_vide_refuse_sans_acces_fichier`.
+    #[tokio::test]
+    async fn edit_file_old_string_vide_refuse_sans_acces_fichier() {
+        let err = edit_file(EditFileOptions {
+            path: "/nonexistent/fichier/inexistant.txt".into(),
+            old_string: String::new(),
+            new_string: "x".into(),
+            replace_all: false,
+        })
+        .await
+        .unwrap_err();
+
+        match err {
+            ToolsError::InvalidArgument { name, reason } => {
+                assert_eq!(name, "old_string");
+                assert!(reason.contains("must not be empty"));
+            }
+            other => panic!("InvalidArgument attendu, obtenu : {other:?}"),
+        }
+    }
+
+    /// Scenario `rename_parent_destination_est_un_fichier_refuse`.
+    #[tokio::test]
+    async fn rename_parent_destination_est_un_fichier_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let obstacle = dir.path().join("obstacle.txt");
+        tokio::fs::write(&src, "data").await.unwrap();
+        tokio::fs::write(&obstacle, "obstacle").await.unwrap();
+        let to = obstacle.join("x.txt");
+
+        let err = rename_file(RenameFileOptions {
+            path: src.to_string_lossy().to_string(),
+            to: to.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap_err();
+
+        match err {
+            ToolsError::InvalidArgument { name, reason } => {
+                assert_eq!(name, "to");
+                assert!(reason.contains("is a file, not a directory"));
+            }
+            other => panic!("InvalidArgument attendu, obtenu : {other:?}"),
+        }
+        assert!(src.exists(), "la source doit rester intacte");
+    }
+
+    /// Scenario `file_not_found_hint_liste_triee_ou_liste_vide`.
+    #[tokio::test]
+    async fn file_not_found_hint_liste_triee_ou_liste_vide() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_b = dir.path().join("b");
+        let parent_c = dir.path().join("c");
+        tokio::fs::create_dir(&parent_b).await.unwrap();
+        tokio::fs::create_dir(&parent_c).await.unwrap();
+        tokio::fs::write(parent_b.join("b.txt"), "").await.unwrap();
+        tokio::fs::write(parent_b.join("a.rs"), "").await.unwrap();
+
+        let listed = file_not_found_hint(&parent_b.join("introuvable.txt").to_string_lossy());
+        assert_eq!(listed, ", parent directory contains: [a.rs, b.txt]");
+
+        let empty = file_not_found_hint(&parent_c.join("introuvable.txt").to_string_lossy());
+        assert_eq!(empty, ", parent directory contains: []");
+    }
+
+    /// Scenario `file_not_found_hint_vide_quand_parent_implicit`.
+    #[test]
+    fn file_not_found_hint_vide_quand_parent_implicit() {
+        assert_eq!(file_not_found_hint("f.txt"), "");
+        assert_eq!(file_not_found_hint("./f.txt"), "");
+    }
 }

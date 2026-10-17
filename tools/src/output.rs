@@ -290,4 +290,47 @@ mod tests {
         assert_eq!(bound_head_tail("", 1024), "");
         assert_eq!(number_lines("", 10), "");
     }
+
+    /// Scenario `bornes_defaut_valeurs_centrales`.
+    #[test]
+    fn bornes_defaut_valeurs_centrales() {
+        assert_eq!(READ_MAX_LINES, 200);
+        assert_eq!(READ_MAX_BYTES, 16384);
+        assert_eq!(LIST_MAX_ENTRIES, 200);
+        assert_eq!(SEARCH_MAX_MATCHES, 50);
+        assert_eq!(COMMAND_MAX_BYTES, 8192);
+    }
+
+    /// Scenario `bound_lines_saut_final_supprime`.
+    #[test]
+    fn bound_lines_saut_final_supprime() {
+        let result = bound_lines("a\nb\n", 0, 10, 1024);
+        assert_eq!(result, "a\nb");
+        assert!(!result.contains("truncated"));
+    }
+
+    /// Scenario `bound_head_tail_compte_marqueur_egal_ecart_octets`.
+    #[test]
+    fn bound_head_tail_compte_marqueur_egal_ecart_octets() {
+        let text = (0..100)
+            .map(|i| format!("line {}: {}", i, "x".repeat(190)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let total = text.len();
+        let result = bound_head_tail(&text, 8192);
+        let expected_marker = format!("[... {} bytes truncated ...]", total - 8192);
+        assert!(result.contains(&expected_marker));
+    }
+
+    /// Scenario `number_lines_numero_sans_largeur_maximale`.
+    #[test]
+    fn number_lines_numero_sans_largeur_maximale() {
+        assert_eq!(number_lines("x", 123_456), "123456\tx");
+    }
+
+    /// Scenario `normalisation_crlf_en_lf`.
+    #[test]
+    fn normalisation_crlf_en_lf() {
+        assert_eq!(bound_lines("a\r\nb\r\n", 0, 10, 1024), "a\nb");
+    }
 }

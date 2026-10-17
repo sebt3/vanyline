@@ -124,4 +124,220 @@ mod tests {
         };
         assert!(io.to_string().contains("VNL-TLS-009"));
     }
+
+    /// Scenario `display_exhaustif_des_neuf_marqueurs_vnl_tls`.
+    #[test]
+    fn display_exhaustif_des_neuf_marqueurs_vnl_tls() {
+        let cases: Vec<(ToolsError, &str)> = vec![
+            (
+                ToolsError::FileNotFound {
+                    path: "/foo".into(),
+                    hint: String::new(),
+                },
+                "VNL-TLS-001: file not found: /foo",
+            ),
+            (
+                ToolsError::NotAFile("/foo".into()),
+                "VNL-TLS-002: not a file: /foo (it is a directory — use list_directory)",
+            ),
+            (
+                ToolsError::NotADirectory("/foo".into()),
+                "VNL-TLS-003: not a directory: /foo (it is a file — use read_file)",
+            ),
+            (
+                ToolsError::PermissionDenied("/foo".into()),
+                "VNL-TLS-004: permission denied: /foo",
+            ),
+            (
+                ToolsError::InvalidArgument {
+                    name: "offset".into(),
+                    reason: "file is empty".into(),
+                },
+                "VNL-TLS-005: invalid argument offset: file is empty",
+            ),
+            (
+                ToolsError::EditNoMatch {
+                    path: "/foo".into(),
+                    hint: String::new(),
+                },
+                "VNL-TLS-006: string not found in /foo: no occurrence of the provided old_string",
+            ),
+            (
+                ToolsError::EditAmbiguous {
+                    path: "/foo".into(),
+                    count: 3,
+                },
+                "VNL-TLS-007: 3 occurrences of old_string in /foo — pass replace_all=true or provide a more specific old_string",
+            ),
+            (
+                ToolsError::CommandTimeout(30),
+                "VNL-TLS-008: command timed out after 30s (partial output kept)",
+            ),
+            (
+                ToolsError::Io {
+                    path: "/foo".into(),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+                },
+                "VNL-TLS-009: I/O error on /foo: nope",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    /// Scenario `file_not_found_concatene_le_hint_sans_separateur`.
+    #[test]
+    fn file_not_found_concatene_le_hint_sans_separateur() {
+        let with_contents = ToolsError::FileNotFound {
+            path: "/foo/bar".into(),
+            hint: ", parent directory contains: [a, b]".into(),
+        };
+        assert_eq!(
+            with_contents.to_string(),
+            "VNL-TLS-001: file not found: /foo/bar, parent directory contains: [a, b]"
+        );
+
+        let not_exist = ToolsError::FileNotFound {
+            path: "/foo/bar".into(),
+            hint: ", parent directory does not exist either".into(),
+        };
+        assert_eq!(
+            not_exist.to_string(),
+            "VNL-TLS-001: file not found: /foo/bar, parent directory does not exist either"
+        );
+
+        let empty = ToolsError::FileNotFound {
+            path: "/foo/bar".into(),
+            hint: String::new(),
+        };
+        assert_eq!(empty.to_string(), "VNL-TLS-001: file not found: /foo/bar");
+    }
+
+    /// Scenario `edit_no_match_avec_et_sans_hint_proche`.
+    #[test]
+    fn edit_no_match_avec_et_sans_hint_proche() {
+        let with_hint = ToolsError::EditNoMatch {
+            path: "/foo".into(),
+            hint: ". Closest line in file: 'xyz'".into(),
+        };
+        assert_eq!(
+            with_hint.to_string(),
+            "VNL-TLS-006: string not found in /foo: no occurrence of the provided old_string. Closest line in file: 'xyz'"
+        );
+
+        let without_hint = ToolsError::EditNoMatch {
+            path: "/foo".into(),
+            hint: String::new(),
+        };
+        assert_eq!(
+            without_hint.to_string(),
+            "VNL-TLS-006: string not found in /foo: no occurrence of the provided old_string"
+        );
+    }
+
+    /// Scenario `edit_ambiguous_rend_le_nombre_et_la_parade`.
+    #[test]
+    fn edit_ambiguous_rend_le_nombre_et_la_parade() {
+        let err = ToolsError::EditAmbiguous {
+            path: "/foo".into(),
+            count: 3,
+        };
+        assert_eq!(
+            err.to_string(),
+            "VNL-TLS-007: 3 occurrences of old_string in /foo — pass replace_all=true or provide a more specific old_string"
+        );
+    }
+
+    /// Scenario `command_timeout_affiche_la_duree_en_secondes`.
+    #[test]
+    fn command_timeout_affiche_la_duree_en_secondes() {
+        assert_eq!(
+            ToolsError::CommandTimeout(30).to_string(),
+            "VNL-TLS-008: command timed out after 30s (partial output kept)"
+        );
+    }
+
+    /// Scenario `source_std_error_absente_sauf_variante_io`.
+    #[test]
+    fn source_std_error_absente_sauf_variante_io() {
+        use std::error::Error as _;
+
+        let perm = ToolsError::PermissionDenied("/foo".into());
+        assert!(perm.source().is_none());
+
+        let io = ToolsError::Io {
+            path: "/foo".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+        };
+        let src = io.source();
+        assert!(src.is_some());
+        assert_eq!(src.map(ToString::to_string).as_deref(), Some("nope"));
+    }
+
+    /// Scenario `io_inliste_le_display_de_la_cause`.
+    #[test]
+    fn io_inliste_le_display_de_la_cause() {
+        use std::error::Error as _;
+
+        let io = ToolsError::Io {
+            path: "/foo".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+        };
+        assert_eq!(io.to_string(), "VNL-TLS-009: I/O error on /foo: nope");
+        assert_eq!(
+            io.source().map(ToString::to_string).as_deref(),
+            Some("nope")
+        );
+    }
+
+    /// Scenario `pas_de_conversion_automatique_depuis_std_io_error`.
+    /// Substitut à trybuild : contrôle source sur la partie production du fichier.
+    #[test]
+    fn pas_de_conversion_automatique_depuis_std_io_error() {
+        let src = include_str!("error.rs");
+        let (production, _) = src
+            .split_once("#[cfg(test)]")
+            .expect("marqueur cfg(test) présent");
+        assert!(!production.contains("#[from]"));
+        assert!(!production.contains("impl From"));
+        assert!(!production.contains("impl std::convert::From"));
+    }
+
+    /// Scenario `marqueurs_tls_uniques_et_non_dupliques`.
+    #[test]
+    fn marqueurs_tls_uniques_et_non_dupliques() {
+        let src = include_str!("error.rs");
+        let (production, _) = src
+            .split_once("#[cfg(test)]")
+            .expect("marqueur cfg(test) présent");
+        for n in 1..=9 {
+            // Motif restreint au gabarit `#[error("VNL-TLS-00n:`, pour ne pas
+            // compter les commentaires doc qui citent aussi le marqueur.
+            let marker = format!("\"VNL-TLS-00{n}:");
+            assert_eq!(
+                production.matches(marker.as_str()).count(),
+                1,
+                "gabarit {marker} attendu une seule fois hors tests"
+            );
+        }
+    }
+
+    /// Scenario `payload_rendu_tel_quel_sans_validation`.
+    #[test]
+    fn payload_rendu_tel_quel_sans_validation() {
+        let chemin = "/dosier avec espace «çà» 'quote'";
+        assert_eq!(
+            ToolsError::NotAFile(chemin.into()).to_string(),
+            format!("VNL-TLS-002: not a file: {chemin} (it is a directory — use list_directory)")
+        );
+        let ambiguous = ToolsError::EditAmbiguous {
+            path: "/foo".into(),
+            count: 0,
+        };
+        assert_eq!(
+            ambiguous.to_string(),
+            "VNL-TLS-007: 0 occurrences of old_string in /foo — pass replace_all=true or provide a more specific old_string"
+        );
+    }
 }
