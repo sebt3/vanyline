@@ -210,4 +210,59 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
+
+    /// Scenario : `build_domain_server_elimine_les_valeurs_de_header_non_chainees`.
+    #[test]
+    fn build_domain_server_elimine_les_valeurs_de_header_non_chainees() {
+        let server = McpServerModel {
+            id: 1,
+            name: "srv".to_string(),
+            server_type: "http-streamable".to_string(),
+            url: "http://localhost:3000/mcp".to_string(),
+            headers: serde_json::json!({
+                "Authorization": "Bearer x",
+                "X-Port": 8443,
+                "X-Flag": null,
+                "X-Nested": {"k": 1}
+            }),
+            available_tools: serde_json::json!([]),
+        };
+        let result = build_domain_server(&server).expect("mapping succeeds");
+        assert_eq!(result.headers.len(), 1);
+        assert_eq!(
+            result.headers.get("Authorization"),
+            Some(&"Bearer x".to_string())
+        );
+    }
+
+    /// Scenario : `build_domain_server_headers_non_objet_donne_une_map_vide`.
+    #[test]
+    fn build_domain_server_headers_non_objet_donne_une_map_vide() {
+        for headers in [
+            serde_json::Value::Null,
+            serde_json::json!(["a", "b"]),
+            serde_json::json!(42),
+        ] {
+            let server = McpServerModel {
+                id: 1,
+                name: "srv".to_string(),
+                server_type: "http-streamable".to_string(),
+                url: "http://localhost:3000/mcp".to_string(),
+                headers,
+                available_tools: serde_json::json!([]),
+            };
+            let result = build_domain_server(&server).expect("never Err on odd headers shape");
+            assert!(result.headers.is_empty());
+        }
+    }
+
+    /// Scenario : `mcp_test_result_serialize_en_un_tableau_sous_la_cle_tools`.
+    #[test]
+    fn mcp_test_result_serialize_en_un_tableau_sous_la_cle_tools() {
+        let result = McpTestResult {
+            tools: vec!["fs.read".to_string(), "fs.write".to_string()],
+        };
+        let json = serde_json::to_value(&result).expect("serialize McpTestResult");
+        assert_eq!(json, serde_json::json!({"tools": ["fs.read", "fs.write"]}));
+    }
 }

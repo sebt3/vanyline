@@ -575,6 +575,480 @@ mod tests {
             workflow_deployment_url: None,
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Passe 3 (conversations.sdd) : Scenario sans test. Les routes à `{id}` (lecture,
+    // suppression, messages d'autrui) et les statuts 403/404/204 sont CONSIGNÉS dans
+    // .claude/memory/haiku-questions/app.md (barème `[!]`), de même que le Scenario
+    // d'incohérence de contexte (amplification verrouillée) et le chemin non numérique (`[?]`).
+    // ---------------------------------------------------------------------
+
+    use crate::db::entities::{
+        agents, chat_contexts, conversations, llm_providers, messages, model_profiles,
+    };
+    use crate::db::test_support::real_db;
+    use axum::response::IntoResponse;
+    use miryad_core::auth::AuthUser;
+    use sea_orm::{
+        ActiveValue::NotSet, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait,
+        QueryFilter, Set,
+    };
+
+    fn alice_user() -> AuthUser {
+        AuthUser {
+            subject: "alice".to_string(),
+            email: None,
+            id_token: "test-id-token".to_string(),
+        }
+    }
+
+    /// En-tête `Cookie` de session scellé pour `subject` (même mécanisme que `local_tools`).
+    fn session_cookie(subject: &str) -> String {
+        let identity = miryad_core::auth::OidcIdentity {
+            id_token: "e30.eyJleHAiOjQxMDI0NDQ4MDB9.signature".to_string(),
+            subject: subject.to_string(),
+            email: None,
+            preferred_username: None,
+        };
+        let set_cookie = miryad_core::auth::cookie::build_set_cookie(&identity, &test_key(), false);
+        set_cookie
+            .split(';')
+            .next()
+            .expect("cookie has a name=value pair")
+            .to_string()
+    }
+
+    async fn seed_user(db: &DatabaseConnection, subject: &str) -> i32 {
+        miryad_core::users::resolve_user(db, subject, None)
+            .await
+            .expect("user resolves")
+            .id
+    }
+
+    async fn seed_profile(db: &DatabaseConnection, owner: i32) -> i32 {
+        let provider = llm_providers::Entity::insert(llm_providers::ActiveModel {
+            id: NotSet,
+            name: Set(format!("prov-{owner}")),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://localhost:11434".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(false),
+        })
+        .exec(db)
+        .await
+        .expect("provider inserts")
+        .last_insert_id;
+        model_profiles::Entity::insert(model_profiles::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(format!("qwen-{owner}")),
+            provider_id: Set(provider),
+            model: Set("qwen2.5".to_string()),
+            temperature: Set(None),
+            max_tokens: Set(None),
+            options: Set(serde_json::json!({})),
+        })
+        .exec(db)
+        .await
+        .expect("profile inserts")
+        .last_insert_id
+    }
+
+    async fn seed_agent(db: &DatabaseConnection, owner: i32, name: &str, profile: i32) {
+        agents::Entity::insert(agents::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(name.to_string()),
+            description: Set(None),
+            mode: Set("primary".to_string()),
+            model_profile_id: Set(profile),
+            toolsets: Set(serde_json::json!([])),
+            skills: Set(serde_json::json!("auto")),
+            system_prompt: Set(String::new()),
+            system_key: Set(None),
+            system_version: Set(None),
+        })
+        .exec(db)
+        .await
+        .expect("agent inserts");
+    }
+
+    async fn seed_context(db: &DatabaseConnection, sandbox_name: &str) -> i32 {
+        chat_contexts::Entity::insert(chat_contexts::ActiveModel {
+            id: NotSet,
+            kind: Set("sandbox".to_string()),
+            data: Set(serde_json::json!({"sandbox_name": sandbox_name})),
+            created_at: Set(chrono::Utc::now()),
+        })
+        .exec(db)
+        .await
+        .expect("context inserts")
+        .last_insert_id
+    }
+
+    /// Conversation sans agent, `updated_at` fixé (ordre de tri contrôlé).
+    async fn seed_conversation(
+        db: &DatabaseConnection,
+        owner: i32,
+        context_id: i32,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> i32 {
+        conversations::Entity::insert(conversations::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            agent_id: Set(None),
+            context_id: Set(context_id),
+            title: Set(None),
+            todo: Set(None),
+            created_at: Set(updated_at),
+            updated_at: Set(updated_at),
+        })
+        .exec(db)
+        .await
+        .expect("conversation inserts")
+        .last_insert_id
+    }
+
+    fn state_with(db: DatabaseConnection) -> AppState {
+        AppState {
+            config: test_config_for_state(),
+            cookie_key: test_key(),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+            shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+            workflow: None,
+        }
+    }
+
+    async fn get_json(app: Router, uri: &str, cookie: &str) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .uri(uri)
+            .header("Cookie", cookie)
+            .body(Body::empty())
+            .expect("valid request");
+        let resp = app.oneshot(req).await.expect("router does not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn list_router(state: AppState) -> Router {
+        Router::new()
+            .route(
+                "/conversations",
+                get(list_conversations).post(create_conversation),
+            )
+            .route("/conversations/{id}/messages", get(get_messages))
+            .with_state(state)
+    }
+
+    fn ts(day: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 1, day, 12, 0, 0)
+            .single()
+            .expect("valid date")
+    }
+
+    /// Scenario : `liste_authentifiée_filtre_sur_owner_et_tri_par_updated_at_descendant`.
+    #[tokio::test]
+    async fn liste_authentifiee_filtre_sur_owner_et_tri_par_updated_at_descendant() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        let ctx = seed_context(&db, "sb").await;
+        let old = seed_conversation(&db, alice, ctx, ts(1)).await;
+        let recent = seed_conversation(&db, alice, ctx, ts(2)).await;
+        seed_conversation(&db, bob, ctx, ts(3)).await;
+
+        let (status, body) = get_json(
+            list_router(state_with(db)),
+            "/conversations",
+            &session_cookie("alice"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body.as_array().expect("array body");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], serde_json::json!(recent));
+        assert_eq!(items[1]["id"], serde_json::json!(old));
+        for item in items {
+            assert_eq!(item.as_object().map(serde_json::Map::len), Some(7));
+        }
+    }
+
+    /// Scenario : `liste_filtrée_par_sandbox_name_selon_kind_et_valeur_exacte`.
+    #[tokio::test]
+    async fn liste_filtree_par_sandbox_name_selon_kind_et_valeur_exacte() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let sb_a = seed_context(&db, "sb-a").await;
+        let sb_b = seed_context(&db, "sb-b").await;
+        let other = chat_contexts::Entity::insert(chat_contexts::ActiveModel {
+            id: NotSet,
+            kind: Set("autre".to_string()),
+            data: Set(serde_json::json!({"sandbox_name": "sb-a"})),
+            created_at: Set(chrono::Utc::now()),
+        })
+        .exec(&db)
+        .await
+        .expect("context inserts")
+        .last_insert_id;
+        let wanted = seed_conversation(&db, alice, sb_a, ts(1)).await;
+        seed_conversation(&db, alice, sb_b, ts(2)).await;
+        seed_conversation(&db, alice, other, ts(3)).await;
+
+        let (status, body) = get_json(
+            list_router(state_with(db)),
+            "/conversations?sandbox_name=sb-a",
+            &session_cookie("alice"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body.as_array().expect("array body");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], serde_json::json!(wanted));
+        assert_eq!(items[0]["context"]["kind"], "sandbox");
+        assert_eq!(items[0]["context"]["data"]["sandbox_name"], "sb-a");
+    }
+
+    /// Scenario : `filtre_sandbox_name_exclut_casse_et_type_différents`.
+    #[tokio::test]
+    async fn filtre_sandbox_name_exclut_casse_et_type_differents() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let ctx = seed_context(&db, "sb-a").await;
+        seed_conversation(&db, alice, ctx, ts(1)).await;
+        let numeric = chat_contexts::Entity::insert(chat_contexts::ActiveModel {
+            id: NotSet,
+            kind: Set("sandbox".to_string()),
+            data: Set(serde_json::json!({"sandbox_name": 42})),
+            created_at: Set(chrono::Utc::now()),
+        })
+        .exec(&db)
+        .await
+        .expect("context inserts")
+        .last_insert_id;
+        seed_conversation(&db, alice, numeric, ts(2)).await;
+
+        let cookie = session_cookie("alice");
+        let (status, body) = get_json(
+            list_router(state_with(db.clone())),
+            "/conversations?sandbox_name=SB-A",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([]));
+
+        // Contexte non-chaîne : jamais pris pour une correspondance.
+        conversations::Entity::delete_many()
+            .filter(conversations::Column::ContextId.eq(ctx))
+            .exec(&db)
+            .await
+            .expect("delete succeeds");
+        let (status, body) = get_json(
+            list_router(state_with(db)),
+            "/conversations?sandbox_name=42",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([]));
+    }
+
+    /// Scenario : `création_avec_agent_connu_retourne_201_et_crée_contexte_et_conversation`.
+    #[tokio::test]
+    async fn creation_avec_agent_connu_retourne_201_et_cree_contexte_et_conversation() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let profile = seed_profile(&db, alice).await;
+        seed_agent(&db, alice, "agent-1", profile).await;
+        let body: CreateConversation = serde_json::from_value(serde_json::json!({
+            "agent_name": "agent-1",
+            "context": {"kind": "sandbox", "data": {"sandbox_name": "sb"}}
+        }))
+        .expect("body parses");
+
+        let (status, Json(out)) =
+            create_conversation(State(state_with(db.clone())), alice_user(), Json(body))
+                .await
+                .expect("creation succeeds");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(out.agent_name.as_deref(), Some("agent-1"));
+        assert!(out.title.is_none());
+        assert!(out.todo.is_none());
+        assert_eq!(out.created_at, out.updated_at);
+        assert_eq!(out.context.kind, "sandbox");
+        assert_eq!(out.context.data["sandbox_name"], "sb");
+        assert!(out.context.id > 0);
+        assert_eq!(
+            conversations::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            1
+        );
+        assert_eq!(
+            chat_contexts::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            1
+        );
+    }
+
+    /// Scenario : `création_sans_agent_name_retourne_201_avec_agent_name_null`.
+    #[tokio::test]
+    async fn creation_sans_agent_name_retourne_201_avec_agent_name_null() {
+        let db = real_db().await;
+        seed_user(&db, "alice").await;
+        for raw in [
+            serde_json::json!({"context": {"kind": "sandbox", "data": {"sandbox_name": "sb"}}}),
+            serde_json::json!({"agent_name": null, "context": {"kind": "sandbox", "data": {"sandbox_name": "sb"}}}),
+        ] {
+            let body: CreateConversation = serde_json::from_value(raw).expect("body parses");
+            let (status, Json(out)) =
+                create_conversation(State(state_with(db.clone())), alice_user(), Json(body))
+                    .await
+                    .expect("creation succeeds");
+            assert_eq!(status, StatusCode::CREATED);
+            assert!(out.agent_name.is_none());
+            let row = conversations::Entity::find_by_id(out.id)
+                .one(&db)
+                .await
+                .expect("query runs")
+                .expect("conversation row exists");
+            assert!(row.agent_id.is_none());
+        }
+    }
+
+    /// Scenario : `création_avec_agent_inconnu_retourne_422_sans_aucune_écriture`.
+    #[tokio::test]
+    async fn creation_avec_agent_inconnu_retourne_422_sans_aucune_ecriture() {
+        let db = real_db().await;
+        seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        let profile_bob = seed_profile(&db, bob).await;
+        seed_agent(&db, bob, "agent-1", profile_bob).await;
+
+        for name in ["agent-1", "inexistant"] {
+            let body: CreateConversation = serde_json::from_value(serde_json::json!({
+                "agent_name": name,
+                "context": {"kind": "sandbox", "data": {"sandbox_name": "sb"}}
+            }))
+            .expect("body parses");
+            let err = create_conversation(State(state_with(db.clone())), alice_user(), Json(body))
+                .await
+                .expect_err("unknown agent is refused");
+            assert!(matches!(err, AppError::UnprocessableReference(_)));
+            let resp = err.into_response();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body reads");
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(text.contains("Unknown agent reference"), "body: {text}");
+        }
+        assert_eq!(
+            chat_contexts::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            0
+        );
+        assert_eq!(
+            conversations::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            0
+        );
+    }
+
+    /// Scenario : `liste_d_un_owner_sans_conversation_retourne_tableau_vide`.
+    #[tokio::test]
+    async fn liste_d_un_owner_sans_conversation_retourne_tableau_vide() {
+        let db = real_db().await;
+        seed_user(&db, "alice").await;
+        let cookie = session_cookie("alice");
+        for uri in ["/conversations", "/conversations?sandbox_name=x"] {
+            let (status, body) = get_json(list_router(state_with(db.clone())), uri, &cookie).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, serde_json::json!([]));
+        }
+    }
+
+    /// Scenario : `messages_triés_en_six_clés_brutes_ou_tableau_vide`.
+    #[tokio::test]
+    async fn messages_tries_en_six_cles_brutes_ou_tableau_vide() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let ctx = seed_context(&db, "sb").await;
+        let with_messages = seed_conversation(&db, alice, ctx, ts(1)).await;
+        let empty = seed_conversation(&db, alice, ctx, ts(2)).await;
+        // Insertion du plus récent au plus ancien : le tri doit rétablir l'ordre.
+        for (day, text) in [(5, "second"), (4, "premier")] {
+            messages::Entity::insert(messages::ActiveModel {
+                id: NotSet,
+                owner_id: Set(alice),
+                conversation_id: Set(with_messages),
+                role: Set("user".to_string()),
+                payload: Set(serde_json::json!({"text": text})),
+                created_at: Set(ts(day)),
+            })
+            .exec(&db)
+            .await
+            .expect("message inserts");
+        }
+
+        let cookie = session_cookie("alice");
+        let (status, body) = get_json(
+            list_router(state_with(db.clone())),
+            &format!("/conversations/{with_messages}/messages"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = body.as_array().expect("array body");
+        assert_eq!(items.len(), 2);
+        for item in items {
+            let mut keys: Vec<&str> = item
+                .as_object()
+                .expect("message is an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "conversation_id",
+                    "created_at",
+                    "id",
+                    "owner_id",
+                    "payload",
+                    "role"
+                ]
+            );
+        }
+        assert_eq!(items[0]["payload"]["text"], "premier");
+        assert_eq!(items[1]["payload"]["text"], "second");
+
+        let (status, body) = get_json(
+            list_router(state_with(db)),
+            &format!("/conversations/{empty}/messages"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([]));
+    }
 }
 
 /// Régression Phase 3 (miryad-core-integration) : `ChatContext`/`Conversation` posaient

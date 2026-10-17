@@ -187,6 +187,6 @@ Tasks:
       empêchée par la FK `RESTRICT`) ; le format d'identifiant (littéral dans trois
       call-sites, pas de constructeur partagé) reste à contractualiser dans la spec des
       consommateurs ou celle de `./../../error.rs`.
-  [ ] Dériver les trois `Scenario` en tests taggés (le premier préexiste sous le nom
+  [x] Dériver les trois `Scenario` en tests taggés (le premier préexiste sous le nom
       `chat_context_roundtrip_serializes` ; les deux autres sont à ajouter dans le module
       `tests` du fichier, sans autre modification du fichier source).

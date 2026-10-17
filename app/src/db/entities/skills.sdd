@@ -179,7 +179,7 @@ Scenario: skill_round_trip_serialisation_fidele
     exactement les clés `id`, `owner_id`, `name`, `description`, `body`
 
 Tasks:
-  [ ] Écrire les tests des trois Scenario suivants, taggés par leur titre — seul
+  [x] Écrire les tests des trois Scenario suivants, taggés par leur titre — seul
       `skill_resource_contract` existe à ce jour :
       `skill_payload_minimal_deserialise_avec_defauts`,
       `skill_payload_sans_name_rejete`, `skill_round_trip_serialisation_fidele`.

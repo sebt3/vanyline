@@ -59,6 +59,10 @@ mod tests {
     }
 
     fn make_app() -> Router {
+        make_app_with_auth(crate::auth::test_support::test_auth_state())
+    }
+
+    fn make_app_with_auth(auth: miryad_core::auth::MiryadAuthState) -> Router {
         let config = crate::config::Config {
             oidc_issuer_url: "https://issuer.example.com".to_string(),
             oidc_client_id: "client-id".to_string(),
@@ -90,7 +94,7 @@ mod tests {
             cookie_key: test_key(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            auth: crate::auth::test_support::test_auth_state(),
+            auth,
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
             workflow: None,
         };
@@ -129,6 +133,79 @@ mod tests {
                 "tool '{}' has empty description",
                 tool.name
             );
+        }
+    }
+
+    #[test]
+    fn flatten_ordre_filesystem_puis_search_puis_commande() {
+        let names: Vec<String> = flatten_local_tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [
+                "read_file",
+                "write_file",
+                "edit_file",
+                "delete_file",
+                "list_directory",
+                "find_files",
+                "search",
+                "execute_command",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_tool_serialize_en_name_et_description() {
+        let tool = LocalTool {
+            name: "read_file".to_string(),
+            description: "Lit un fichier".to_string(),
+        };
+        let json = serde_json::to_value(&tool).expect("serialize LocalTool");
+        assert_eq!(
+            json,
+            serde_json::json!({"name": "read_file", "description": "Lit un fichier"})
+        );
+    }
+
+    #[tokio::test]
+    async fn list_local_tools_authentifie_repond_200_et_tableau_de_paires() {
+        // Cookie de session scellé avec la même clé que `make_app` (extracteur `AuthUser`
+        // = cookie seul). `exp` 2100-01-01 : le token factice n'est pas vérifié, seul l'exp l'est.
+        let db = crate::db::test_support::real_db().await;
+        let identity = miryad_core::auth::OidcIdentity {
+            id_token: "e30.eyJleHAiOjQxMDI0NDQ4MDB9.signature".to_string(),
+            subject: "alice".to_string(),
+            email: None,
+            preferred_username: None,
+        };
+        let set_cookie = miryad_core::auth::cookie::build_set_cookie(&identity, &test_key(), false);
+        let cookie_pair = set_cookie
+            .split(';')
+            .next()
+            .expect("cookie has a name=value pair")
+            .to_string();
+        let app = make_app_with_auth(crate::auth::test_support::test_auth_state_with_db(db));
+        let req = Request::builder()
+            .uri("/local-tools")
+            .header("Cookie", cookie_pair)
+            .body(Body::empty())
+            .expect("valid request");
+        let resp = app.oneshot(req).await.expect("router does not fail");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
+        let items = json.as_array().expect("body is an array");
+        assert_eq!(items.len(), 8);
+        for item in items {
+            let obj = item.as_object().expect("entry is an object");
+            let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["description", "name"]);
+            assert!(item["name"].as_str().is_some_and(|v| !v.is_empty()));
+            assert!(item["description"].as_str().is_some_and(|v| !v.is_empty()));
         }
     }
 

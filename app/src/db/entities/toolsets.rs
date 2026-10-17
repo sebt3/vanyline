@@ -52,6 +52,7 @@ mod tests {
 
     use super::*;
     use miryad_core::resource::AccessPolicy;
+    use sea_orm::Iterable;
 
     #[test]
     fn toolset_resource_contract() {
@@ -63,5 +64,51 @@ mod tests {
             matches!(oc, Some(Column::OwnerId)),
             "owner_column should be Some(Column::OwnerId), got {oc:?}"
         );
+    }
+
+    #[test]
+    fn minimal_creation_payload_deserializes_with_defaults() {
+        let model: Model =
+            serde_json::from_str(r#"{"name":"fs"}"#).expect("minimal payload deserialises");
+        assert_eq!(model.id, 0);
+        assert_eq!(model.owner_id, 0);
+        assert_eq!(model.description, None);
+        assert_eq!(model.prompt, None);
+        assert_eq!(model.local_tools, serde_json::json!([]));
+        assert_eq!(model.mcp, serde_json::json!([]));
+    }
+
+    #[test]
+    fn model_serializes_with_exact_snake_case_keys() {
+        let model = Model {
+            id: 3,
+            owner_id: 9,
+            name: "web".to_string(),
+            description: Some("navigation".to_string()),
+            prompt: Some("sois bref".to_string()),
+            local_tools: serde_json::json!(["fs"]),
+            mcp: serde_json::json!([{"server": "github"}]),
+        };
+        let json = serde_json::to_value(&model).expect("serialize toolset");
+        let obj = json.as_object().expect("toolset serialises as an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "description",
+                "id",
+                "local_tools",
+                "mcp",
+                "name",
+                "owner_id",
+                "prompt"
+            ]
+        );
+    }
+
+    #[test]
+    fn entity_declares_no_relations() {
+        assert_eq!(Relation::iter().count(), 0);
     }
 }

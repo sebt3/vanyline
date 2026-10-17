@@ -168,7 +168,7 @@ Scenario: entity_declares_no_relations
     disponible pour cette entité
 
 Tasks:
-  [ ] Écrire les tests des Scenario sans test actuel
+  [x] Écrire les tests des Scenario sans test actuel
       (`minimal_creation_payload_deserializes_with_defaults`,
       `model_serializes_with_exact_snake_case_keys`,
       `entity_declares_no_relations`).

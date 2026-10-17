@@ -209,4 +209,442 @@ mod tests {
         let resp = AppError::SandboxBranchEmpty.into_response();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
+
+    fn reqwest_error() -> reqwest::Error {
+        // Builder invalide (URL non parsable) : aucune I/O réseau, `send` échoue avant.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime builds");
+        rt.block_on(async { reqwest::Client::new().get("::pas une url").send().await })
+            .expect_err("invalid URL yields a reqwest error")
+    }
+
+    /// Chaque variante d'`AppError` avec son rendu `Display` attendu et son statut HTTP
+    /// attendu (barème d'`Exposes`, `SandboxRelayUnavailable` inclus : 502).
+    fn fixtures() -> Vec<(AppError, String, StatusCode)> {
+        let mut all = fixtures_app();
+        all.extend(fixtures_workflow());
+        all
+    }
+
+    fn fixtures_app() -> Vec<(AppError, String, StatusCode)> {
+        let req = reqwest_error();
+        let req_display = format!("VNL-REQ-001: Request error: {req}");
+        vec![
+            (
+                AppError::Forbidden,
+                "VNL-AUTH-004: Forbidden".into(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                AppError::LlmError("boom".into()),
+                "VNL-LLM-001: LLM provider error: boom".into(),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                AppError::LlmProviderNotFound,
+                "VNL-LLM-002: LLM provider not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::McpError("boom".into()),
+                "VNL-MCP-001: MCP server error: boom".into(),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                AppError::AgentNotFound,
+                "VNL-AGT-001: Agent not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
+                    "agent",
+                    "ghost".into(),
+                )),
+                "VNL-CFG-003: Unknown agent reference: 'ghost'".into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                AppError::ConversationNotFound,
+                "VNL-CNV-001: Conversation not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::ConversationAccessDenied,
+                "VNL-CNV-002: Access denied to conversation".into(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                AppError::RequestError(req),
+                req_display,
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                AppError::InternalError("boom".into()),
+                "VNL-INT-001: Internal error: boom".into(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                AppError::K8sConfigError("x".into()),
+                "VNL-K8S-001: Kubernetes config error: x".into(),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                AppError::K8sApiError("x".into()),
+                "VNL-K8S-002: Kubernetes API error: x".into(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                AppError::K8sNotFound("x".into()),
+                "VNL-K8S-003: Kubernetes resource not found: x".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::SandboxNotExposed,
+                "VNL-SBX-001: sandbox has no public endpoint (owner has no application_ref)".into(),
+                StatusCode::CONFLICT,
+            ),
+            (
+                AppError::SandboxBranchEmpty,
+                "VNL-SBX-002: branch must not be empty".into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                AppError::GitPathInvalid,
+                "VNL-SBX-003: invalid git path segment".into(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::SandboxRelayUnavailable,
+                "VNL-SBX-017: sandbox unavailable".into(),
+                StatusCode::BAD_GATEWAY,
+            ),
+        ]
+    }
+
+    fn fixtures_workflow() -> Vec<(AppError, String, StatusCode)> {
+        vec![
+            (
+                AppError::WorkflowNotFound,
+                "VNL-WFA-002: workflow not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::WorkflowNameTaken("x".into()),
+                "VNL-WFA-003: workflow name already taken: x".into(),
+                StatusCode::CONFLICT,
+            ),
+            (
+                AppError::WorkflowDagInvalid("x".into()),
+                "VNL-WFA-004: MRD-WORKFLOW-004: x".into(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::WorkflowKindForbidden("x".into()),
+                "VNL-WFA-005: x".into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                AppError::WorkflowEngineNotConfigured,
+                "VNL-WFA-006: workflow engine not configured".into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                AppError::WorkflowUnknownScope("x".into()),
+                "VNL-WFA-007: unknown scope: x".into(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::WorkflowScopeNotEditable,
+                "VNL-WFA-008: scope is not editable; create a new workflow instead".into(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::WorkflowSandboxNotFound,
+                "VNL-WFA-011: sandbox not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::WorkflowRunNotFound,
+                "VNL-WFA-012: run not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::WorkflowSandboxForeignProject("x".into()),
+                "VNL-WFA-013: sandbox does not belong to the project: x".into(),
+                StatusCode::CONFLICT,
+            ),
+            (
+                AppError::WorkflowSandboxNotRunning("x".into()),
+                "VNL-WFA-014: sandbox not running: x".into(),
+                StatusCode::CONFLICT,
+            ),
+            (
+                AppError::WorkflowSandboxRequired,
+                "VNL-WFA-015: sandbox-scoped workflow requires a sandbox".into(),
+                StatusCode::CONFLICT,
+            ),
+            (
+                AppError::WorkflowSandboxNotAllowed,
+                "VNL-WFA-016: sandbox is not allowed for a project-scoped workflow".into(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::WorkflowEngineUnavailable("x".into()),
+                "VNL-WFA-017: workflow engine unavailable: x".into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ]
+    }
+
+    #[test]
+    fn display_exhaustif_des_variantes_apperror() {
+        for (err, expected, _) in fixtures() {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn bareme_exhaustif_statuts_http_des_variantes() {
+        for (err, display, expected) in fixtures() {
+            let resp = err.into_response();
+            assert_eq!(resp.status(), expected, "statut pour « {display} »");
+        }
+    }
+
+    #[tokio::test]
+    async fn corps_json_error_unique_et_content_type() {
+        let resp = AppError::Forbidden.into_response();
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("body is JSON");
+        assert_eq!(
+            json,
+            serde_json::json!({"error": "VNL-AUTH-004: Forbidden"})
+        );
+    }
+
+    #[tokio::test]
+    async fn unprocessable_reference_rend_le_marqueur_du_vny_interne() {
+        let resp = AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
+            "agent",
+            "ghost".into(),
+        ))
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("body is JSON");
+        assert_eq!(
+            json,
+            serde_json::json!({"error": "VNL-CFG-003: Unknown agent reference: 'ghost'"})
+        );
+    }
+
+    #[test]
+    fn conversion_dberr_vers_internal_error_prefixe_vnl_db_006() {
+        // Le Display réel de `DbErr::Custom` ajoute « Custom Error: » (écart avec le
+        // Scenario, consigné) : l'attendu est construit depuis ce Display, pas en dur.
+        let db = sea_orm::DbErr::Custom("x".into());
+        let expected = format!("VNL-INT-001: Internal error: VNL-DB-006: {db}");
+        let err = AppError::from(db);
+        assert!(matches!(err, AppError::InternalError(_)));
+        assert_eq!(err.to_string(), expected);
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn conversion_vnyerror_k8s_config_double_marqueur_et_502() {
+        let err = AppError::from(vanyline_lib::VnyError::K8sConfigError("boom".into()));
+        assert_eq!(
+            err.to_string(),
+            "VNL-K8S-001: Kubernetes config error: VNL-K8S-001: Cannot reach Kubernetes cluster: boom"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn conversion_vnyerror_k8s_api_avec_signature_not_found_vers_404() {
+        for payload in ["404", "NotFound", "not found"] {
+            let err = AppError::from(vanyline_lib::VnyError::K8sApiError(payload.into()));
+            assert!(matches!(err, AppError::K8sNotFound(_)), "payload {payload}");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "VNL-K8S-003: Kubernetes resource not found: VNL-K8S-002: Kubernetes API error: {payload}"
+                )
+            );
+            assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn conversion_vnyerror_k8s_api_sans_signature_vers_500() {
+        let err = AppError::from(vanyline_lib::VnyError::K8sApiError("boom".into()));
+        assert!(matches!(err, AppError::K8sApiError(_)));
+        assert_eq!(
+            err.to_string(),
+            "VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error: boom"
+        );
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn heuristic_not_found_insensible_a_la_casse_et_a_faux_positifs() {
+        let casse = AppError::from(vanyline_lib::VnyError::K8sApiError("Not Found".into()));
+        assert_eq!(
+            casse.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let faux_positif = AppError::from(vanyline_lib::VnyError::K8sApiError(
+            "port 4041 ouvert".into(),
+        ));
+        assert_eq!(faux_positif.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn conversion_vnyerror_autres_variantes_degradees_en_500() {
+        let llm = AppError::from(vanyline_lib::VnyError::LlmError("x".into()));
+        assert!(matches!(llm, AppError::InternalError(_)));
+        assert_eq!(
+            llm.to_string(),
+            "VNL-INT-001: Internal error: VNL-LLM-001: LLM provider error: x"
+        );
+        let unknown = AppError::from(vanyline_lib::VnyError::UnknownReference(
+            "agent",
+            "ghost".into(),
+        ));
+        assert!(matches!(unknown, AppError::InternalError(_)));
+        assert_eq!(
+            unknown.to_string(),
+            "VNL-INT-001: Internal error: VNL-CFG-003: Unknown agent reference: 'ghost'"
+        );
+        assert_eq!(
+            llm.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            unknown.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn conversion_cfgstore_toutes_variantes_vers_500_display_complet() {
+        let ro = AppError::from(vanyline_cfgstore::CfgStoreError::ReadOnly);
+        assert_eq!(
+            ro.to_string(),
+            "VNL-INT-001: Internal error: VNL-CFG-009: Config store is read-only"
+        );
+        assert_eq!(
+            ro.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let nf = AppError::from(vanyline_cfgstore::CfgStoreError::NotFound {
+            kind: "provider",
+            name: "p".into(),
+            layer: vanyline_cfgstore::store::Layer::Workspace,
+        });
+        assert_eq!(
+            nf.to_string(),
+            "VNL-INT-001: Internal error: VNL-CFG-006: provider 'p' not found in Workspace layer"
+        );
+        assert_eq!(
+            nf.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn conversion_reqwest_generee_source_std_error_et_502() {
+        let err = AppError::RequestError(reqwest_error());
+        assert!(err.to_string().starts_with("VNL-REQ-001: Request error: "));
+        let source = std::error::Error::source(&err).expect("source is the reqwest error");
+        assert!(source.downcast_ref::<reqwest::Error>().is_some());
+        assert_eq!(err.into_response().status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn source_std_error_absente_partout_sauf_request_error() {
+        assert!(std::error::Error::source(&AppError::Forbidden).is_none());
+        assert!(std::error::Error::source(&AppError::InternalError("x".into())).is_none());
+        let req = AppError::RequestError(reqwest_error());
+        assert!(std::error::Error::source(&req).is_some());
+    }
+
+    #[test]
+    fn marqueurs_propres_de_apperror_uniques_dans_le_fichier() {
+        let source = include_str!("error.rs");
+        let prod = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production part precedes tests");
+        let expected: [(&str, usize); 31] = [
+            ("VNL-AUTH-004", 1),
+            ("VNL-LLM-001", 1),
+            ("VNL-LLM-002", 1),
+            ("VNL-MCP-001", 1),
+            ("VNL-AGT-001", 1),
+            ("VNL-CNV-001", 1),
+            ("VNL-CNV-002", 1),
+            ("VNL-REQ-001", 1),
+            ("VNL-INT-001", 1),
+            ("VNL-K8S-001", 1),
+            ("VNL-K8S-002", 1),
+            ("VNL-K8S-003", 1),
+            ("VNL-SBX-001", 1),
+            ("VNL-SBX-002", 1),
+            ("VNL-SBX-003", 1),
+            ("VNL-SBX-017", 1),
+            ("VNL-WFA-002", 1),
+            ("VNL-WFA-003", 1),
+            ("VNL-WFA-004", 1),
+            ("VNL-WFA-005", 1),
+            ("VNL-WFA-006", 1),
+            ("VNL-WFA-007", 1),
+            ("VNL-WFA-008", 1),
+            ("VNL-WFA-011", 1),
+            ("VNL-WFA-012", 1),
+            ("VNL-WFA-013", 1),
+            ("VNL-WFA-014", 1),
+            ("VNL-WFA-015", 1),
+            ("VNL-WFA-016", 1),
+            ("VNL-WFA-017", 1),
+            ("VNL-DB-006", 2),
+        ];
+        for (marker, count) in expected {
+            assert_eq!(
+                prod.matches(marker).count(),
+                count,
+                "occurrences de {marker} hors tests"
+            );
+        }
+        let templates: Vec<&str> = prod
+            .lines()
+            .filter(|l| l.trim_start().starts_with("#[error(\"VNL-"))
+            .collect();
+        let mut markers: Vec<&str> = templates
+            .iter()
+            .filter_map(|l| l.split("VNL-").nth(1)?.get(..)?.split(':').next())
+            .collect();
+        let total = markers.len();
+        markers.sort_unstable();
+        markers.dedup();
+        assert_eq!(markers.len(), total, "deux variantes partagent un marqueur");
+    }
 }

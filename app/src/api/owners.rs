@@ -206,24 +206,24 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_prefixed_email_local_part() {
+    fn local_part_d_email_est_assaini_en_etiquette_minuscule() {
         assert_eq!(sanitize_owner_name("John.Doe@example.com"), "john-doe");
         assert_eq!(sanitize_owner_name("valid-owner@host"), "valid-owner");
     }
 
     #[test]
-    fn sanitize_owner_empty_local_falls_back() {
+    fn email_a_local_part_vide_retombe_sur_le_repli_owner() {
         assert_eq!(sanitize_owner_name("@example.com"), "owner");
     }
 
     #[test]
-    fn sanitize_owner_truncates_to_63() {
+    fn local_part_plus_long_que_63_caracteres_est_coupe_a_63() {
         let input = format!("{}@x", "a".repeat(70));
         assert_eq!(sanitize_owner_name(&input), "a".repeat(63));
     }
 
     #[test]
-    fn sanitize_owner_truncation_never_ends_in_hyphen() {
+    fn la_coupe_a_63_caracteres_ne_finit_jamais_par_un_tiret() {
         // Le '-' en position 62 (0-indexed) tombe exactement sur la coupe à 63.
         let input = format!("{}-{}@x", "a".repeat(62), "b".repeat(10));
         let result = sanitize_owner_name(&input);
@@ -232,5 +232,38 @@ mod tests {
             "label should never end with '-' after truncation, got {result:?}"
         );
         assert_eq!(result, "a".repeat(62));
+    }
+
+    /// Scenario : `premier caractère invalide est remplacé par la lettre a`.
+    #[test]
+    fn premier_caractere_invalide_est_remplace_par_la_lettre_a() {
+        assert_eq!(sanitize_owner_name("_alice@x"), "aalice");
+        assert_eq!(sanitize_owner_name("-bob-"), "abob");
+    }
+
+    /// Scenario : `chaine sans arobase passe au filtre caractère par caractère`.
+    #[test]
+    fn chaine_sans_arobase_passe_au_filtre_caractere_par_caractere() {
+        assert_eq!(sanitize_owner_name("sub-42"), "sub-42");
+        assert_eq!(sanitize_owner_name("keycloak|abc.1"), "keycloak-abc-1");
+    }
+
+    /// Scenario : `seule la partie avant le premier arobase est conservée`.
+    #[test]
+    fn seule_la_partie_avant_le_premier_arobase_est_conservee() {
+        assert_eq!(sanitize_owner_name("a@b@c"), "a");
+    }
+
+    /// Scenario : `caractères non ASCII deviennent des séparateurs découpés`.
+    #[test]
+    fn caracteres_non_ascii_deviennent_des_separateurs_decoupes() {
+        assert_eq!(sanitize_owner_name("josé@x"), "jos");
+    }
+
+    /// Scenario : `chaine vide et tout-tirets aux cas limites`.
+    #[test]
+    fn chaine_vide_et_tout_tirets_aux_cas_limites() {
+        assert_eq!(sanitize_owner_name(""), "owner");
+        assert_eq!(sanitize_owner_name("----"), "a");
     }
 }

@@ -60,4 +60,45 @@ mod tests {
             "owner_column should be Some(Column::OwnerId), got {oc:?}"
         );
     }
+
+    #[test]
+    fn skill_payload_minimal_deserialise_avec_defauts() {
+        let model: Model =
+            serde_json::from_str(r#"{"name": "pdf"}"#).expect("payload minimal deserialises");
+        assert_eq!(model.name, "pdf");
+        assert_eq!(model.id, 0);
+        assert_eq!(model.owner_id, 0);
+        assert_eq!(model.description, "");
+        assert_eq!(model.body, "");
+    }
+
+    #[test]
+    fn skill_payload_sans_name_rejete() {
+        let err = serde_json::from_str::<Model>(r#"{"description": "x", "body": "y"}"#)
+            .expect_err("payload without name must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing field") && msg.contains("name"),
+            "expected `missing field` on `name`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn skill_round_trip_serialisation_fidele() {
+        let original = Model {
+            id: 12,
+            owner_id: 34,
+            name: "rust-review".to_string(),
+            description: "Revue de code Rust : clippy, erreurs, perf".to_string(),
+            body: "# Étapes\n- lire le diff\n- \"vérifier\" les unwrap".to_string(),
+        };
+        let json = serde_json::to_value(&original).expect("serialize skill");
+        let obj = json.as_object().expect("skill serialises as an object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["body", "description", "id", "name", "owner_id"]);
+
+        let back: Model = serde_json::from_value(json).expect("deserialize skill");
+        assert_eq!(back, original);
+    }
 }

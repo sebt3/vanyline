@@ -153,7 +153,7 @@ Depends on:
     entité ↔ migration est un invariant partagé entre les deux specs.
 
 Tasks:
-  [ ] Test DB réel de l'entité via `../test_support.rs` (`real_db()`) sur le même
+  [x] Test DB réel de l'entité via `../test_support.rs` (`real_db()`) sur le même
       motif que `./agents.rs` : insert `ActiveModel` complet + relecture,
       pour tenir l'invariant « le mapping Rust reflète la migration » au-delà du seul
       round-trip serde (à créer avec la spec de la migration).

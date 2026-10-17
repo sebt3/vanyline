@@ -810,4 +810,460 @@ mod tests {
         let err = domain_agent_record(&agent, &[row]).unwrap_err();
         assert!(matches!(err, VnyError::ConfigError(_)));
     }
+
+    // ---------------------------------------------------------------------
+    // Scenario de méthode (config_store.sdd) sur base réelle sqlite en mémoire.
+    // Les inserts passent par `Entity::insert` pour contourner les hooks miryad-core.
+    // Consignés et NON écrits (bug de sécurité ou posture `[!]`/arbitrage) : voir
+    // .claude/memory/haiku-questions/app.md, passe 3.
+    // ---------------------------------------------------------------------
+
+    use crate::db::entities::{
+        agents as agent_entity, llm_providers, mcp_servers, model_profiles, skills, toolsets,
+    };
+    use crate::db::test_support::real_db;
+    use sea_orm::{ActiveValue::NotSet, Database, DatabaseConnection, EntityTrait, Set};
+
+    async fn seed_user(db: &DatabaseConnection, subject: &str) -> i32 {
+        miryad_core::users::resolve_user(db, subject, None)
+            .await
+            .expect("user resolves")
+            .id
+    }
+
+    async fn insert_provider(
+        db: &DatabaseConnection,
+        name: &str,
+        provider_type: &str,
+        api_key: Option<&str>,
+    ) -> i32 {
+        llm_providers::Entity::insert(llm_providers::ActiveModel {
+            id: NotSet,
+            name: Set(name.to_string()),
+            provider_type: Set(provider_type.to_string()),
+            endpoint: Set("http://localhost:11434".to_string()),
+            api_key: Set(api_key.map(str::to_string)),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(false),
+        })
+        .exec(db)
+        .await
+        .expect("provider inserts")
+        .last_insert_id
+    }
+
+    async fn insert_profile(
+        db: &DatabaseConnection,
+        owner: i32,
+        name: &str,
+        provider_id: i32,
+        max_tokens: Option<i64>,
+    ) -> i32 {
+        model_profiles::Entity::insert(model_profiles::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(name.to_string()),
+            provider_id: Set(provider_id),
+            model: Set("qwen2.5".to_string()),
+            temperature: Set(Some(0.2)),
+            max_tokens: Set(max_tokens),
+            options: Set(serde_json::json!({"think": true})),
+        })
+        .exec(db)
+        .await
+        .expect("profile inserts")
+        .last_insert_id
+    }
+
+    async fn insert_mcp(
+        db: &DatabaseConnection,
+        name: &str,
+        server_type: &str,
+        headers: serde_json::Value,
+    ) {
+        mcp_servers::Entity::insert(mcp_servers::ActiveModel {
+            id: NotSet,
+            name: Set(name.to_string()),
+            server_type: Set(server_type.to_string()),
+            url: Set("http://localhost:3000/mcp".to_string()),
+            headers: Set(headers),
+            available_tools: Set(serde_json::json!([])),
+        })
+        .exec(db)
+        .await
+        .expect("mcp server inserts");
+    }
+
+    async fn insert_toolset(
+        db: &DatabaseConnection,
+        owner: i32,
+        name: &str,
+        local_tools: serde_json::Value,
+    ) {
+        toolsets::Entity::insert(toolsets::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(name.to_string()),
+            description: Set(None),
+            prompt: Set(None),
+            local_tools: Set(local_tools),
+            mcp: Set(serde_json::json!([])),
+        })
+        .exec(db)
+        .await
+        .expect("toolset inserts");
+    }
+
+    async fn insert_skill(
+        db: &DatabaseConnection,
+        owner: i32,
+        name: &str,
+        description: &str,
+        body: &str,
+    ) {
+        skills::Entity::insert(skills::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(name.to_string()),
+            description: Set(description.to_string()),
+            body: Set(body.to_string()),
+        })
+        .exec(db)
+        .await
+        .expect("skill inserts");
+    }
+
+    async fn insert_agent(
+        db: &DatabaseConnection,
+        owner: i32,
+        name: &str,
+        profile_id: i32,
+        skills_json: serde_json::Value,
+    ) {
+        agent_entity::Entity::insert(agent_entity::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(name.to_string()),
+            description: Set(None),
+            mode: Set("primary".to_string()),
+            model_profile_id: Set(profile_id),
+            toolsets: Set(serde_json::json!([])),
+            skills: Set(skills_json),
+            system_prompt: Set(String::new()),
+            system_key: Set(None),
+            system_version: Set(None),
+        })
+        .exec(db)
+        .await
+        .expect("agent inserts");
+    }
+
+    /// Scenario : `domain_provider_type_inconnu_est_erreur`.
+    #[test]
+    fn domain_provider_type_inconnu_est_erreur() {
+        let row = sample_provider(1, "p", "bogus", false);
+        let err = domain_provider(&row).expect_err("unknown provider type is an error");
+        assert!(matches!(err, VnyError::UnknownProviderType(ref t) if t == "bogus"));
+    }
+
+    /// Scenario : `list_providers_retourne_le_domaine_sans_filtrer_owner`.
+    /// NB : l'assertion sur `api_key` est volontairement omise (exposition en clair = bug de
+    /// sécurité consigné, `llm_providers.sdd`).
+    #[tokio::test]
+    async fn list_providers_retourne_le_domaine_sans_filtrer_owner() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        insert_provider(&db, "ollama-local", "ollama", Some("sk-test")).await;
+
+        for owner in [alice, bob] {
+            let providers = PgConfigStore::new(db.clone(), owner)
+                .list_providers()
+                .await
+                .expect("list succeeds");
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].name, "ollama-local");
+            assert_eq!(providers[0].endpoint, "http://localhost:11434");
+            assert!(matches!(providers[0].provider_type, ProviderType::Ollama));
+        }
+    }
+
+    /// Scenario : `erreur_requete_remappe_en_vnl_cfg_001`.
+    #[tokio::test]
+    async fn erreur_requete_remappe_en_vnl_cfg_001() {
+        // Base sans aucune table : toute requête échoue côté SeaORM.
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("sqlite connects");
+        let err = PgConfigStore::new(db, 1)
+            .list_toolsets()
+            .await
+            .expect_err("missing table is an error");
+        assert!(matches!(err, CfgStoreError::Config(_)));
+        assert!(
+            err.to_string()
+                .starts_with("VNL-CFG-001: Configuration error: "),
+            "got: {err}"
+        );
+    }
+
+    /// Scenario : `list_models_resout_le_provider_par_nom_table_globale`.
+    #[tokio::test]
+    async fn list_models_resout_le_provider_par_nom_table_globale() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        let provider = insert_provider(&db, "ollama-local", "ollama", None).await;
+        insert_profile(&db, alice, "qwen", provider, Some(4096)).await;
+        insert_profile(&db, bob, "bob-only", provider, None).await;
+
+        let models = PgConfigStore::new(db.clone(), alice)
+            .list_models()
+            .await
+            .expect("list succeeds");
+        assert_eq!(models.len(), 1);
+        let m = &models[0];
+        assert_eq!(m.name, "qwen");
+        assert_eq!(m.provider, "ollama-local");
+        assert_eq!(m.model, "qwen2.5");
+        assert!(m.temperature.is_some_and(|t| (t - 0.2).abs() < 1e-6));
+        assert_eq!(m.max_tokens, Some(4096));
+        assert_eq!(m.options.get("think"), Some(&serde_json::json!(true)));
+    }
+
+    /// Scenario : `list_models_traverse_un_type_de_provider_inconnu`.
+    #[tokio::test]
+    async fn list_models_traverse_un_type_de_provider_inconnu() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let provider = insert_provider(&db, "legacy", "bogus", None).await;
+        insert_profile(&db, alice, "qwen", provider, None).await;
+
+        let models = PgConfigStore::new(db.clone(), alice)
+            .list_models()
+            .await
+            .expect("list succeeds despite unknown provider type");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider, "legacy");
+    }
+
+    /// Scenario : `list_mcp_servers_saute_le_type_inconnu_sans_erreur`.
+    #[tokio::test]
+    async fn list_mcp_servers_saute_le_type_inconnu_sans_erreur() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        insert_mcp(&db, "srv-ok", "http-streamable", serde_json::json!({})).await;
+        insert_mcp(&db, "pigeon", "carrier-pigeon", serde_json::json!({})).await;
+
+        let servers = PgConfigStore::new(db.clone(), alice)
+            .list_mcp_servers()
+            .await
+            .expect("list succeeds");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "srv-ok");
+        assert!(matches!(servers[0].transport, McpTransport::HttpStreamable));
+    }
+
+    /// Scenario : `list_mcp_servers_filtre_les_headers_non_string`.
+    #[tokio::test]
+    async fn list_mcp_servers_filtre_les_headers_non_string() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        insert_mcp(
+            &db,
+            "h-mixte",
+            "http-streamable",
+            serde_json::json!({"X-Foo": "bar", "X-Num": 42}),
+        )
+        .await;
+        insert_mcp(&db, "h-null", "http-streamable", serde_json::Value::Null).await;
+
+        let servers = PgConfigStore::new(db.clone(), alice)
+            .list_mcp_servers()
+            .await
+            .expect("list succeeds");
+        let mixte = servers
+            .iter()
+            .find(|s| s.name == "h-mixte")
+            .expect("mixte listed");
+        assert_eq!(mixte.headers.len(), 1);
+        assert_eq!(mixte.headers.get("X-Foo"), Some(&"bar".to_string()));
+        let null = servers
+            .iter()
+            .find(|s| s.name == "h-null")
+            .expect("null listed");
+        assert!(null.headers.is_empty());
+    }
+
+    /// Scenario : `list_toolsets_et_list_skills_sont_infaillibles`.
+    #[tokio::test]
+    async fn list_toolsets_et_list_skills_sont_infaillibles() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        insert_toolset(&db, alice, "poison", serde_json::json!({"a": 1})).await;
+        insert_skill(&db, alice, "pdf", "lecture pdf", "corps non vide").await;
+
+        let store = PgConfigStore::new(db.clone(), alice);
+        let toolsets = store.list_toolsets().await.expect("toolsets list succeeds");
+        assert_eq!(toolsets.len(), 1);
+        assert!(toolsets[0].local_tools.is_empty());
+        let skills = store.list_skills().await.expect("skills list succeeds");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "pdf");
+    }
+
+    /// Scenario : `list_agents_skill_selection_auto_none_named`.
+    #[tokio::test]
+    async fn list_agents_skill_selection_auto_none_named() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let provider = insert_provider(&db, "ollama-local", "ollama", None).await;
+        let profile = insert_profile(&db, alice, "qwen", provider, None).await;
+        insert_agent(&db, alice, "a-auto", profile, serde_json::json!("auto")).await;
+        insert_agent(&db, alice, "a-none", profile, serde_json::json!("none")).await;
+        insert_agent(
+            &db,
+            alice,
+            "a-named",
+            profile,
+            serde_json::json!(["pdf", "render"]),
+        )
+        .await;
+
+        let agents = PgConfigStore::new(db.clone(), alice)
+            .list_agents()
+            .await
+            .expect("list succeeds");
+        assert_eq!(agents.len(), 3);
+        let by_name = |n: &str| {
+            agents
+                .iter()
+                .find(|a| a.name == n)
+                .unwrap_or_else(|| panic!("agent {n} listed"))
+        };
+        assert!(matches!(by_name("a-auto").skills, SkillSelection::Auto));
+        assert!(matches!(by_name("a-none").skills, SkillSelection::None));
+        assert!(matches!(
+            &by_name("a-named").skills,
+            SkillSelection::Named(names) if names == &vec!["pdf".to_string(), "render".to_string()]
+        ));
+    }
+
+    /// Scenario : `les_quatre_tables_owner_filtrees_isolent_les_owners`.
+    #[tokio::test]
+    async fn les_quatre_tables_owner_filtrees_isolent_les_owners() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        let provider = insert_provider(&db, "ollama-local", "ollama", None).await;
+        let p_alice = insert_profile(&db, alice, "qwen-alice", provider, None).await;
+        insert_profile(&db, bob, "qwen-bob", provider, None).await;
+        insert_toolset(&db, alice, "fs-alice", serde_json::json!([])).await;
+        insert_toolset(&db, bob, "fs-bob", serde_json::json!([])).await;
+        insert_skill(&db, alice, "pdf-alice", "", "").await;
+        insert_skill(&db, bob, "pdf-bob", "", "").await;
+        insert_agent(&db, alice, "ag-alice", p_alice, serde_json::json!("auto")).await;
+        insert_agent(&db, bob, "ag-bob", p_alice, serde_json::json!("auto")).await;
+
+        let store = PgConfigStore::new(db.clone(), alice);
+        let models: Vec<String> = store
+            .list_models()
+            .await
+            .expect("models")
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(models, ["qwen-alice"]);
+        let tools: Vec<String> = store
+            .list_toolsets()
+            .await
+            .expect("toolsets")
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(tools, ["fs-alice"]);
+        let skill_names: Vec<String> = store
+            .list_skills()
+            .await
+            .expect("skills")
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(skill_names, ["pdf-alice"]);
+        let agent_names: Vec<String> = store
+            .list_agents()
+            .await
+            .expect("agents")
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(agent_names, ["ag-alice"]);
+    }
+
+    /// Scenario : `load_skill_dun_autre_owner_rend_vnl_cfg_003`.
+    #[tokio::test]
+    async fn load_skill_dun_autre_owner_rend_vnl_cfg_003() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        insert_skill(&db, bob, "pdf", "", "corps-bob").await;
+
+        let err = PgConfigStore::new(db.clone(), alice)
+            .load_skill("pdf")
+            .await
+            .expect_err("alice does not see bob's skill");
+        assert!(matches!(err, CfgStoreError::UnknownReference("skill", ref n) if n == "pdf"));
+        let body = PgConfigStore::new(db.clone(), bob)
+            .load_skill("pdf")
+            .await
+            .expect("bob reads his skill");
+        assert_eq!(body, "corps-bob");
+    }
+
+    /// Scenario : `default_agent_ne_designe_jamais_rien`.
+    #[tokio::test]
+    async fn default_agent_ne_designe_jamais_rien() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let provider = insert_provider(&db, "ollama-local", "ollama", None).await;
+        let profile = insert_profile(&db, alice, "qwen", provider, None).await;
+        insert_agent(&db, alice, "ag", profile, serde_json::json!("auto")).await;
+
+        let default = PgConfigStore::new(db.clone(), alice)
+            .default_agent()
+            .await
+            .expect("default_agent succeeds");
+        assert_eq!(default, None);
+    }
+
+    /// Scenario : `get_skill_rend_les_meta_pas_le_corps`.
+    #[tokio::test]
+    async fn get_skill_rend_les_meta_pas_le_corps() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        insert_skill(&db, alice, "pdf", "lecture pdf", "corps non vide").await;
+
+        let store = PgConfigStore::new(db.clone(), alice);
+        let meta = store.get_skill("pdf").await.expect("skill resolves");
+        assert_eq!(meta.name, "pdf");
+        assert_eq!(meta.description, "lecture pdf");
+        let err = store.get_skill("absent").await.expect_err("absent skill");
+        assert!(matches!(err, CfgStoreError::UnknownReference("skill", ref n) if n == "absent"));
+    }
+
+    /// Scenario : `get_mcp_server_sur_ligne_sautee_rend_vnl_cfg_003`.
+    #[tokio::test]
+    async fn get_mcp_server_sur_ligne_sautee_rend_vnl_cfg_003() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        insert_mcp(&db, "pigeon", "carrier-pigeon", serde_json::json!({})).await;
+
+        let err = PgConfigStore::new(db.clone(), alice)
+            .get_mcp_server("pigeon")
+            .await
+            .expect_err("skipped row is indistinguishable from absence");
+        assert!(
+            matches!(err, CfgStoreError::UnknownReference("mcp_server", ref n) if n == "pigeon")
+        );
+    }
 }
