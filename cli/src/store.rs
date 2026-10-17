@@ -200,4 +200,76 @@ mod tests {
         assert!(err.contains("Ambiguous"));
         assert!(err.contains("matches 2"));
     }
+
+    // Scenario: un_index_numerique_hors_plage_ne_retombe_pas_sur_le_matching_prefixe
+    #[test]
+    fn un_index_numerique_hors_plage_ne_retombe_pas_sur_le_matching_prefixe() {
+        let convs = vec![make_conv(
+            Uuid::parse_str("9aaaaaaa-0000-0000-0000-000000000001").unwrap(),
+        )];
+        let err = resolve_conversation_reference(&convs, "9").unwrap_err();
+        assert!(err.contains("No conversation at index 9 (have 1)"), "{err}");
+    }
+
+    // Scenario: un_index_numerique_dans_la_plage_prend_le_pas_sur_l_interpretation_prefixe
+    #[test]
+    fn un_index_numerique_dans_la_plage_prend_le_pas_sur_l_interpretation_prefixe() {
+        let convs = vec![
+            make_conv(Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap()),
+            make_conv(Uuid::parse_str("bbbbbbbb-0000-0000-0000-000000000002").unwrap()),
+            make_conv(Uuid::parse_str("cccccccc-0000-0000-0000-000000000003").unwrap()),
+        ];
+        assert_eq!(
+            resolve_conversation_reference(&convs, "2").unwrap(),
+            convs[1].id
+        );
+    }
+
+    // Scenario: resolve_conversation_reference_resout_un_prefixe_d_uuid_insensible_a_la_casse
+    #[test]
+    fn resolve_conversation_reference_resout_un_prefixe_d_uuid_insensible_a_la_casse() {
+        let convs = vec![
+            make_conv(Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap()),
+            make_conv(Uuid::parse_str("bbbbbbbb-0000-0000-0000-000000000002").unwrap()),
+        ];
+        assert_eq!(
+            resolve_conversation_reference(&convs, "AAAAAAAA").unwrap(),
+            convs[0].id
+        );
+    }
+
+    // Scenario: un_prefixe_a_zero_initial_echappe_a_l_interpretation_index
+    #[test]
+    fn un_prefixe_a_zero_initial_echappe_a_l_interpretation_index() {
+        let convs = vec![
+            make_conv(Uuid::parse_str("01aaaaaa-0000-0000-0000-000000000001").unwrap()),
+            make_conv(Uuid::parse_str("bbbbbbbb-0000-0000-0000-000000000002").unwrap()),
+        ];
+        assert_eq!(
+            resolve_conversation_reference(&convs, "01").unwrap(),
+            convs[0].id
+        );
+    }
+
+    // Scenario: resolve_conversation_reference_refuse_une_reference_sans_correspondance
+    #[test]
+    fn resolve_conversation_reference_refuse_une_reference_sans_correspondance() {
+        let convs = vec![make_conv(Uuid::new_v4())];
+        let err = resolve_conversation_reference(&convs, "zzz").unwrap_err();
+        assert!(err.contains("No conversation matches 'zzz'"), "{err}");
+    }
+
+    // Scenario: resolve_conversation_reference_refuse_un_prefixe_ambigu
+    #[test]
+    fn resolve_conversation_reference_refuse_un_prefixe_ambigu() {
+        let convs = vec![
+            make_conv(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()),
+            make_conv(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()),
+        ];
+        let err = resolve_conversation_reference(&convs, "00000000").unwrap_err();
+        assert!(
+            err.contains("Ambiguous reference") && err.contains("matches 2"),
+            "{err}"
+        );
+    }
 }

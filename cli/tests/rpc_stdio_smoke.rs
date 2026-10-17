@@ -1227,3 +1227,184 @@ mcp:
 
     c.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Scenarios `rpc/mod.sdd` (tâche « dériver les Scenario non couverts », cf.
+// Tasks) : contrôle brut de stdin/stdout, sans le harnais `Client`.
+// ---------------------------------------------------------------------------
+
+fn spawn_raw(home: &Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_vanyline"))
+        .args(["serve", "--stdio"])
+        .env("XDG_CONFIG_HOME", home)
+        .env("XDG_DATA_HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn vanyline serve --stdio")
+}
+
+fn read_all_lines(stdout: ChildStdout) -> Vec<String> {
+    BufReader::new(stdout)
+        .lines()
+        .map_while(Result::ok)
+        .collect()
+}
+
+// Scenario: eof_stdin_clot_le_processus_apres_drain
+#[test]
+fn eof_stdin_clot_le_processus_apres_drain() {
+    let home = tempdir().unwrap();
+    let mut child = spawn_raw(home.path());
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":1}}}}"#
+    )
+    .unwrap();
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(resp["result"]["protocolVersion"], 1);
+    drop(stdin);
+    let trailing: Vec<String> = reader.lines().map_while(Result::ok).collect();
+    assert!(
+        trailing.is_empty(),
+        "trames parasites après EOF : {trailing:?}"
+    );
+    assert!(child.wait().unwrap().success());
+}
+
+// Scenario: stdin_ferme_immediatement_aucune_trame_sur_stdout
+#[test]
+fn stdin_ferme_immediatement_aucune_trame_sur_stdout() {
+    let home = tempdir().unwrap();
+    let mut child = spawn_raw(home.path());
+    drop(child.stdin.take());
+    let lines = read_all_lines(child.stdout.take().unwrap());
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(child.wait().unwrap().success());
+}
+
+// Scenario: lignes_blanches_sautees_sans_reponse_ni_erreur
+#[test]
+fn lignes_blanches_sautees_sans_reponse_ni_erreur() {
+    let home = tempdir().unwrap();
+    let mut child = spawn_raw(home.path());
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    stdin.write_all(b"\n   \n\t\n").unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":1}}}}"#
+    )
+    .unwrap();
+    stdin.write_all(b"  \t \n").unwrap();
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"shutdown"}}"#).unwrap();
+    drop(stdin);
+    let lines = read_all_lines(stdout);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let init: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(init["result"]["protocolVersion"], 1);
+    assert!(init.get("error").is_none());
+    let shut: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+    assert_eq!(shut, json!({"jsonrpc": "2.0", "id": 1, "result": null}));
+    assert!(child.wait().unwrap().success());
+}
+
+// Scenario: trame_invalide_repond_vnl_rpc_000_puis_boucle_vivante
+#[test]
+fn trame_invalide_repond_vnl_rpc_000_puis_boucle_vivante() {
+    let home = tempdir().unwrap();
+    let mut child = spawn_raw(home.path());
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    writeln!(stdin, "pas du json").unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":1}}}}"#
+    )
+    .unwrap();
+    let mut l1 = String::new();
+    reader.read_line(&mut l1).unwrap();
+    let err: serde_json::Value = serde_json::from_str(&l1).unwrap();
+    assert!(err["id"].is_null());
+    assert_eq!(err["error"]["code"], -32700);
+    assert_eq!(err["error"]["data"]["code"], "VNL-RPC-000");
+    let mut l2 = String::new();
+    reader.read_line(&mut l2).unwrap();
+    let init: serde_json::Value = serde_json::from_str(&l2).unwrap();
+    assert_eq!(init["result"]["protocolVersion"], 1);
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"shutdown"}}"#).unwrap();
+    let mut l3 = String::new();
+    reader.read_line(&mut l3).unwrap();
+    let shut: serde_json::Value = serde_json::from_str(&l3).unwrap();
+    assert_eq!(shut["result"], serde_json::Value::Null);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+// Scenario: reponses_dans_lordre_des_requetes_sur_un_flux_ndjson
+#[test]
+fn reponses_dans_lordre_des_requetes_sur_un_flux_ndjson() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut child = spawn_raw(home.path());
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":1,"workspace":"{}"}}}}"#,
+        ws.path().display()
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"config/agents"}}"#
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":3,"method":"config/toolsets"}}"#
+    )
+    .unwrap();
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":4,"method":"shutdown"}}"#).unwrap();
+    drop(stdin);
+    let lines = read_all_lines(stdout);
+    let ids: Vec<u64> = lines
+        .iter()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("ndjson");
+            v["id"].as_u64().expect("id")
+        })
+        .collect();
+    assert_eq!(ids, vec![0, 2, 3, 4], "{lines:?}");
+    assert!(child.wait().unwrap().success());
+}
+
+// Scenario: shutdown_clot_le_processus_meme_quand_stdin_reste_ouvert
+#[test]
+fn shutdown_clot_le_processus_meme_quand_stdin_reste_ouvert() {
+    let home = tempdir().unwrap();
+    let mut child = spawn_raw(home.path());
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":1}}}}"#
+    )
+    .unwrap();
+    let mut l = String::new();
+    reader.read_line(&mut l).unwrap();
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"shutdown"}}"#).unwrap();
+    let mut l2 = String::new();
+    reader.read_line(&mut l2).unwrap();
+    let shut: serde_json::Value = serde_json::from_str(&l2).unwrap();
+    assert_eq!(shut, json!({"jsonrpc": "2.0", "id": 1, "result": null}));
+    // stdin reste ouvert : le process doit sortir seul.
+    assert!(child.wait().unwrap().success());
+    drop(stdin);
+}

@@ -514,4 +514,249 @@ mod tests {
             _ => panic!("Expected UnknownReference"),
         }
     }
+
+    fn msgs(problems: &[VnyError]) -> Vec<String> {
+        problems.iter().map(ToString::to_string).collect()
+    }
+
+    // Scenario: config_saine_retourne_un_rapport_vide
+    #[tokio::test]
+    async fn config_saine_retourne_un_rapport_vide() {
+        let store = make_consistent_store();
+        assert!(check_config(&store).await.is_empty());
+    }
+
+    // Scenario: erreur_de_lecture_collectee_sans_bloquer_les_autres
+    #[tokio::test]
+    async fn erreur_de_lecture_collectee_sans_bloquer_les_autres() {
+        let inner = InMemoryConfigStore {
+            models: Mutex::new(vec![ModelProfile {
+                name: "ghost-model".to_string(),
+                provider: "ghost".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }]),
+            ..Default::default()
+        };
+        let problems = check_config(&ErrSkillsStore { inner }).await;
+        let m = msgs(&problems);
+        assert!(
+            m.contains(&"VNL-CFG-001: Configuration error: boom".to_string()),
+            "{m:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "provider")),
+            "{m:?}"
+        );
+    }
+
+    // Scenario: lecture_en_erreur_traitee_comme_vide_et_cascade_signalee
+    #[tokio::test]
+    async fn lecture_en_erreur_traitee_comme_vide_et_cascade_signalee() {
+        let inner = make_consistent_store();
+        inner.agents.lock().unwrap()[0].skills = SkillSelection::Named(vec!["pdf".to_string()]);
+        let problems = check_config(&ErrSkillsStore { inner }).await;
+        assert!(
+            problems.iter().any(|p| matches!(
+                p,
+                VnyError::UnknownReference(k, v)
+                    if *k == "skill" && v == "pdf (referenced by agent 'build')"
+            )),
+            "{:?}",
+            msgs(&problems)
+        );
+    }
+
+    // Scenario: doublon_signale_par_occurrence_supplementaire
+    #[tokio::test]
+    async fn doublon_signale_par_occurrence_supplementaire() {
+        let agent = |mode| Agent {
+            name: "dup".to_string(),
+            description: None,
+            mode,
+            model: "m".to_string(),
+            toolsets: vec![],
+            skills: SkillSelection::Auto,
+            system_prompt: "p".to_string(),
+        };
+        let store = InMemoryConfigStore {
+            agents: Mutex::new(vec![
+                agent(AgentMode::Primary),
+                agent(AgentMode::Subagent),
+                agent(AgentMode::Subagent),
+            ]),
+            ..Default::default()
+        };
+        let dups = check_config(&store)
+            .await
+            .into_iter()
+            .filter(|p| matches!(p, VnyError::DuplicateName(k, n) if *k == "agent" && n == "dup"))
+            .count();
+        assert_eq!(dups, 2);
+    }
+
+    // Scenario: provider_inconnu_de_model_message_exact
+    #[tokio::test]
+    async fn provider_inconnu_de_model_message_exact() {
+        let store = make_consistent_store();
+        store.models.lock().unwrap()[0].provider = "ghost".to_string();
+        assert_eq!(
+            msgs(&check_config(&store).await),
+            vec![
+                "VNL-CFG-003: Unknown provider reference: 'ghost (referenced by model 'qwen2.5')'"
+            ]
+        );
+    }
+
+    // Scenario: mcp_server_inconnu_de_toolset_message_exact
+    #[tokio::test]
+    async fn mcp_server_inconnu_de_toolset_message_exact() {
+        let store = make_consistent_store();
+        store.toolsets.lock().unwrap()[0].mcp[0].server = "ghost".to_string();
+        assert_eq!(
+            msgs(&check_config(&store).await),
+            vec![
+                "VNL-CFG-003: Unknown mcp_server reference: 'ghost (referenced by toolset 'default')'"
+            ]
+        );
+    }
+
+    // Scenario: agent_problemes_dans_l_ordre_model_puis_toolsets_puis_skill
+    #[tokio::test]
+    async fn agent_problemes_dans_l_ordre_model_puis_toolsets_puis_skill() {
+        let store = InMemoryConfigStore {
+            agents: Mutex::new(vec![Agent {
+                name: "build".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "ghost-model".to_string(),
+                toolsets: vec!["t1".to_string(), "t2".to_string()],
+                skills: SkillSelection::Named(vec!["s1".to_string()]),
+                system_prompt: "p".to_string(),
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            msgs(&check_config(&store).await),
+            vec![
+                "VNL-CFG-003: Unknown model reference: 'ghost-model (referenced by agent 'build')'",
+                "VNL-CFG-003: Unknown toolset reference: 't1 (referenced by agent 'build')'",
+                "VNL-CFG-003: Unknown toolset reference: 't2 (referenced by agent 'build')'",
+                "VNL-CFG-003: Unknown skill reference: 's1 (referenced by agent 'build')'",
+            ]
+        );
+    }
+
+    // Scenario: skills_auto_et_none_jamais_signales
+    #[tokio::test]
+    async fn skills_auto_et_none_jamais_signales() {
+        let store = make_consistent_store();
+        store.skills.lock().unwrap().clear();
+        store.default_agent.lock().unwrap().take();
+        store.toolsets.lock().unwrap().clear();
+        store.mcp_servers.lock().unwrap().clear();
+        let mut second = store.agents.lock().unwrap()[0].clone();
+        second.name = "none-agent".to_string();
+        second.toolsets.clear();
+        second.skills = SkillSelection::None;
+        store.agents.lock().unwrap()[0].toolsets.clear();
+        store.agents.lock().unwrap().push(second);
+        assert!(
+            check_config(&store).await.is_empty(),
+            "{:?}",
+            msgs(&check_config(&store).await)
+        );
+    }
+
+    // Scenario: defaults_agent_inconnu_message_exact
+    #[tokio::test]
+    async fn defaults_agent_inconnu_message_exact() {
+        let store = make_consistent_store();
+        store.agents.lock().unwrap().clear();
+        *store.default_agent.lock().unwrap() = Some("ghost".to_string());
+        assert_eq!(
+            msgs(&check_config(&store).await),
+            vec!["VNL-CFG-003: Unknown agent reference: 'ghost (defaults.agent)'"]
+        );
+    }
+
+    // Scenario: default_agent_absent_ou_valide_jamais_signale
+    #[tokio::test]
+    async fn default_agent_absent_ou_valide_jamais_signale() {
+        let store = make_consistent_store();
+        assert!(check_config(&store).await.is_empty());
+        *store.default_agent.lock().unwrap() = None;
+        assert!(check_config(&store).await.is_empty());
+    }
+
+    // Scenario: noms_identiques_entre_sortes_non_signales
+    #[tokio::test]
+    async fn noms_identiques_entre_sortes_non_signales() {
+        let store = InMemoryConfigStore {
+            providers: Mutex::new(vec![Provider {
+                name: "ollama".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }]),
+            models: Mutex::new(vec![ModelProfile {
+                name: "x".to_string(),
+                provider: "ollama".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }]),
+            toolsets: Mutex::new(vec![Toolset {
+                name: "x".to_string(),
+                description: None,
+                prompt: None,
+                local_tools: vec![],
+                mcp: vec![],
+            }]),
+            ..Default::default()
+        };
+        assert!(check_config(&store).await.is_empty());
+    }
+
+    // Scenario: config_totalement_absente_est_saine
+    #[tokio::test]
+    async fn config_totalement_absente_est_saine() {
+        use tempfile::tempdir;
+        use vanyline_cfgstore::fs_store::FsConfigStore;
+        use vanyline_cfgstore::layers::Layers;
+
+        let layers = Layers {
+            global_dir: tempdir().unwrap().keep(),
+            workspace_dir: Some(tempdir().unwrap().keep()),
+        };
+        assert!(check_config(&FsConfigStore::new(layers)).await.is_empty());
+    }
+
+    // Scenario: config_yaml_corrompu_produit_quatre_erreurs_identiques
+    #[tokio::test]
+    async fn config_yaml_corrompu_produit_quatre_erreurs_identiques() {
+        use tempfile::tempdir;
+        use vanyline_cfgstore::fs_store::FsConfigStore;
+        use vanyline_cfgstore::layers::Layers;
+
+        let global = tempdir().unwrap();
+        std::fs::write(global.path().join("config.yaml"), "providers: [unclosed").unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let problems = check_config(&FsConfigStore::new(layers)).await;
+        assert_eq!(problems.len(), 4, "{:?}", msgs(&problems));
+        for p in &problems {
+            assert!(
+                matches!(p, VnyError::ConfigError(m) if m.starts_with("Failed to parse")),
+                "{p}"
+            );
+        }
+    }
 }

@@ -304,3 +304,157 @@ pub fn local_tools_map() -> HashMap<String, Arc<dyn rig_core::tool::ToolDyn>> {
     map.insert("execute_command".to_string(), Arc::new(ExecuteCommandTool));
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig_core::tool::ToolDyn;
+
+    // Scenario: local_tools_map_expose_exactement_huit_tools
+    #[test]
+    fn local_tools_map_expose_exactement_huit_tools() {
+        let map = local_tools_map();
+        let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "delete_file",
+                "edit_file",
+                "execute_command",
+                "find_files",
+                "list_directory",
+                "read_file",
+                "search",
+                "write_file",
+            ]
+        );
+        for (key, tool) in &map {
+            assert_eq!(key, &tool.name());
+        }
+    }
+
+    // Scenario: definition_ignorer_le_prompt_et_rendre_le_schema_mcp
+    #[tokio::test]
+    async fn definition_ignorer_le_prompt_et_rendre_le_schema_mcp() {
+        let tool = ReadFileTool;
+        let a = tool.definition("prompt A".to_string()).await;
+        let b = tool.definition("prompt B".to_string()).await;
+        assert_eq!(a.name, "read_file");
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.description, b.description);
+        assert_eq!(a.parameters, b.parameters);
+        let schema = mcp::filesystem_tools()
+            .into_iter()
+            .find(|t| t["name"] == "read_file")
+            .map(|t| t["inputSchema"].clone());
+        assert_eq!(Some(a.parameters), schema);
+    }
+
+    // Scenario: tool_definition_inconnu_panique
+    #[test]
+    #[should_panic(expected = "no schema found for tool")]
+    fn tool_definition_inconnu_panique() {
+        let _ = tool_definition("create_directory");
+    }
+
+    // Scenario: lecture_de_fichier_inexistant_enrobe_file_not_found
+    #[tokio::test]
+    async fn lecture_de_fichier_inexistant_enrobe_file_not_found() {
+        let r = ReadFileTool
+            .call(r#"{"path": "/defier/inexistant.txt"}"#.to_string())
+            .await;
+        match r {
+            Err(ToolError::ToolCallError(e)) => {
+                assert!(e.to_string().contains("/defier/inexistant.txt"), "{e}");
+            }
+            other => panic!("attendu ToolCallError, reçu {other:?}"),
+        }
+    }
+
+    // Scenario: json_malforme_en_retourne_tool_call_error
+    #[tokio::test]
+    async fn json_malforme_en_retourne_tool_call_error() {
+        let r = ReadFileTool.call("pas du json".to_string()).await;
+        assert!(matches!(r, Err(ToolError::ToolCallError(_))));
+    }
+
+    // Scenario: requis_manquant_en_retourne_tool_call_error
+    #[tokio::test]
+    async fn requis_manquant_en_retourne_tool_call_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.txt");
+        let params = format!(r#"{{"path": "{}"}}"#, path.display());
+        let r = WriteFileTool.call(params).await;
+        match r {
+            Err(ToolError::ToolCallError(e)) => {
+                assert!(e.to_string().contains("missing field `content`"), "{e}");
+            }
+            other => panic!("attendu ToolCallError, reçu {other:?}"),
+        }
+        assert!(!path.exists());
+    }
+
+    // Scenario: offset_negatif_en_retourne_tool_call_error
+    #[tokio::test]
+    async fn offset_negatif_en_retourne_tool_call_error() {
+        let r = ReadFileTool
+            .call(r#"{"path": "f.txt", "offset": -1}"#.to_string())
+            .await;
+        assert!(matches!(r, Err(ToolError::ToolCallError(_))));
+    }
+
+    // Scenario: write_file_confirme_en_octets
+    #[tokio::test]
+    async fn write_file_confirme_en_octets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("five.txt");
+        let path_str = path.display().to_string();
+        let params = format!(r#"{{"path": "{path_str}", "content": "hello"}}"#);
+        let out = WriteFileTool.call(params).await.unwrap();
+        assert_eq!(out, format!("wrote 5 bytes to {path_str}"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    // Scenario: delete_file_confirme_le_chemin_reçu
+    #[tokio::test]
+    async fn delete_file_confirme_le_chemin_recu() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.txt");
+        std::fs::write(&path, "x").unwrap();
+        let path_str = path.display().to_string();
+        let out = DeleteFileTool
+            .call(format!(r#"{{"path": "{path_str}"}}"#))
+            .await
+            .unwrap();
+        assert_eq!(out, format!("deleted {path_str}"));
+        assert!(!path.exists());
+    }
+
+    // Scenario: aucun_chemin_est_confine_au_repertoire_courant
+    #[tokio::test]
+    async fn aucun_chemin_est_confine_au_repertoire_courant() {
+        let out = ListDirectoryTool
+            .call(r#"{"path": "/tmp"}"#.to_string())
+            .await;
+        assert!(out.is_ok(), "{out:?}");
+    }
+
+    // Scenario: champs_inconnus_silencieusement_ignores
+    #[tokio::test]
+    async fn champs_inconnus_silencieusement_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.txt");
+        std::fs::write(&path, "a a").unwrap();
+        let params = serde_json::json!({
+            "path": path.display().to_string(),
+            "old_string": "a",
+            "new_string": "b",
+            "replaceAll": true,
+        })
+        .to_string();
+        let r = EditFileTool.call(params).await;
+        assert!(r.is_err(), "replaceAll ne doit pas être pris en compte");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a a");
+    }
+}

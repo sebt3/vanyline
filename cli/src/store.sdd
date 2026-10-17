@@ -329,7 +329,7 @@ Tasks:
   [ ] La branche « erreur @std::fs::read_dir » de @list_conversations (permissions) n'est
     couverte par aucun test existant : prevoir une fixture de permissions si les scenarios
     disque sont ecrits.
-  [ ] Les sept tests existants de @resolve_conversation_reference (resolves_by_one_based_index,
+  [x] Les sept tests existants de @resolve_conversation_reference (resolves_by_one_based_index,
     index_zero_errors, index_out_of_range_errors, resolves_by_uuid_prefix,
     resolves_by_full_uuid, unknown_reference_errors, ambiguous_prefix_errors) couvrent deja
     les scenarios de resolution correspondants ; les scenarios « no-fallback », « index vs

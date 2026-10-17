@@ -142,4 +142,82 @@ mod tests {
         let result = discover_workspace_root(&subdir);
         assert!(result.is_none());
     }
+
+    // --- configured_namespace / configured_toolbox (couches temporaires, sans env) ---
+
+    fn layers_with(
+        global: Option<&str>,
+        workspace: Option<&str>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, Layers) {
+        let g = tempfile::tempdir().unwrap();
+        let w = tempfile::tempdir().unwrap();
+        if let Some(c) = global {
+            std::fs::write(g.path().join("config.yaml"), c).unwrap();
+        }
+        if let Some(c) = workspace {
+            std::fs::write(w.path().join("config.yaml"), c).unwrap();
+        }
+        let layers = Layers {
+            global_dir: g.path().to_path_buf(),
+            workspace_dir: workspace.map(|_| w.path().to_path_buf()),
+        };
+        (g, w, layers)
+    }
+
+    // Scenario: configured_namespace lit la valeur de la couche globale
+    #[test]
+    fn configured_namespace_lit_la_valeur_de_la_couche_globale() {
+        let (_g, _w, layers) = layers_with(Some("defaults:\n  namespace: prod\n"), None);
+        assert_eq!(configured_namespace(&layers).as_deref(), Some("prod"));
+    }
+
+    // Scenario: la couche workspace ecrase defaults.namespace
+    #[test]
+    fn la_couche_workspace_ecrase_defaults_namespace() {
+        let (_g, _w, layers) = layers_with(
+            Some("defaults:\n  namespace: prod\n"),
+            Some("defaults:\n  namespace: dev\n"),
+        );
+        assert_eq!(configured_namespace(&layers).as_deref(), Some("dev"));
+    }
+
+    // Scenario: configured_namespace ignore une valeur non textuelle
+    #[test]
+    fn configured_namespace_ignore_une_valeur_non_textuelle() {
+        let (_g, _w, layers) = layers_with(Some("defaults:\n  namespace: 3\n"), None);
+        assert_eq!(configured_namespace(&layers), None);
+    }
+
+    // Scenario: configured_namespace retourne None si une couche est invalide
+    #[test]
+    fn configured_namespace_retourne_none_si_une_couche_est_invalide() {
+        let (_g, _w, layers) = layers_with(
+            Some("defaults:\n  namespace: prod\n"),
+            Some("defaults: [unclosed"),
+        );
+        assert_eq!(configured_namespace(&layers), None);
+    }
+
+    // Scenario: configured_toolbox applique la meme fusion que configured_namespace
+    #[test]
+    fn configured_toolbox_applique_la_meme_fusion_que_configured_namespace() {
+        let (_g, _w, layers) = layers_with(
+            Some("defaults:\n  toolbox: base\n"),
+            Some("defaults:\n  toolbox: labs\n"),
+        );
+        assert_eq!(configured_toolbox(&layers).as_deref(), Some("labs"));
+        let sans_workspace = Layers {
+            global_dir: layers.global_dir.clone(),
+            workspace_dir: None,
+        };
+        assert_eq!(configured_toolbox(&sans_workspace).as_deref(), Some("base"));
+    }
+
+    // Scenario: defaults absents de toute couche donnent None
+    #[test]
+    fn defaults_absents_de_toute_couche_donnent_none() {
+        let (_g, _w, layers) = layers_with(None, None);
+        assert_eq!(configured_namespace(&layers), None);
+        assert_eq!(configured_toolbox(&layers), None);
+    }
 }
