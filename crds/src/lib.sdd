@@ -383,7 +383,7 @@ Tasks:
     `sandbox_defaults` ne vérifie pas `resources: None` ; `application_defaults` ne vérifie
     pas `storage_defaults: None` (le test `application_camel_case` les exerce en sérialisation
     seulement). — fait 2026-10-06 (étape 4a).
-  [ ] Convertir en tests taggés par leur titre les quatre Scenarios ajoutés le 2026-10-06 :
+  [x] Convertir en tests taggés par leur titre les quatre Scenarios ajoutés le 2026-10-06 :
     `owner_namespace_name_valide`, `owner_namespace_name_hors_dns_1123`,
     `owner_namespace_name_trop_long`, `git_secret_transport_conservé` — les trois premiers
     existent déjà en tests (dérivés du `Must`, sans Scenario dédié) : les retagger sous les

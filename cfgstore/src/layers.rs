@@ -637,4 +637,198 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         let result = skill_entry_source(&layers, "pdf");
         assert_eq!(result, "global");
     }
+
+    #[test]
+    fn load_config_layer_io_non_not_found_rend_cfg_004() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("config.yaml")).unwrap();
+        let err = load_config_layer(tmp.path()).unwrap_err();
+        assert!(matches!(err, CfgStoreError::Io(_)));
+        assert!(err.to_string().starts_with("VNL-CFG-004"));
+    }
+
+    #[test]
+    fn load_merged_config_fusionne_global_et_workspace() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            global.path().join("config.yaml"),
+            "providers:\n  strix:\n    type: ollama\ndefaults:\n  agent: build\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join("config.yaml"),
+            "models:\n  qwen-code:\n    provider: strix\ndefaults:\n  agent: debug\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        let merged = layers.load_merged_config().unwrap();
+        assert!(merged.providers.contains_key("strix"));
+        assert!(merged.models.contains_key("qwen-code"));
+        assert_eq!(
+            merged.defaults.get("agent").and_then(|v| v.as_str()),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn load_merged_config_propage_erreur_du_workspace_invalide() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            global.path().join("config.yaml"),
+            "defaults:\n  agent: build\n",
+        )
+        .unwrap();
+        let ws_path = workspace.path().join("config.yaml");
+        std::fs::write(&ws_path, "providers: [\n  : invalide\n").unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        match layers.load_merged_config().unwrap_err() {
+            CfgStoreError::Config(msg) => {
+                assert!(msg.contains(&ws_path.display().to_string()), "{msg}");
+            }
+            autre => panic!("Config attendu, reçu {autre}"),
+        }
+    }
+
+    #[test]
+    fn list_layer_files_extension_exacte_sensible_a_la_casse() {
+        let tmp = tempdir().unwrap();
+        for nom in ["a.md", "b.md", "c.txt", "A.MD"] {
+            std::fs::write(tmp.path().join(nom), "x").unwrap();
+        }
+        let files = list_layer_files(tmp.path(), "md").unwrap();
+        let cles: Vec<&str> = files.keys().map(String::as_str).collect();
+        assert_eq!(cles, ["a", "b"]);
+    }
+
+    #[test]
+    fn resolve_named_files_meme_stem_le_workspace_gagne_sans_doublon() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        std::fs::create_dir_all(global.path().join("agents")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("agents")).unwrap();
+        std::fs::write(global.path().join("agents/build.md"), "g").unwrap();
+        std::fs::write(workspace.path().join("agents/build.md"), "w").unwrap();
+        std::fs::write(workspace.path().join("agents/debug.md"), "w").unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        let files = layers.resolve_named_files("agents", "md").unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files.get("build"),
+            Some(&workspace.path().join("agents/build.md"))
+        );
+        assert!(files.contains_key("debug"));
+    }
+
+    #[test]
+    fn resolve_skill_files_nom_commun_le_workspace_gagne() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        for (base, nom) in [
+            (global.path(), "pdf"),
+            (workspace.path(), "pdf"),
+            (workspace.path(), "csv"),
+        ] {
+            let dir = base.join("skills").join(nom);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "x").unwrap();
+        }
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        let files = layers.resolve_skill_files().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files.get("pdf"),
+            Some(&workspace.path().join("skills/pdf/SKILL.md"))
+        );
+        assert!(files.contains_key("csv"));
+    }
+
+    fn pick_models(raw: &RawConfigFile) -> &BTreeMap<String, yaml_serde::Value> {
+        &raw.models
+    }
+
+    #[test]
+    fn config_entry_source_repond_global_sur_yaml_workspace_invalide() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("config.yaml"),
+            "models: [\n  : invalide\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        assert_eq!(config_entry_source(&layers, "qwen", pick_models), "global");
+        assert_eq!(
+            config_entry_source(&layers, "n-importe-quoi", pick_models),
+            "global"
+        );
+    }
+
+    #[test]
+    fn file_entry_source_extension_differentee_repond_global() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("toolsets")).unwrap();
+        std::fs::write(workspace.path().join("toolsets/grafana.yml"), "x").unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        assert_eq!(
+            file_entry_source(&layers, "toolsets", "yaml", "grafana"),
+            "global"
+        );
+        assert_eq!(
+            file_entry_source(&layers, "toolsets", "yml", "grafana"),
+            "workspace"
+        );
+    }
+
+    #[test]
+    fn skill_entry_source_sans_workspace_repond_global() {
+        let global = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        assert_eq!(skill_entry_source(&layers, "pdf"), "global");
+        assert_eq!(skill_entry_source(&layers, "inconnu"), "global");
+    }
+
+    #[test]
+    fn provenance_absente_des_deux_couches_repond_global() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("config.yaml"),
+            "models:\n  autre:\n    provider: p\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global.path().join("config.yaml"),
+            "models:\n  autre:\n    provider: p\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        assert_eq!(config_entry_source(&layers, "ghost", pick_models), "global");
+    }
 }

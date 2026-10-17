@@ -229,7 +229,7 @@ Must not:
     (`map_err(CfgStoreError::Config)`).
 
 Tasks:
-  [ ] Ajouter les tests du module : `error_codes` ne fait que des `contains` ; ajouter un
+  [x] Ajouter les tests du module : `error_codes` ne fait que des `contains` ; ajouter un
     test par Scenario, taggé par son titre, verrouillant les rendus complets (méthode de
     ../../lib/src/error.sdd et ../../tools/src/error.sdd).
   [?] Collision de namespace avec l'app : ../../app/src/config.rs et

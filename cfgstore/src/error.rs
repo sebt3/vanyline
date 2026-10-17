@@ -88,4 +88,162 @@ mod tests {
         let e11 = CfgStoreError::InvalidName("a".to_string());
         assert!(matches!(e11, CfgStoreError::InvalidName(_)));
     }
+
+    #[test]
+    fn display_exhaustif_des_dix_marqueurs_vnl_cfg() {
+        let cases: Vec<(CfgStoreError, &str)> = vec![
+            (
+                CfgStoreError::Config("boom".to_string()),
+                "VNL-CFG-001: Configuration error: boom",
+            ),
+            (
+                CfgStoreError::DuplicateName("agent", "build".to_string()),
+                "VNL-CFG-002: Duplicate name 'build' for agent",
+            ),
+            (
+                CfgStoreError::UnknownReference("model", "qwen-code".to_string()),
+                "VNL-CFG-003: Unknown model reference: 'qwen-code'",
+            ),
+            (
+                CfgStoreError::from(std::io::Error::other("io")),
+                "VNL-CFG-004: I/O error: io",
+            ),
+            (
+                CfgStoreError::InvalidName(String::new()),
+                "VNL-CFG-005: Invalid name: ",
+            ),
+            (
+                CfgStoreError::NotFound {
+                    kind: "provider",
+                    name: "x".to_string(),
+                    layer: Layer::Global,
+                },
+                "VNL-CFG-006: provider 'x' not found in Global layer",
+            ),
+            (
+                CfgStoreError::NameConflict {
+                    kind: "model",
+                    name: "x".to_string(),
+                    layer: Layer::Workspace,
+                },
+                "VNL-CFG-007: model 'x' already exists in Workspace layer",
+            ),
+            (
+                CfgStoreError::WriteError("boom".to_string()),
+                "VNL-CFG-008: Write error: boom",
+            ),
+            (
+                CfgStoreError::ReadOnly,
+                "VNL-CFG-009: Config store is read-only",
+            ),
+            (
+                CfgStoreError::Validation("type".to_string()),
+                "VNL-CFG-010: Invalid value: type",
+            ),
+        ];
+        for (err, attendu) in cases {
+            assert_eq!(format!("{err}"), attendu);
+        }
+    }
+
+    #[test]
+    fn rendu_inverse_des_champs_de_duplicate_name() {
+        let dup = CfgStoreError::DuplicateName("agent", "dup".to_string());
+        assert_eq!(
+            format!("{dup}"),
+            "VNL-CFG-002: Duplicate name 'dup' for agent"
+        );
+        let unk = CfgStoreError::UnknownReference("model", "qwen".to_string());
+        assert_eq!(
+            format!("{unk}"),
+            "VNL-CFG-003: Unknown model reference: 'qwen'"
+        );
+    }
+
+    #[test]
+    fn rendu_debug_de_layer_dans_not_found_et_name_conflict() {
+        let nf = CfgStoreError::NotFound {
+            kind: "provider",
+            name: "p".to_string(),
+            layer: Layer::Workspace,
+        };
+        assert_eq!(
+            format!("{nf}"),
+            "VNL-CFG-006: provider 'p' not found in Workspace layer"
+        );
+        let nc = CfgStoreError::NameConflict {
+            kind: "provider",
+            name: "p".to_string(),
+            layer: Layer::Workspace,
+        };
+        assert_eq!(
+            format!("{nc}"),
+            "VNL-CFG-007: provider 'p' already exists in Workspace layer"
+        );
+    }
+
+    #[test]
+    fn conversion_depuis_std_io_error_generee_par_operateur_question() {
+        fn ecrit_dans_chemin_invalide(dir: &std::path::Path) -> Result<(), CfgStoreError> {
+            std::fs::write(dir.join("absent").join("fichier"), b"x")?;
+            Ok(())
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let err = ecrit_dans_chemin_invalide(tmp.path()).unwrap_err();
+        assert!(matches!(err, CfgStoreError::Io(_)));
+        let io_msg = match &err {
+            CfgStoreError::Io(io) => io.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            format!("{err}"),
+            format!("VNL-CFG-004: I/O error: {io_msg}")
+        );
+        let source = std::error::Error::source(&err).expect("source Some");
+        assert_eq!(source.to_string(), io_msg);
+    }
+
+    #[test]
+    fn source_std_error_absente_sauf_variante_io() {
+        let ro = CfgStoreError::ReadOnly;
+        assert!(std::error::Error::source(&ro).is_none());
+        let io = CfgStoreError::Io(std::io::Error::other("x"));
+        let source = std::error::Error::source(&io).expect("source Some");
+        assert_eq!(source.to_string(), "x");
+    }
+
+    #[test]
+    fn marqueurs_vnl_cfg_uniques_dans_le_fichier() {
+        let src = include_str!("error.rs");
+        let hors_tests = src.split("#[cfg(test)]").next().unwrap_or_default();
+        let mut total = 0;
+        for n in 1..=10 {
+            let gabarit = format!("#[error(\"VNL-CFG-{n:03}:");
+            let occurrences = hors_tests.matches(gabarit.as_str()).count();
+            assert_eq!(occurrences, 1, "marqueur VNL-CFG-{n:03}");
+            total += occurrences;
+        }
+        assert_eq!(hors_tests.matches("#[error(\"VNL-CFG-").count(), total);
+    }
+
+    #[test]
+    fn payload_rendu_tel_quel_y_compris_nom_vide() {
+        let chemin = "/dosier avec espace «çà» 'quote'";
+        let cfg = CfgStoreError::Config(chemin.to_string());
+        assert_eq!(
+            format!("{cfg}"),
+            format!("VNL-CFG-001: Configuration error: {chemin}")
+        );
+        let vide = CfgStoreError::InvalidName(String::new());
+        assert_eq!(format!("{vide}"), "VNL-CFG-005: Invalid name: ");
+    }
+
+    #[test]
+    fn payload_portant_deja_un_marqueur_produit_un_double_marqueur() {
+        let err = CfgStoreError::Config("VNL-LLM-001: LLM provider error: x".to_string());
+        assert_eq!(
+            format!("{err}"),
+            "VNL-CFG-001: Configuration error: VNL-LLM-001: LLM provider error: x"
+        );
+    }
 }

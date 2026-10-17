@@ -245,7 +245,7 @@ Must not:
     comme format canonique).
 
 Tasks:
-  [ ] Compléter les tests, un par Scenario, taggés par son titre. Les tests existants de
+  [x] Compléter les tests, un par Scenario, taggés par son titre. Les tests existants de
     `mod tests` couvrent déjà : absent→default, YAML valide, YAML invalide avec chemin,
     identité `None`, union disjointe, remplacement total, `defaults` clé par clé, sélection
     d'extension, ignor des sous-répertoires, répertoires absents, ombrage par stem, unions

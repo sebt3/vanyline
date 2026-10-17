@@ -1279,10 +1279,14 @@ mod tests {
     // Contrat Must (pas de Scenario dedie — remonte dans la synthese) :
     // owner_namespace_name = "{app_namespace}-{owner}", label DNS-1123 <= 63 caracteres.
     #[test]
-    fn owner_namespace_name_concatene_app_et_owner() {
+    fn owner_namespace_name_valide() {
         assert_eq!(
             owner_namespace_name("vanyline-app", "alice").unwrap(),
             "vanyline-app-alice"
+        );
+        assert_eq!(
+            owner_namespace_name("media-test", "seb").unwrap(),
+            "media-test-seb"
         );
         // 63 caracteres exacts : dans la limite.
         let name = owner_namespace_name(&"a".repeat(31), &"b".repeat(31))
@@ -1291,7 +1295,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_namespace_name_rejette_hors_dns1123() {
+    fn owner_namespace_name_hors_dns_1123() {
         let err = owner_namespace_name("Vanyline-App", "alice").expect_err("majuscules interdites");
         assert!(
             err.contains("DNS-1123"),
@@ -1324,7 +1328,31 @@ mod tests {
     }
 
     #[test]
-    fn owner_namespace_name_rejette_plus_de_63_caracteres() {
+    fn git_secret_transport_conservé() {
+        let json = r#"{"owner":"o","repoUrl":"https://x/y.git","gitSecret":"cle-git","egress":[]}"#;
+        let spec: ProjectSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.git_secret.as_deref(), Some("cle-git"));
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["gitSecret"], serde_json::json!("cle-git"));
+
+        let defaut = ProjectSpec {
+            owner: "o".to_string(),
+            repo_url: "https://x/y.git".to_string(),
+            default_branch: None,
+            storage_size: None,
+            storage_class: None,
+            storage_access_mode: None,
+            git_secret: None,
+            caches: None,
+            fetch_interval: None,
+            egress: Vec::new(),
+        };
+        let v = serde_json::to_value(&defaut).unwrap();
+        assert_eq!(v["gitSecret"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn owner_namespace_name_trop_long() {
         let err =
             owner_namespace_name(&"a".repeat(32), &"b".repeat(31)).expect_err("64 caracteres > 63");
         assert!(err.contains("63"), "l'erreur porte la raison, got: {err}");

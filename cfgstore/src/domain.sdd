@@ -245,7 +245,7 @@ Must not:
     + tests `*_wire_shape` + conformance.
 
 Tasks:
-  [ ] Convertir chaque Scenario sans test existant en un test dédié taggé par
+  [x] Convertir chaque Scenario sans test existant en un test dédié taggé par
     son titre (flux TTD). Couverts aujourd'hui par `mod tests` de ./domain.rs :
     @provider_type_serde, @mcp_transport_serde, @agent_mode_serde,
     @skill_selection_serde, @agent_defaults, @model_profile_roundtrip,

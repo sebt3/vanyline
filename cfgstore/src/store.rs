@@ -1849,4 +1849,553 @@ mod tests {
             .await;
         assert!(matches!(result.unwrap_err(), CfgStoreError::InvalidName(_)));
     }
+
+    fn agent_fixture(model: &str) -> Agent {
+        Agent {
+            name: "nouveau".to_string(),
+            description: None,
+            mode: crate::domain::AgentMode::Primary,
+            model: model.to_string(),
+            toolsets: vec![],
+            skills: crate::domain::SkillSelection::Auto,
+            system_prompt: "p".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_patch_non_objet_renv_vnl_cfg_001() {
+        let store = sample_store();
+        let r = store
+            .update_agent(Layer::Global, "build", serde_json::json!(42))
+            .await;
+        match r.unwrap_err() {
+            CfgStoreError::Config(msg) => assert_eq!(msg, "update patch must be a JSON object"),
+            autre => panic!("Config attendu, reçu {autre}"),
+        }
+        let agents = store.list_agents().await.unwrap();
+        assert_eq!(agents[0].model, "qwen2.5");
+        assert_eq!(agents[0].system_prompt, "You are a build assistant.");
+    }
+
+    #[tokio::test]
+    async fn update_cle_name_du_patch_est_ignoree() {
+        let store = sample_store();
+        store
+            .update_toolset(
+                Layer::Global,
+                "default",
+                serde_json::json!({"name": "rebaptise", "description": "ok"}),
+            )
+            .await
+            .unwrap();
+        let toolsets = store.list_toolsets().await.unwrap();
+        assert_eq!(toolsets.len(), 1);
+        assert_eq!(toolsets[0].name, "default");
+        assert_eq!(toolsets[0].description.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn update_champ_requis_null_rejete() {
+        let store = sample_store();
+        let before_provider = store.list_providers().await.unwrap();
+        let before_model = store.list_models().await.unwrap();
+        let before_mcp = store.list_mcp_servers().await.unwrap();
+        let before_agent = store.list_agents().await.unwrap();
+
+        let r = store
+            .update_provider(
+                Layer::Global,
+                "ollama-local",
+                serde_json::json!({"endpoint": null}),
+            )
+            .await;
+        assert!(matches!(r.unwrap_err(), CfgStoreError::Validation(_)));
+        let r = store
+            .update_model(Layer::Global, "qwen2.5", serde_json::json!({"model": null}))
+            .await;
+        assert!(matches!(r.unwrap_err(), CfgStoreError::Validation(_)));
+        let r = store
+            .update_mcp_server(Layer::Global, "fs", serde_json::json!({"url": null}))
+            .await;
+        assert!(matches!(r.unwrap_err(), CfgStoreError::Validation(_)));
+        let r = store
+            .update_agent(
+                Layer::Global,
+                "build",
+                serde_json::json!({"system_prompt": null}),
+            )
+            .await;
+        assert!(matches!(r.unwrap_err(), CfgStoreError::Validation(_)));
+
+        assert_eq!(
+            store.list_providers().await.unwrap()[0].endpoint,
+            before_provider[0].endpoint
+        );
+        assert_eq!(
+            store.list_models().await.unwrap()[0].model,
+            before_model[0].model
+        );
+        assert_eq!(
+            store.list_mcp_servers().await.unwrap()[0].url,
+            before_mcp[0].url
+        );
+        assert_eq!(
+            store.list_agents().await.unwrap()[0].system_prompt,
+            before_agent[0].system_prompt
+        );
+    }
+
+    #[tokio::test]
+    async fn update_provider_type_et_api_key() {
+        let store = sample_store();
+        store
+            .update_provider(
+                Layer::Global,
+                "ollama-local",
+                serde_json::json!({"api_key": "sk"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_providers().await.unwrap()[0].api_key.as_deref(),
+            Some("sk")
+        );
+        store
+            .update_provider(
+                Layer::Global,
+                "ollama-local",
+                serde_json::json!({"api_key": null}),
+            )
+            .await
+            .unwrap();
+        assert!(store.list_providers().await.unwrap()[0].api_key.is_none());
+        store
+            .update_provider(
+                Layer::Global,
+                "ollama-local",
+                serde_json::json!({"type": "openai-compatible"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_providers().await.unwrap()[0].provider_type,
+            crate::domain::ProviderType::OpenaiCompatible
+        );
+        let r = store
+            .update_provider(
+                Layer::Global,
+                "ollama-local",
+                serde_json::json!({"type": "carrier-pigeon"}),
+            )
+            .await;
+        match r.unwrap_err() {
+            CfgStoreError::Validation(msg) => assert!(msg.contains("carrier-pigeon"), "{msg}"),
+            autre => panic!("Validation attendue, reçu {autre}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_model_options_null_vide_non_objet_rejete() {
+        let store = sample_store();
+        store
+            .update_model(
+                Layer::Global,
+                "qwen2.5",
+                serde_json::json!({"options": {"num_ctx": 8192}}),
+            )
+            .await
+            .unwrap();
+        store
+            .update_model(
+                Layer::Global,
+                "qwen2.5",
+                serde_json::json!({"options": null}),
+            )
+            .await
+            .unwrap();
+        assert!(store.list_models().await.unwrap()[0].options.is_empty());
+        store
+            .update_model(
+                Layer::Global,
+                "qwen2.5",
+                serde_json::json!({"options": {"num_ctx": 65536}}),
+            )
+            .await
+            .unwrap();
+        let models = store.list_models().await.unwrap();
+        assert_eq!(models[0].options.len(), 1);
+        assert_eq!(models[0].options["num_ctx"], serde_json::json!(65536));
+        let r = store
+            .update_model(Layer::Global, "qwen2.5", serde_json::json!({"options": 42}))
+            .await;
+        assert!(matches!(r.unwrap_err(), CfgStoreError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn update_mcp_server_headers_non_string_ignores() {
+        let store = sample_store();
+        store
+            .update_mcp_server(
+                Layer::Global,
+                "fs",
+                serde_json::json!({"headers": {"X-Foo": "bar", "X-Num": 42}}),
+            )
+            .await
+            .unwrap();
+        let servers = store.list_mcp_servers().await.unwrap();
+        assert_eq!(servers[0].headers.len(), 1);
+        assert_eq!(
+            servers[0].headers.get("X-Foo").map(String::as_str),
+            Some("bar")
+        );
+
+        let r = store
+            .update_mcp_server(
+                Layer::Global,
+                "fs",
+                serde_json::json!({"headers": "non-objet"}),
+            )
+            .await;
+        assert!(matches!(r.unwrap_err(), CfgStoreError::Validation(_)));
+
+        store
+            .update_mcp_server(Layer::Global, "fs", serde_json::json!({"headers": null}))
+            .await
+            .unwrap();
+        assert!(
+            store.list_mcp_servers().await.unwrap()[0]
+                .headers
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_skill_forme_patch_verifiee_avant_existence() {
+        let store = InMemoryConfigStore::new();
+        let patch = serde_json::json!(42);
+        match store
+            .update_skill(Layer::Global, "absent", patch.clone())
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::Config(msg) => assert_eq!(msg, "update patch must be a JSON object"),
+            autre => panic!("Config attendu, reçu {autre}"),
+        }
+        match store
+            .update_agent(Layer::Global, "absent", patch)
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::NotFound { kind, .. } => assert_eq!(kind, "agent"),
+            autre => panic!("NotFound attendu, reçu {autre}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_sans_validation_ni_couche() {
+        let store = InMemoryConfigStore::new();
+        store
+            .set_default_agent(Layer::Workspace, "..invalide")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.default_agent().await.unwrap().as_deref(),
+            Some("..invalide")
+        );
+    }
+
+    /// Implémentation minimale : lectures obligatoires uniquement, écritures par défaut.
+    struct LectureSeule;
+
+    #[async_trait]
+    impl ConfigStore for LectureSeule {
+        async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
+            Ok(vec![])
+        }
+        async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
+            Ok(vec![])
+        }
+        async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
+            Ok(vec![])
+        }
+        async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
+            Ok(vec![])
+        }
+        async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
+            Ok(vec![])
+        }
+        async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
+            Ok(vec![])
+        }
+        async fn load_skill(&self, _name: &str) -> Result<String, CfgStoreError> {
+            Ok(String::new())
+        }
+        async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn ecritures_defaut_du_trait_renv_lecture_seule() {
+        let s = LectureSeule;
+        let provider = Provider {
+            name: "p".into(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://x".into(),
+            api_key: None,
+        };
+        let model = ModelProfile {
+            name: "m".into(),
+            provider: "p".into(),
+            model: "x".into(),
+            temperature: None,
+            max_tokens: None,
+            options: serde_json::Map::new(),
+        };
+        let mcp = McpServer {
+            name: "s".into(),
+            transport: McpTransport::Sse,
+            url: "http://x".into(),
+            headers: std::collections::BTreeMap::default(),
+        };
+        let toolset = Toolset {
+            name: "t".into(),
+            description: None,
+            prompt: None,
+            local_tools: vec![],
+            mcp: vec![],
+        };
+        let skill = SkillMeta {
+            name: "k".into(),
+            description: "d".into(),
+        };
+        let patch = serde_json::json!({});
+        let resultats = [
+            s.create_provider(Layer::Global, provider).await,
+            s.update_provider(Layer::Global, "p", patch.clone()).await,
+            s.delete_provider(Layer::Global, "p").await,
+            s.create_model(Layer::Global, model).await,
+            s.update_model(Layer::Global, "m", patch.clone()).await,
+            s.delete_model(Layer::Global, "m").await,
+            s.create_mcp_server(Layer::Global, mcp).await,
+            s.update_mcp_server(Layer::Global, "s", patch.clone()).await,
+            s.delete_mcp_server(Layer::Global, "s").await,
+            s.create_toolset(Layer::Global, toolset).await,
+            s.update_toolset(Layer::Global, "t", patch.clone()).await,
+            s.delete_toolset(Layer::Global, "t").await,
+            s.create_agent(Layer::Global, agent_fixture("m")).await,
+            s.update_agent(Layer::Global, "a", patch.clone()).await,
+            s.delete_agent(Layer::Global, "a").await,
+            s.create_skill(Layer::Global, skill, String::new()).await,
+            s.update_skill(Layer::Global, "k", patch).await,
+            s.delete_skill(Layer::Global, "k").await,
+            s.set_default_agent(Layer::Global, "a").await,
+        ];
+        assert_eq!(resultats.len(), 19);
+        for r in resultats {
+            assert!(matches!(r, Err(CfgStoreError::ReadOnly)));
+        }
+    }
+
+    #[tokio::test]
+    async fn mutex_empoisonne_recupere() {
+        let store = std::sync::Arc::new(sample_store());
+        let copie = std::sync::Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = copie.providers.lock().unwrap();
+            panic!("empoisonnement volontaire");
+        })
+        .join();
+        assert!(store.providers.is_poisoned());
+        let providers = store.list_providers().await.unwrap();
+        assert_eq!(providers.len(), 1);
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "neuf".into(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://y".into(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.list_providers().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inmemory_ignore_la_couche() {
+        let store = InMemoryConfigStore::new();
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "dup".into(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".into(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        let r = store
+            .create_provider(
+                Layer::Workspace,
+                Provider {
+                    name: "dup".into(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".into(),
+                    api_key: None,
+                },
+            )
+            .await;
+        match r.unwrap_err() {
+            CfgStoreError::NameConflict { layer, .. } => {
+                assert_eq!(layer, Layer::Workspace);
+                let msg = CfgStoreError::NameConflict {
+                    kind: "provider",
+                    name: "dup".into(),
+                    layer,
+                }
+                .to_string();
+                assert!(msg.contains("Workspace"), "{msg}");
+            }
+            autre => panic!("NameConflict attendu, reçu {autre}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ecritures_acceptent_references_inconnues() {
+        let store = InMemoryConfigStore::new();
+        store
+            .create_model(
+                Layer::Global,
+                ModelProfile {
+                    name: "m".into(),
+                    provider: "fantome".into(),
+                    model: "x".into(),
+                    temperature: None,
+                    max_tokens: None,
+                    options: serde_json::Map::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut agent = agent_fixture("fantome");
+        agent.toolsets = vec!["inconnu".into()];
+        agent.skills = SkillSelection::Named(vec!["absente".into()]);
+        store.create_agent(Layer::Global, agent).await.unwrap();
+        assert_eq!(store.list_agents().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_provider_model_mcp_conflit_et_nom_invalide() {
+        let store = sample_store();
+        let provider = |n: &str| Provider {
+            name: n.into(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://x".into(),
+            api_key: None,
+        };
+        let model = |n: &str| ModelProfile {
+            name: n.into(),
+            provider: "p".into(),
+            model: "x".into(),
+            temperature: None,
+            max_tokens: None,
+            options: serde_json::Map::new(),
+        };
+        let mcp = |n: &str| McpServer {
+            name: n.into(),
+            transport: McpTransport::Sse,
+            url: "http://x".into(),
+            headers: std::collections::BTreeMap::default(),
+        };
+
+        match store
+            .create_provider(Layer::Global, provider("ollama-local"))
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::NameConflict { kind, .. } => assert_eq!(kind, "provider"),
+            autre => panic!("NameConflict attendu, reçu {autre}"),
+        }
+        match store
+            .create_model(Layer::Global, model("qwen2.5"))
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::NameConflict { kind, .. } => assert_eq!(kind, "model"),
+            autre => panic!("NameConflict attendu, reçu {autre}"),
+        }
+        match store
+            .create_mcp_server(Layer::Global, mcp("fs"))
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::NameConflict { kind, .. } => assert_eq!(kind, "mcp_server"),
+            autre => panic!("NameConflict attendu, reçu {autre}"),
+        }
+
+        assert!(matches!(
+            store
+                .create_provider(Layer::Global, provider("a/b"))
+                .await
+                .unwrap_err(),
+            CfgStoreError::InvalidName(_)
+        ));
+        assert!(matches!(
+            store
+                .create_model(Layer::Global, model("a/b"))
+                .await
+                .unwrap_err(),
+            CfgStoreError::InvalidName(_)
+        ));
+        assert!(matches!(
+            store
+                .create_mcp_server(Layer::Global, mcp("a/b"))
+                .await
+                .unwrap_err(),
+            CfgStoreError::InvalidName(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_provider_model_mcp_suppriment() {
+        let store = sample_store();
+        store
+            .delete_provider(Layer::Workspace, "ollama-local")
+            .await
+            .unwrap();
+        store
+            .delete_model(Layer::Workspace, "qwen2.5")
+            .await
+            .unwrap();
+        store
+            .delete_mcp_server(Layer::Workspace, "fs")
+            .await
+            .unwrap();
+        assert!(store.list_providers().await.unwrap().is_empty());
+        assert!(store.list_models().await.unwrap().is_empty());
+        assert!(store.list_mcp_servers().await.unwrap().is_empty());
+
+        match store
+            .delete_provider(Layer::Workspace, "ollama-local")
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::NotFound { layer, .. } => {
+                assert_eq!(layer, Layer::Workspace);
+                let msg = CfgStoreError::NotFound {
+                    kind: "provider",
+                    name: "ollama-local".into(),
+                    layer,
+                }
+                .to_string();
+                assert!(msg.contains("Workspace"), "{msg}");
+            }
+            autre => panic!("NotFound attendu, reçu {autre}"),
+        }
+    }
 }

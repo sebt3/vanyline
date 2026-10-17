@@ -576,4 +576,219 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(keys, ["description", "name"]);
     }
+
+    #[test]
+    fn provider_cle_api_wire() {
+        let avec = Provider {
+            name: "p".into(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://x".into(),
+            api_key: Some("sk-test".into()),
+        };
+        let v = serde_json::to_value(&avec).unwrap();
+        assert_eq!(v["api_key"], serde_json::json!("sk-test"));
+
+        let vide = Provider {
+            api_key: Some(String::new()),
+            ..avec.clone()
+        };
+        let v = serde_json::to_value(&vide).unwrap();
+        assert_eq!(v["api_key"], serde_json::json!(""));
+
+        let entree = serde_json::json!({
+            "name": "p",
+            "type": "ollama",
+            "endpoint": "http://x",
+            "api_key": null
+        });
+        let lu: Provider = serde_json::from_value(entree).unwrap();
+        assert!(lu.api_key.is_none());
+        let v = serde_json::to_value(&lu).unwrap();
+        assert!(v.get("api_key").is_none());
+    }
+
+    #[test]
+    fn provider_type_inconnu_rejete() {
+        let entree = r#"{"name":"p","type":"claude","endpoint":"http://x"}"#;
+        let r: Result<Provider, _> = serde_json::from_str(entree);
+        let err = r.expect_err("erreur attendue");
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn mcp_transport_inconnu_rejete() {
+        let entree = r#"{"name":"s","type":"websocket","url":"http://x"}"#;
+        let r: Result<McpServer, _> = serde_json::from_str(entree);
+        let err = r.expect_err("erreur attendue");
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn agent_mode_inconnu_rejete() {
+        let entree = r#"{"name":"a","model":"m","system_prompt":"p","mode":"expert"}"#;
+        let r: Result<Agent, _> = serde_json::from_str(entree);
+        let err = r.expect_err("erreur attendue");
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn model_profile_options_non_objet_rejete() {
+        for valeur in ["null", "42"] {
+            let entree = format!(r#"{{"name":"m","provider":"p","model":"x","options":{valeur}}}"#);
+            let r: Result<ModelProfile, _> = serde_json::from_str(&entree);
+            let err = r.expect_err("erreur attendue");
+            assert!(
+                err.to_string()
+                    .starts_with("expected object for 'options', got"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_profile_max_tokens_flottant_rejete() {
+        for valeur in ["4096.5", "-1"] {
+            let entree =
+                format!(r#"{{"name":"m","provider":"p","model":"x","max_tokens":{valeur}}}"#);
+            let r: Result<ModelProfile, _> = serde_json::from_str(&entree);
+            assert!(r.is_err(), "max_tokens {valeur} doit être rejeté");
+        }
+    }
+
+    #[test]
+    fn model_profile_temperature_sans_bornes_acceptee() {
+        for valeur in [-1.0_f64, 42.0] {
+            let entree =
+                format!(r#"{{"name":"m","provider":"p","model":"x","temperature":{valeur}}}"#);
+            let lu: ModelProfile = serde_json::from_str(&entree).unwrap();
+            assert_eq!(lu.temperature, Some(valeur));
+            let v = serde_json::to_value(&lu).unwrap();
+            assert_eq!(v["temperature"], serde_json::json!(valeur));
+        }
+    }
+
+    #[test]
+    fn model_profile_options_collision_non_filtree() {
+        let entree = serde_json::json!({
+            "name": "m",
+            "provider": "p",
+            "model": "x",
+            "temperature": 0.7,
+            "options": {"temperature": 0.1}
+        });
+        let lu: ModelProfile = serde_json::from_value(entree).unwrap();
+        assert_eq!(lu.temperature, Some(0.7));
+        assert_eq!(lu.options["temperature"], serde_json::json!(0.1));
+    }
+
+    #[test]
+    fn model_profile_cle_inconnue_ignoree_puis_perdue() {
+        let entree = serde_json::json!({
+            "name": "m",
+            "provider": "p",
+            "model": "x",
+            "source": "workspace"
+        });
+        let lu: ModelProfile = serde_json::from_value(entree).unwrap();
+        let v = serde_json::to_value(&lu).unwrap();
+        assert!(v.get("source").is_none());
+    }
+
+    #[test]
+    fn skill_selection_tableau_vide_distinct_de_none() {
+        let lu: SkillSelection = serde_json::from_str("[]").unwrap();
+        assert_eq!(lu, SkillSelection::Named(Vec::new()));
+        assert_ne!(lu, SkillSelection::None);
+        assert_ne!(lu, SkillSelection::Auto);
+        assert_eq!(serde_json::to_string(&lu).unwrap(), "[]");
+    }
+
+    #[test]
+    fn skill_selection_type_inacceptable_rejete() {
+        for entree in ["42", "true", "{}", "null"] {
+            let r: Result<SkillSelection, _> = serde_json::from_str(entree);
+            let err = r.expect_err("erreur attendue");
+            assert!(
+                err.to_string()
+                    .contains("a string (\"auto\" or \"none\") or an array of skill names"),
+                "{entree}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_selection_doublons_et_ordre_conserves() {
+        let entree = r#"["b","a","b"]"#;
+        let lu: SkillSelection = serde_json::from_str(entree).unwrap();
+        assert_eq!(
+            lu,
+            SkillSelection::Named(vec!["b".into(), "a".into(), "b".into()])
+        );
+        assert_eq!(serde_json::to_string(&lu).unwrap(), entree);
+    }
+
+    #[test]
+    fn agent_defauts_presentes_sur_le_wire() {
+        let a = Agent {
+            name: "a".into(),
+            description: None,
+            mode: AgentMode::Primary,
+            model: "m".into(),
+            toolsets: Vec::new(),
+            skills: SkillSelection::Auto,
+            system_prompt: "p".into(),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["mode"], serde_json::json!("primary"));
+        assert_eq!(v["skills"], serde_json::json!("auto"));
+        assert_eq!(v["toolsets"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn agent_null_sur_champ_non_optionnel_rejete() {
+        let base = |champ: &str, valeur: &str| {
+            format!(r#"{{"name":"a","model":"m","system_prompt":"p","{champ}":{valeur}}}"#)
+        };
+        for (champ, valeur) in [("mode", "null"), ("toolsets", "null"), ("skills", "null")] {
+            let r: Result<Agent, _> = serde_json::from_str(&base(champ, valeur));
+            assert!(r.is_err(), "{champ}: null doit être rejeté");
+        }
+    }
+
+    #[test]
+    fn agent_description_null_acceptee() {
+        let entree = r#"{"name":"a","model":"m","system_prompt":"p","description":null}"#;
+        let lu: Agent = serde_json::from_str(entree).unwrap();
+        assert!(lu.description.is_none());
+        let v = serde_json::to_value(&lu).unwrap();
+        assert!(v.get("description").is_none());
+    }
+
+    #[test]
+    fn agent_prompt_vide_accepte() {
+        let entree = r#"{"name":"a","model":"m","system_prompt":""}"#;
+        let lu: Agent = serde_json::from_str(entree).unwrap();
+        assert_eq!(lu.system_prompt, "");
+    }
+
+    #[test]
+    fn agent_champ_obligatoire_manquant_rejete() {
+        let sans_model = r#"{"name":"a","system_prompt":"p"}"#;
+        let sans_prompt = r#"{"name":"a","model":"m"}"#;
+        for entree in [sans_model, sans_prompt] {
+            let r: Result<Agent, _> = serde_json::from_str(entree);
+            let err = r.expect_err("erreur attendue");
+            assert!(err.to_string().contains("missing field"), "{err}");
+        }
+    }
+
+    #[test]
+    fn skill_meta_description_manquante_rejete() {
+        let r: Result<SkillMeta, _> = serde_json::from_str(r#"{"name":"s"}"#);
+        let err = r.expect_err("erreur attendue");
+        assert!(
+            err.to_string().contains("missing field `description`"),
+            "{err}"
+        );
+    }
 }

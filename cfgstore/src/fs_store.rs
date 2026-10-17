@@ -4381,4 +4381,252 @@ Tu es un agent d'implémentation.",
         // After update only in workspace, global body is unchanged
         assert!(!global_body.contains("workspace desc"));
     }
+
+    #[tokio::test]
+    async fn update_provider_patch_non_objet_rejette() {
+        let tmp = tempdir().unwrap();
+        write_config_yaml(
+            tmp.path(),
+            "providers:\n  p1:\n    type: ollama\n    endpoint: http://x\n",
+        );
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let avant = std::fs::read_to_string(tmp.path().join("config.yaml")).unwrap();
+        match store
+            .update_provider(Layer::Global, "p1", serde_json::json!(42))
+            .await
+            .unwrap_err()
+        {
+            CfgStoreError::Config(msg) => {
+                assert!(msg.contains("update patch must be a JSON object"), "{msg}");
+            }
+            autre => panic!("Config attendu, reçu {autre}"),
+        }
+        let apres = std::fs::read_to_string(tmp.path().join("config.yaml")).unwrap();
+        assert_eq!(avant, apres);
+    }
+
+    #[tokio::test]
+    async fn update_provider_api_key_null_efface_et_inconnue_ignoree() {
+        let tmp = tempdir().unwrap();
+        write_config_yaml(
+            tmp.path(),
+            "providers:\n  p1:\n    type: ollama\n    endpoint: http://x\n    api_key: key123\n    custom: yes\n",
+        );
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .update_provider(
+                Layer::Global,
+                "p1",
+                serde_json::json!({"api_key": null, "inconnu": "z"}),
+            )
+            .await
+            .unwrap();
+        let providers = store.list_providers().await.unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].api_key, None);
+        let brut = std::fs::read_to_string(tmp.path().join("config.yaml")).unwrap();
+        assert!(brut.contains("custom"), "clé inconnue perdue : {brut}");
+    }
+
+    #[tokio::test]
+    async fn create_provider_en_workspace_masque_sans_conflit() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        write_config_yaml(
+            global.path(),
+            "providers:\n  strix:\n    type: ollama\n    endpoint: http://global\n",
+        );
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_provider(
+                Layer::Workspace,
+                Provider {
+                    name: "strix".to_string(),
+                    provider_type: ProviderType::OpenaiCompatible,
+                    endpoint: "http://workspace".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        let providers = store.list_providers().await.unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].endpoint, "http://workspace");
+        assert_eq!(providers[0].provider_type, ProviderType::OpenaiCompatible);
+    }
+
+    #[tokio::test]
+    async fn ecritures_isolees_par_couche() {
+        let global = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global.path().to_path_buf(),
+            workspace_dir: Some(workspace.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_provider(
+                Layer::Workspace,
+                Provider {
+                    name: "ws-only".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://ws".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        let ws_brut = std::fs::read_to_string(workspace.path().join("config.yaml")).unwrap();
+        assert!(ws_brut.contains("ws-only"));
+        let global_existe = global.path().join("config.yaml").exists();
+        if global_existe {
+            let g = std::fs::read_to_string(global.path().join("config.yaml")).unwrap();
+            assert!(!g.contains("ws-only"));
+        }
+    }
+
+    #[tokio::test]
+    async fn create_toolset_forme_canonique_et_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "grafana".to_string(),
+                    description: Some("Dashboards".to_string()),
+                    prompt: Some("Utilise Grafana".to_string()),
+                    local_tools: vec!["lire".to_string()],
+                    mcp: vec![McpSelection {
+                        server: "grafana-mcp".to_string(),
+                        tools: vec!["query".to_string(), "search".to_string()],
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "empty".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let toolsets = store.list_toolsets().await.unwrap();
+        let grafana = toolsets.iter().find(|t| t.name == "grafana").unwrap();
+        assert_eq!(grafana.description.as_deref(), Some("Dashboards"));
+        assert_eq!(grafana.prompt.as_deref(), Some("Utilise Grafana"));
+        assert_eq!(grafana.local_tools, vec!["lire".to_string()]);
+        assert_eq!(grafana.mcp.len(), 1);
+        assert_eq!(grafana.mcp[0].server, "grafana-mcp");
+        assert_eq!(
+            grafana.mcp[0].tools,
+            vec!["query".to_string(), "search".to_string()]
+        );
+        let empty = store.get_toolset("empty").await.unwrap();
+        assert!(empty.description.is_none());
+        assert!(empty.prompt.is_none());
+        assert!(empty.local_tools.is_empty());
+        assert!(empty.mcp.is_empty());
+        let brut = std::fs::read_to_string(tmp.path().join("toolsets/empty.yaml")).unwrap();
+        assert!(!brut.contains("description"), "{brut}");
+    }
+
+    #[tokio::test]
+    async fn update_toolset_patch_partiel_et_normalisation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "grafana".to_string(),
+                    description: Some("ancienne".to_string()),
+                    prompt: Some("Prompt".to_string()),
+                    local_tools: vec!["lire".to_string()],
+                    mcp: vec![McpSelection {
+                        server: "gmcp".to_string(),
+                        tools: vec!["query".to_string()],
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_toolset(
+                Layer::Global,
+                "grafana",
+                serde_json::json!({"description": "nouvelle"}),
+            )
+            .await
+            .unwrap();
+        let t = store.get_toolset("grafana").await.unwrap();
+        assert_eq!(t.description.as_deref(), Some("nouvelle"));
+        assert_eq!(t.prompt.as_deref(), Some("Prompt"));
+        assert_eq!(t.local_tools, vec!["lire".to_string()]);
+        assert_eq!(t.mcp.len(), 1);
+        assert_eq!(t.mcp[0].server, "gmcp");
+        assert_eq!(t.mcp[0].tools, vec!["query".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn update_toolset_cle_inconnue_ignoree_sans_rename() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "ts".to_string(),
+                    description: None,
+                    prompt: Some("old".to_string()),
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_toolset(
+                Layer::Global,
+                "ts",
+                serde_json::json!({"unknown_field": "x", "name": "rebaptise", "prompt": "new p"}),
+            )
+            .await
+            .unwrap();
+        let t = store.get_toolset("ts").await.unwrap();
+        assert_eq!(t.prompt.as_deref(), Some("new p"));
+        assert_eq!(t.name, "ts");
+        assert!(store.get_toolset("rebaptise").await.is_err());
+    }
 }
