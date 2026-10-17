@@ -296,4 +296,305 @@ mod tests {
         let resp = JsonRpcResponse::err(None, -32601, "Method not found: foo");
         assert_eq!(resp.error.unwrap().code, -32601);
     }
+
+    // ── Tests par Scenario (titres de `mcp.sdd`, niveau HTTP) ──────────────────
+
+    fn app_with_root(root: &std::path::Path) -> (axum::Router, String) {
+        let config = Arc::new(test_support::test_config(root));
+        let auth = test_support::auth_state(config.clone());
+        let (fs_events, fs_flush) = crate::fs_push_channels();
+        let state = AppState {
+            health: crate::health::CodeHealth::new(config.clone()),
+            jobs: Arc::new(crate::jobs::Jobs::new(Arc::clone(&config))),
+            config,
+            auth: Arc::new(auth),
+            tickets: crate::ws::ticket::TicketStore::new(),
+            lsp: Arc::new(crate::lsp::LspManager::default()),
+            fs_events,
+            fs_flush,
+        };
+        let token = test_support::mint_owner_token(
+            test_support::TEST_OWNER,
+            test_support::TEST_AUDIENCE,
+            test_support::TEST_ISSUER,
+            600,
+        );
+        (crate::build_app(state), token)
+    }
+
+    async fn post_mcp_authed(root: &std::path::Path, body: &str) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let (app, token) = app_with_root(root);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    async fn json_body(resp: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // Scenario: initialize_rend_version_protocole_et_infos_serveur
+    #[tokio::test]
+    async fn initialize_rend_version_protocole_et_infos_serveur() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":null}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(resp.headers().get("mcp-session-id").is_none());
+        let v = json_body(resp).await;
+        assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
+        assert!(v["result"]["capabilities"]["tools"].is_object());
+        assert!(
+            !v["result"]["serverInfo"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(
+            !v["result"]["serverInfo"]["version"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    // Scenario: initialize_echoe_identifiant_non_numberique
+    #[test]
+    fn initialize_echoe_identifiant_non_numberique() {
+        let resp = handle_initialize(Some(serde_json::json!("req-abc")), Value::Null);
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["id"], "req-abc");
+        assert!(v.get("error").is_none());
+    }
+
+    // Scenario: notification_sans_id_recoit_202_sans_corps
+    #[tokio::test]
+    async fn notification_sans_id_recoit_202_sans_corps() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    // Scenario: id_explicite_null_traite_comme_notification
+    #[tokio::test]
+    async fn id_explicite_null_traite_comme_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty(), "aucun listing d'outils attendu");
+    }
+
+    // Scenario: initialized_avec_id_porteur_recoit_202
+    #[tokio::test]
+    async fn initialized_avec_id_porteur_recoit_202() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty(), "aucune réponse pour l'id 7");
+    }
+
+    // Scenario: methode_inconnue_avec_id_rend_32601
+    #[tokio::test]
+    async fn methode_inconnue_avec_id_rend_32601() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":3,"method":"foo/bar"}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["error"]["code"], -32601);
+        assert_eq!(v["error"]["message"], "Method not found: foo/bar");
+        assert!(v.get("result").is_none());
+    }
+
+    // Scenario: outils_listes_en_noms_origine_et_17_entrees
+    #[tokio::test]
+    async fn outils_listes_en_noms_origine_et_17_entrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":"n'importe"}}"#;
+        let v = json_body(post_mcp_authed(dir.path(), body).await).await;
+        let tools = v["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names.len(), 17);
+        assert!(names.iter().all(|n| !n.starts_with('/')));
+        assert_eq!(names[0], "read_file");
+        assert_eq!(names[7], "execute_command");
+        assert_eq!(names[15], "edit_and_check");
+        assert_eq!(names[16], "code_health");
+        assert!(v["result"].get("nextCursor").is_none());
+    }
+
+    // Scenario: outils_appelles_par_nom_origine_sans_initialisation
+    #[tokio::test]
+    async fn outils_appelles_par_nom_origine_sans_initialisation() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_directory","arguments":{"path":""}}}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert!(v["result"]["content"].is_array(), "{v}");
+        assert!(v.get("error").is_none(), "{v}");
+    }
+
+    // Scenario: tools_call_sans_nom_rend_32602
+    #[tokio::test]
+    async fn tools_call_sans_nom_rend_32602() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{}}}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["error"]["code"], -32602);
+        assert_eq!(v["error"]["message"], "Missing tool name in params");
+    }
+
+    // Scenario: outils_inconnu_de_toutes_familles_rend_32602
+    #[tokio::test]
+    async fn outils_inconnu_de_toutes_familles_rend_32602() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["error"]["code"], -32602);
+        assert_eq!(v["error"]["message"], "Unknown tool: nope");
+    }
+
+    // Scenario: erreur_execution_outil_reste_enveloppe_is_error
+    #[tokio::test]
+    async fn erreur_execution_outil_reste_enveloppe_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"../outside"}}}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["result"]["isError"], true);
+        let text = v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("VNL-SBX-001"), "{text}");
+        assert!(v.get("error").is_none());
+    }
+
+    // Scenario: arguments_absents_produisent_erreur_outil
+    #[tokio::test]
+    async fn arguments_absents_produisent_erreur_outil() {
+        let dir = tempfile::tempdir().unwrap();
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file"}}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["result"]["isError"], true);
+        let text = v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.starts_with("invalid arguments for read_file"),
+            "{text}"
+        );
+    }
+
+    // Scenario: erreur_rpc_rend_http_200
+    #[tokio::test]
+    async fn erreur_rpc_rend_http_200() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":9,"method":"inconnue"}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("application/json"), "{ct}");
+        let v = json_body(resp).await;
+        assert!(v.get("error").is_some());
+        assert!(v.get("result").is_none());
+    }
+
+    // Scenario: jsonrpc_non_2_0_accepte
+    #[tokio::test]
+    async fn jsonrpc_non_2_0_accepte() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"jsonrpc":"1.0","id":1,"method":"initialize","params":null}"#;
+        let resp = post_mcp_authed(dir.path(), body).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let v = json_body(resp).await;
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    // Scenario: corps_invalide_rejete_sans_enveloppe_rpc
+    #[tokio::test]
+    async fn corps_invalide_rejete_sans_enveloppe_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            r#"{"jsonrpc":"2.0","method":"#,
+            r#"[{"jsonrpc":"2.0","id":1,"method":"initialize"}]"#,
+        ] {
+            let resp = post_mcp_authed(dir.path(), body).await;
+            assert!(
+                resp.status().is_client_error(),
+                "{body} → {}",
+                resp.status()
+            );
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("\"jsonrpc\""), "{text}");
+            assert!(!text.contains("-32700"), "{text}");
+        }
+    }
+
+    // Scenario: aucune_decouverte_oauth
+    #[tokio::test]
+    async fn aucune_decouverte_oauth() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (app, token) = app_with_root(dir.path());
+        for auth in [None, Some(format!("Bearer {token}"))] {
+            let mut b = Request::builder()
+                .method("GET")
+                .uri("/.well-known/oauth-protected-resource");
+            if let Some(a) = auth {
+                b = b.header("authorization", a);
+            }
+            let resp = app
+                .clone()
+                .oneshot(b.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        }
+    }
 }

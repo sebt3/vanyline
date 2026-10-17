@@ -539,4 +539,91 @@ mod tests {
             "/ws/fs?ticket=***&z=9"
         );
     }
+
+    // ── Tests par Scenario (titres de `lib.sdd`) ───────────────────────────────
+
+    use super::{FS_EVENTS_CAPACITY, FsFlushRequests, fs_events_channel};
+    use std::time::Duration;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    // Scenario: routes_git_sans_auth_retourne_401
+    #[tokio::test]
+    async fn routes_git_sans_auth_retourne_401() {
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config = std::sync::Arc::new(crate::auth::test_support::test_config(dir.path()));
+        let auth = std::sync::Arc::new(crate::auth::test_support::auth_state(config.clone()));
+        let (fs_events, fs_flush) = super::fs_push_channels();
+        let state = super::AppState {
+            health: crate::health::CodeHealth::new(config.clone()),
+            jobs: std::sync::Arc::new(crate::jobs::Jobs::new(std::sync::Arc::clone(&config))),
+            config,
+            auth,
+            tickets: crate::ws::ticket::TicketStore::new(),
+            lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events,
+            fs_flush,
+        };
+        let routes = [
+            (Method::GET, "/git/status"),
+            (Method::POST, "/git/commit"),
+            (Method::DELETE, "/git/branches/x"),
+            (Method::GET, "/git/branches"),
+            (Method::GET, "/git/log"),
+        ];
+        for (method, uri) in routes {
+            let app = super::build_app(state.clone());
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+        }
+    }
+
+    // Scenario: flush_sans_abonne_rend_faux_au_timeout
+    #[tokio::test]
+    async fn flush_sans_abonne_rend_faux_au_timeout() {
+        let flush = FsFlushRequests::new(fs_events_channel());
+        let ok = flush
+            .request_flush("src/a.rs", Duration::from_millis(10))
+            .await;
+        assert!(!ok);
+        assert_eq!(flush.waiter_count(), 0);
+    }
+
+    // Scenario: ids_de_flush_uniques_et_monotoniques_depuis_un
+    #[tokio::test]
+    async fn ids_de_flush_uniques_et_monotoniques_depuis_un() {
+        let tx = fs_events_channel();
+        let mut rx = tx.subscribe();
+        let flush = FsFlushRequests::new(tx);
+        for _ in 0..3 {
+            assert!(!flush.request_flush("f", Duration::from_millis(5)).await);
+        }
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let frame = rx.recv().await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(v["event"], "flush-request");
+            ids.push(v["id"].as_u64().unwrap());
+        }
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    // Scenario: canal_fs_events_capacite_soixante_quatre
+    #[test]
+    fn canal_fs_events_capacite_soixante_quatre() {
+        assert_eq!(FS_EVENTS_CAPACITY, 64);
+        let tx = fs_events_channel();
+        let mut rx = tx.subscribe();
+        for i in 0..65 {
+            let _ = tx.send(format!("frame-{i}"));
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Lagged(_))));
+    }
 }

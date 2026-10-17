@@ -285,7 +285,7 @@ Tasks:
     (./fs.rs, assertion de corps `002` non faite sur le second volet),
     `terminal_ticket_required` (./terminal.rs), `lsp_ticket_required` et
     `lsp_ticket_required_with_valid_ticket` (./lsp.rs).
-  [ ] Convertir en tests taggés les Scenarios sans couverture directe :
+  [x] Convertir en tests taggés les Scenarios sans couverture directe :
     `format_ticket_alphanumerique_de_trente_deux_caracteres`,
     `emissions_successives_ne_repetent_jamais_le_meme_ticket`,
     `rachats_paralleles_du_meme_ticket_un_seul_gagnant`, `ttl_et_default_sont_verrouilles`,

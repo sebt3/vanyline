@@ -176,7 +176,7 @@ Example: échange complet typique
 Tasks:
   [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
     accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
-  [ ] Convertir en tests taggés par leur titre les Scenarios sans couverture actuelle.
+  [x] Convertir en tests taggés par leur titre les Scenarios sans couverture actuelle.
     Couverture unitaire existante (mod tests de ./mcp.rs) : `initialize` (version +
     écho d'id), `tools/list` (17 outils, noms), `tools/call` outil inconnu et nom absent,
     formes des enveloppes ok/err. Non couvert : tout le niveau HTTP — notifications

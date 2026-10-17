@@ -7008,4 +7008,202 @@ mod tests {
         assert_eq!(eac["inputSchema"]["properties"]["mode"]["enum"][0], "write");
         assert_eq!(eac["inputSchema"]["properties"]["mode"]["enum"][1], "edit");
     }
+
+    // ── Tests par Scenario (titres de `tools_impl.sdd`) ─────────────────────────
+
+    // Scenario: lsp_tools_declarent_huit_outils
+    #[test]
+    fn lsp_tools_declarent_huit_outils() {
+        let tools = lsp_tools();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "lsp_diagnostics",
+                "lsp_definition",
+                "lsp_references",
+                "lsp_rename",
+                "lsp_document_symbols",
+                "lsp_workspace_symbols",
+                "inspect_symbol",
+                "edit_and_check",
+            ]
+        );
+        // `edit_and_check` est exclu ici : sa description ne cite pas
+        // VNL-SBX-LSP-006 (écart spec/code, voir haiku-questions/sandbox.md) —
+        // couvert par le test ignoré `lsp_tools_edit_and_check_mentionne_lsp_006`.
+        for tool in tools.iter().filter(|t| t["name"] != "edit_and_check") {
+            let desc = tool["description"].as_str().unwrap_or_default();
+            assert!(
+                desc.contains("VNL-SBX-LSP-006"),
+                "description sans VNL-SBX-LSP-006 : {}",
+                tool["name"]
+            );
+        }
+        // 5 fs + 2 search + 1 command (vanyline_tools) + 8 lsp + 1 code_health.
+        let total = vanyline_tools::mcp::filesystem_tools().len()
+            + vanyline_tools::mcp::search_tools().len()
+            + vanyline_tools::mcp::command_tools().len()
+            + tools.len()
+            + 1;
+        assert_eq!(total, 17);
+    }
+
+    // Écart spec/code (question ouverte) : la spec exige VNL-SBX-LSP-006 dans
+    // chaque description d'outil ciblé ; `edit_and_check` ne le cite pas.
+    #[test]
+    #[ignore = "écart spec/code : edit_and_check ne mentionne pas VNL-SBX-LSP-006 (haiku-questions/sandbox.md)"]
+    fn lsp_tools_edit_and_check_mentionne_lsp_006() {
+        let tools = lsp_tools();
+        let eac = tools
+            .iter()
+            .find(|t| t["name"] == "edit_and_check")
+            .expect("edit_and_check déclaré");
+        let desc = eac["description"].as_str().unwrap_or_default();
+        assert!(desc.contains("VNL-SBX-LSP-006"), "{desc}");
+    }
+
+    // Scenario: arguments_invalides_rendus_erreur_outil
+    #[tokio::test]
+    async fn arguments_invalides_rendus_erreur_outil() {
+        let (state, tmpdir) = make_empty_lsp_state().await;
+        let result = dispatch_filesystem(
+            tmpdir.path(),
+            &state.health,
+            "read_file",
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("read_file est un outil fs");
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.starts_with("invalid arguments for read_file"),
+            "texte inattendu : {text}"
+        );
+    }
+
+    // Scenario: nom_etranger_a_la_famille_rend_none
+    #[tokio::test]
+    async fn nom_etranger_a_la_famille_rend_none() {
+        let (state, tmpdir) = make_empty_lsp_state().await;
+        let root = tmpdir.path();
+        let args = serde_json::json!({});
+        assert!(
+            dispatch_filesystem(root, &state.health, "execute_command", args.clone())
+                .await
+                .is_none()
+        );
+        assert!(
+            dispatch_search(root, "read_file", args.clone())
+                .await
+                .is_none()
+        );
+        assert!(
+            dispatch_command(root, "search", args.clone())
+                .await
+                .is_none()
+        );
+        assert!(
+            dispatch_lsp(&state, "find_files", args.clone())
+                .await
+                .is_none()
+        );
+        assert!(
+            dispatch_edit_and_check(&state, "lsp_rename", args)
+                .await
+                .is_none()
+        );
+    }
+
+    // Scenario: workspace_edit_partiel_erreur_laisse_fichiers_ecrits
+    #[tokio::test]
+    async fn workspace_edit_partiel_erreur_laisse_fichiers_ecrits() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let a = tmpdir.path().join("a.txt");
+        let b = tmpdir.path().join("b.txt");
+        std::fs::write(&a, "hello").unwrap();
+        std::fs::write(&b, "world").unwrap();
+        let edit = serde_json::json!({
+            "documentChanges": [
+                {
+                    "textDocument": {"uri": format!("file://{}", a.display())},
+                    "edits": [{
+                        "range": {"start": {"line": 0, "character": 0},
+                                  "end": {"line": 0, "character": 5}},
+                        "newText": "bonjour"
+                    }]
+                },
+                {
+                    "textDocument": {"uri": format!("file://{}", b.display())},
+                    "edits": [{"newText": "malformé"}]
+                }
+            ]
+        });
+        let err = apply_workspace_edit(tmpdir.path(), &edit)
+            .await
+            .expect_err("le second fichier est malformé");
+        assert!(err.to_string().contains("VNL-SBX-LSP-008"), "{err}");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "bonjour");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "world");
+    }
+
+    // Scenario: textedit_range_manquant_leve_008
+    #[test]
+    fn textedit_range_manquant_leve_008() {
+        let sans_range = serde_json::json!({"newText": "X"});
+        let err = apply_text_edits("foo", &[sans_range]).unwrap_err();
+        assert!(err.to_string().contains("VNL-SBX-LSP-008"), "{err}");
+
+        let ligne_hors_limites = serde_json::json!({
+            "range": {
+                "start": {"line": 99, "character": 0},
+                "end": {"line": 99, "character": 1}
+            },
+            "newText": "X"
+        });
+        let err = apply_text_edits("foo", &[ligne_hors_limites]).unwrap_err();
+        assert!(err.to_string().contains("VNL-SBX-LSP-008"), "{err}");
+    }
+
+    // Scenario: hover_bloc_vide_et_contenu_null_sans_section
+    #[test]
+    fn hover_bloc_vide_et_contenu_null_sans_section() {
+        let bloc_vide = serde_json::json!({"kind": "markdown", "value": "```rust\n```"});
+        let (signature, _doc) = hover_signature_and_doc(&bloc_vide);
+        assert!(signature.is_empty(), "bloc vide non signé : {signature:?}");
+
+        assert_eq!(
+            hover_signature_and_doc(&serde_json::Value::Null),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            hover_signature_and_doc(&serde_json::json!("")),
+            (String::new(), String::new())
+        );
+    }
+
+    // Scenario: resolve_position_symbole_ambigu_note_seconde_occurrence
+    #[test]
+    fn resolve_position_symbole_ambigu_note_seconde_occurrence() {
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("fonction".to_string()),
+            character: None,
+        };
+        let res = resolve_position("fonction(fonction)", &target).unwrap();
+        assert_eq!(
+            res,
+            PositionResolution::Ambiguous {
+                line0: 0,
+                character0: 0,
+                matches: 2,
+                second_char1: 10,
+            }
+        );
+        let note = ambiguity_note("fonction", 2, 10);
+        assert!(note.contains("2×"), "{note}");
+        assert!(note.contains("character: 10"), "{note}");
+    }
 }

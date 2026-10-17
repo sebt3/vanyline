@@ -168,7 +168,7 @@ Tasks:
     pas avec `config.sandbox_root` explicite — égalité vérifiée uniquement parce que
     le seul site d'appel réel passe `sandbox_root` (commenté dans le code). Contrat
     tenu par convention fragile ou resserrage (passer `config.sandbox_root` en dur) ?
-  [ ] Dériver un test par Scenario encore sans test (chacun taggé du titre de son
+  [x] Dériver un test par Scenario encore sans test (chacun taggé du titre de son
     Scenario) : `racine_inexistente_overlay_vide`, `venv_fichier_regulier_overlay_vide`,
     `pyvenv_cfg_symlink_vers_fichier_est_un_marqueur`,
     `pyvenv_cfg_symlink_casse_n_est_pas_un_marqueur`,
@@ -181,7 +181,7 @@ Tasks:
     `unsafe` en edition 2024 hors verrou) : le point `[?]` du `:` final doit être
     tranché avant d'écrire un test (process enfant dédié avec env épuré, ou simple
     décision).
-  [ ] Cartographie des tests existants → Scenarios : `venv_overlay_absent` →
+  [x] Cartographie des tests existants → Scenarios : `venv_overlay_absent` →
     `tmpdir_vide_overlay_vide` ; `venv_overlay_dossier_sans_marqueur` →
     `dossier_venv_sans_marqueur_overlay_vide` ; `venv_overlay_marqueur_est_un_dossier` →
     `pyvenv_cfg_dossier_n_est_pas_un_marqueur` ; `venv_overlay_present` →

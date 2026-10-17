@@ -352,4 +352,358 @@ mod tests {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    // ── Tests par Scenario (titres de `ticket.sdd`) ───────────────────────────
+
+    fn claims_alice() -> TicketClaims {
+        TicketClaims {
+            subject: "system:serviceaccount:ns:owner-alice".into(),
+        }
+    }
+
+    /// Requête `GET` sans corps, pour la garde `ws_auth_middleware`.
+    fn get_req(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    // Scenario: ticket_rachete_rend_les_claims_emis
+    #[test]
+    fn ticket_rachete_rend_les_claims_emis() {
+        let store = TicketStore::new();
+        let claims = claims_alice();
+        let ticket = store.issue(claims.clone());
+        assert_eq!(store.redeem(&ticket), Some(claims));
+    }
+
+    // Scenario: second_rachat_du_meme_ticket_echoue
+    #[test]
+    fn second_rachat_du_meme_ticket_echoue() {
+        let store = TicketStore::new();
+        let ticket = store.issue(claims_alice());
+        assert!(store.redeem(&ticket).is_some());
+        assert!(store.redeem(&ticket).is_none());
+    }
+
+    // Scenario: ticket_expire_renvoie_aucun_et_disparait_de_la_map
+    #[test]
+    fn ticket_expire_renvoie_aucun_et_disparait_de_la_map() {
+        let store = TicketStore::new();
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        store
+            .tickets
+            .lock()
+            .unwrap()
+            .insert("expire".to_string(), (claims_alice(), expired));
+        assert!(store.redeem("expire").is_none());
+        assert!(store.tickets.lock().unwrap().get("expire").is_none());
+        assert!(store.redeem("expire").is_none());
+    }
+
+    // Scenario: format_ticket_alphanumerique_de_trente_deux_caracteres
+    #[test]
+    fn format_ticket_alphanumerique_de_trente_deux_caracteres() {
+        let store = TicketStore::new();
+        for _ in 0..20 {
+            let t = store.issue(claims_alice());
+            assert_eq!(t.len(), 32);
+            assert!(t.chars().all(|c| c.is_ascii_alphanumeric()), "{t}");
+        }
+    }
+
+    // Scenario: emissions_successives_ne_repetent_jamais_le_meme_ticket
+    #[test]
+    fn emissions_successives_ne_repetent_jamais_le_meme_ticket() {
+        let store = TicketStore::new();
+        let tickets: Vec<String> = (0..100).map(|_| store.issue(claims_alice())).collect();
+        let distinct: std::collections::HashSet<&String> = tickets.iter().collect();
+        assert_eq!(distinct.len(), 100);
+        for t in &tickets {
+            assert!(store.redeem(t).is_some());
+        }
+    }
+
+    // Scenario: rachats_paralleles_du_meme_ticket_un_seul_gagnant
+    #[test]
+    fn rachats_paralleles_du_meme_ticket_un_seul_gagnant() {
+        const N: usize = 8;
+        let store = TicketStore::new();
+        let ticket = store.issue(claims_alice());
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let store = store.clone();
+                let ticket = ticket.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.redeem(&ticket).is_some()
+                })
+            })
+            .collect();
+        let winners = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(winners, 1);
+    }
+
+    // Scenario: ttl_et_default_sont_verrouilles
+    #[test]
+    fn ttl_et_default_sont_verrouilles() {
+        assert_eq!(TICKET_TTL_SECS, 30);
+        let store = TicketStore::default();
+        assert!(store.redeem("nimporte-quelle-valeur").is_none());
+        assert!(store.tickets.lock().unwrap().is_empty());
+    }
+
+    // Scenario: store_clone_voit_la_meme_map_de_tickets
+    #[test]
+    fn store_clone_voit_la_meme_map_de_tickets() {
+        let store = TicketStore::new();
+        let clone = store.clone();
+        let ticket = store.issue(claims_alice());
+        assert_eq!(clone.redeem(&ticket), Some(claims_alice()));
+        assert!(store.redeem(&ticket).is_none());
+    }
+
+    // Scenario: requete_sans_ticket_rejetee_en_001
+    #[tokio::test]
+    async fn requete_sans_ticket_rejetee_en_001() {
+        let (state, _token) = state_with_test_owner();
+        for uri in [
+            "/ws/fs",
+            "/ws/fs?other=1",
+            "/ws/fs?ticket",
+            "/ws/fs?Ticket=ab12",
+        ] {
+            let app = build_app(state.clone());
+            let resp = app.oneshot(get_req(uri)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(
+                body_bytes(resp).await,
+                br#"{"error":"VNL-SBX-WS-001: missing or malformed ticket"}"#,
+                "{uri}"
+            );
+        }
+    }
+
+    // Scenario: ticket_inconnu_rejete_en_002
+    #[tokio::test]
+    async fn ticket_inconnu_rejete_en_002() {
+        let (state, _token) = state_with_test_owner();
+        let app = build_app(state);
+        let resp = app
+            .oneshot(get_req(
+                "/ws/terminal?ticket=jamais-emis-00000000000000000000",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_bytes(resp).await,
+            br#"{"error":"VNL-SBX-WS-002: invalid or expired ticket"}"#
+        );
+    }
+
+    // Scenario: parametre_ticket_vide_rejete_en_002
+    #[tokio::test]
+    async fn parametre_ticket_vide_rejete_en_002() {
+        let (state, _token) = state_with_test_owner();
+        let app = build_app(state);
+        let resp = app.oneshot(get_req("/ws/fs?ticket=")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_bytes(resp).await,
+            br#"{"error":"VNL-SBX-WS-002: invalid or expired ticket"}"#
+        );
+    }
+
+    // Scenario: parametre_ticket_duplique_premier_gagnant
+    #[tokio::test]
+    async fn parametre_ticket_duplique_premier_gagnant() {
+        let (state, _token) = state_with_test_owner();
+        let store = state.tickets.clone();
+        let t_valide = store.issue(claims_alice());
+        let app = build_app(state.clone());
+        let uri = format!("/ws/fs?ticket={t_valide}&ticket=intrus");
+        let resp = app.oneshot(get_req(&uri)).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            store.redeem(&t_valide).is_none(),
+            "t_valide doit être consommé"
+        );
+
+        let t_valide2 = store.issue(claims_alice());
+        let app = build_app(state);
+        let uri = format!("/ws/fs?ticket=intrus&ticket={t_valide2}");
+        let resp = app.oneshot(get_req(&uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(store.redeem(&t_valide2).is_some(), "t_valide2 non consommé");
+    }
+
+    // Scenario: corps_401_verrouille_le_format_des_deux_identifiants
+    #[tokio::test]
+    async fn corps_401_verrouille_le_format_des_deux_identifiants() {
+        for (err, expected) in [
+            (
+                WsAuthError::MissingTicket,
+                r#"{"error":"VNL-SBX-WS-001: missing or malformed ticket"}"#,
+            ),
+            (
+                WsAuthError::InvalidTicket,
+                r#"{"error":"VNL-SBX-WS-002: invalid or expired ticket"}"#,
+            ),
+        ] {
+            let resp = err.into_response();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert!(resp.headers().get("www-authenticate").is_none());
+            assert_eq!(body_bytes(resp).await, expected.as_bytes());
+        }
+    }
+
+    // Scenario: rejets_inconnu_expire_et_consomme_sont_indistinguables
+    #[tokio::test]
+    async fn rejets_inconnu_expire_et_consomme_sont_indistinguables() {
+        let (state, _token) = state_with_test_owner();
+        let store = state.tickets.clone();
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        store
+            .tickets
+            .lock()
+            .unwrap()
+            .insert("expire".to_string(), (claims_alice(), expired));
+        let consomme = store.issue(claims_alice());
+        assert!(store.redeem(&consomme).is_some());
+
+        let mut bodies = Vec::new();
+        for ticket in ["expire", consomme.as_str(), "jamais-emis"] {
+            let app = build_app(state.clone());
+            let resp = app
+                .oneshot(get_req(&format!("/ws/fs?ticket={ticket}")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{ticket}");
+            bodies.push(body_bytes(resp).await);
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        assert_eq!(bodies[1], bodies[2]);
+    }
+
+    // Scenario: ticket_valide_consomme_malgre_upgrade_absent
+    #[tokio::test]
+    async fn ticket_valide_consomme_malgre_upgrade_absent() {
+        let (state, _token) = state_with_test_owner();
+        let store = state.tickets.clone();
+        let ticket = store.issue(claims_alice());
+        let uri = format!("/ws/fs?ticket={ticket}");
+
+        let app = build_app(state.clone());
+        let resp = app.oneshot(get_req(&uri)).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let app = build_app(state);
+        let resp = app.oneshot(get_req(&uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body_bytes(resp).await,
+            br#"{"error":"VNL-SBX-WS-002: invalid or expired ticket"}"#
+        );
+    }
+
+    // Scenario: claims_valides_ne_sont_pas_injectes_en_aval
+    #[tokio::test]
+    async fn claims_valides_ne_sont_pas_injectes_en_aval() {
+        use axum::extract::Request as AxRequest;
+        use axum::routing::get as axget;
+
+        async fn probe(req: AxRequest) -> StatusCode {
+            let exts = req.extensions();
+            if exts.get::<TicketClaims>().is_none() && exts.get::<crate::auth::AuthInfo>().is_none()
+            {
+                StatusCode::OK
+            } else {
+                StatusCode::IM_A_TEAPOT
+            }
+        }
+
+        let (state, _token) = state_with_test_owner();
+        let ticket = state.tickets.issue(claims_alice());
+        let app = axum::Router::new()
+            .route(
+                "/ws/probe",
+                axget(probe).layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    ws_auth_middleware,
+                )),
+            )
+            .with_state(state);
+        let resp = app
+            .oneshot(get_req(&format!("/ws/probe?ticket={ticket}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Scenario: aucun_log_du_module_ne_fuit_la_valeur_d_un_ticket
+    #[tokio::test]
+    async fn aucun_log_du_module_ne_fuit_la_valeur_d_un_ticket() {
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Buf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer({
+                let buf = buf.clone();
+                move || buf.clone()
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(sub);
+
+        let (state, _token) = state_with_test_owner();
+        let store = state.tickets.clone();
+        let ticket = store.issue(claims_alice());
+        assert!(store.redeem("valeur-inconnue").is_none());
+        let app = build_app(state);
+        let resp = app
+            .oneshot(get_req(&format!("/ws/fs?ticket={ticket}")))
+            .await
+            .unwrap();
+        // Ticket valide : la garde laisse passer (puis l'extracteur WS rejette sans upgrade).
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let logs = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        assert!(
+            !logs.contains(&ticket),
+            "la valeur du ticket apparaît dans les logs"
+        );
+    }
 }

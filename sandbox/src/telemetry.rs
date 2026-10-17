@@ -176,3 +176,33 @@ pub fn shutdown_otel() {
         eprintln!("WARN  OTel shutdown error: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use opentelemetry::Key;
+
+    // Scenario: resource_otel_porte_seulement_nom_et_version_du_crate
+    #[test]
+    fn resource_otel_porte_seulement_nom_et_version_du_crate() {
+        let resource = build_resource();
+        let name = resource.get(&Key::from_static_str("service.name"));
+        assert_eq!(
+            name.map(|v| v.to_string()).as_deref(),
+            Some("vanyline-sandbox")
+        );
+        let version = resource.get(&Key::from_static_str("service.version"));
+        assert_eq!(
+            version.map(|v| v.to_string()).as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(
+            resource
+                .iter()
+                .all(|(k, _)| !k.as_str().starts_with("k8s.")),
+            "aucun attribut k8s attendu"
+        );
+    }
+}
