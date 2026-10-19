@@ -19,9 +19,9 @@ RUN npm run build --workspace=frontend
 # ── Stage 2 : chef ──────────────────────────────────────────────────────────
 # ca-certificates + curl : utoipa-swagger-ui (feature swagger-ui de miryad-core) télécharge les
 # assets statiques de Swagger UI via curl à la compilation (son build.rs) — absent de l'image
-# rust de base, jamais eu besoin jusqu'ici.
+# rust de base, jamais eu besoin jusqu'ici. g++ : jsonnet-sys (moteur de workflow de miryad-core) compile du C++.
 FROM rust:1-slim-trixie AS chef
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config ca-certificates curl g++ \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 WORKDIR /app
@@ -41,9 +41,9 @@ RUN cargo build --release --locked -p vanyline-app
 # ── Stage 5 : runtime ──────────────────────────────────────────────────────
 # Pas de libssl ici : app est 100% rustls (reqwest rustls-tls, sqlx
 # runtime-tokio-rustls) — ca-certificates fournit le trust store système que
-# rustls-native-certs lit au démarrage (même choix que controller/Dockerfile).
+# rustls-native-certs lit au démarrage (même choix que controller/Dockerfile). libstdc++6 : jsonnet-sys (C++) le lie dynamiquement.
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/vanyline-app ./vanyline-app
