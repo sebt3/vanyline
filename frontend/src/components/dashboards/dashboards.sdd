@@ -15,6 +15,7 @@ Purpose:
 Owns:
   ./HomeDashboard.vue
   ./ProjectDashboard.vue
+  ./viewport.ts
 
 Can read:
   ../workflows/workflows.sdd
@@ -34,6 +35,9 @@ Exposes:
     mène à `/p/:projectName/runs/:runId` ; (5) assistant de projet (`ContextChat`, contexte
     `project` ; l'agent système du contexte est le défaut, l'utilisateur peut choisir un de ses
     agents ordinaires).
+  viewport.ts — `useViewportWidth(): Ref<number>` (largeur de fenêtre réactive, écouteur `resize` retiré au
+    démontage), `MD_MIN_WIDTH = 768`, `LG_MIN_WIDTH = 1024` : source unique des seuils d'écran des vues
+    (dashboards, assistants, paramètres) ; ne contient aucune autre logique.
 
 Must:
   Se disposer en une colonne sous `md` (sections empilées, assistant en feuille plein écran) et en
@@ -43,7 +47,7 @@ Must:
   Proposer le lancement d'un workflow de sandbox seulement quand le projet a une sandbox `Running`,
     et n'offrir que les sandboxes `Running` du projet.
   Afficher un état vide explicite (« aucun workflow », « aucun run ») et une erreur lisible quand
-    le moteur de workflow n'est pas configuré (503 de l'API : message dédié, pas une erreur brute).
+    le moteur de workflow est indisponible (503 de l'API : message dédié « Moteur de workflow indisponible », pas une erreur brute).
   Rendre l'assistant utilisable sans connaître l'API : le chat est la seconde voie pour toute
     action des sections.
 
@@ -84,7 +88,8 @@ Scenario: aucune_sandbox_demarree
 Scenario: moteur_non_configure
   Given une API qui répond 503 pour les workflows
   When ProjectDashboard s'affiche
-  Then la section workflows montre un message « moteur de workflow non configuré », le reste fonctionne
+  Then la section workflows montre un message « Moteur de workflow indisponible » (un 503 ne distingue pas « non configuré »
+    de « Restate injoignable » : le libellé couvre les deux), le reste fonctionne
 
 Scenario: mise_en_page_mobile
   Given une fenêtre de 360 px

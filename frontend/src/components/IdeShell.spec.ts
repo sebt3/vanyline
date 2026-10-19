@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils';
+import { inject } from 'vue';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import IdeShell from './IdeShell.vue';
 
@@ -26,11 +27,15 @@ const mockGetPanelFn = vi.fn((id: string) => {
 });
 const mockAddPanel = vi.fn();
 
+// Valeur injectée `project-name` telle que vue la voit depuis le stub dockview (enfant d'IdeShell).
+const projectNameSeen = vi.hoisted(() => ({ value: undefined as unknown }));
+
 vi.mock('dockview-vue', () => ({
   DockviewVue: {
     template: '<div class="dockview-stub" />',
     emits: ['ready'],
     setup(_props: Record<string, unknown>, { emit }: { emit: (name: string, payload: unknown) => void }) {
+      projectNameSeen.value = inject('project-name', null);
       // Émettre 'ready' avec une fausse api pour que onReady s'exécute
       const fakeApi = {
         panels: [] as unknown[],
@@ -86,6 +91,15 @@ describe('IdeShell', () => {
   it('reçoit la prop sandboxName', () => {
     const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
     expect(wrapper.props('sandboxName')).toBe('foo');
+  });
+
+  it('project-name fourni est réactif (ref) : le panneau Workflows suit le changement de projet', async () => {
+    const wrapper = mount(IdeShell, { props: { sandboxName: 'foo', projectName: 'demo' } });
+    const injected = projectNameSeen.value as { value: string };
+    expect(injected).toBeTruthy();
+    expect(injected.value).toBe('demo');
+    await wrapper.setProps({ projectName: 'autre' });
+    expect(injected.value).toBe('autre');
   });
 
   it('rend DockviewVue (mocké)', () => {

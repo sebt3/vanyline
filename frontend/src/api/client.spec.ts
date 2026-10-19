@@ -249,4 +249,39 @@ describe('createApiClient', () => {
       expect.any(Object),
     );
   });
+
+  it("reponse_sans_corps : POST 202 sans corps résout undefined sans SyntaxError", async () => {
+    const client = createApiClient();
+
+    (fetchSpy as any).mockResolvedValue(new Response(null, { status: 202, headers: { 'content-length': '0' } }));
+
+    await expect(client.post('/api/runs/r1/cancel')).resolves.toBeUndefined();
+  });
+
+  it("reponse_sans_corps : POST 204 sans corps résout undefined", async () => {
+    const client = createApiClient();
+
+    (fetchSpy as any).mockResolvedValue(new Response(null, { status: 204 }));
+
+    await expect(client.post('/api/resource', { a: 1 })).resolves.toBeUndefined();
+  });
+
+  it("reponse_sans_corps : une erreur 5xx sans corps garde ApiError HTTP <status>", async () => {
+    const client = createApiClient();
+
+    (fetchSpy as any).mockResolvedValue(new Response(null, { status: 503 }));
+
+    await expect(client.post('/api/resource')).rejects.toMatchObject({
+      status: 503,
+      message: 'HTTP 503',
+    });
+  });
+
+  it('reponse_sans_corps : un succès 200 au JSON malformé reste une erreur', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('{pas du json', { status: 200 }),
+    );
+    const client = createApiClient();
+    await expect(client.get('/api/x')).rejects.toBeInstanceOf(SyntaxError);
+  });
 });

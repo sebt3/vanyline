@@ -47,6 +47,22 @@ const open = defineModel<boolean>('open', { required: true });
   overflow-y: auto;
 }
 
+/* Sous md (768 px) : dialogue plein écran, défilement interne (spec WorkflowEditor, 360 px). */
+@media (max-width: 767px) {
+  [role='dialog'] {
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    transform: none;
+    border: 0;
+    border-radius: 0;
+    box-sizing: border-box;
+  }
+}
+
 .dialog-title {
   margin: 0 0 16px 0;
   font-size: 15px;

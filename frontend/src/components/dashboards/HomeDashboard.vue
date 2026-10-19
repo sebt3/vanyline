@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
@@ -9,6 +9,8 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
+import ContextChat from '../ContextChat.vue';
+import { MD_MIN_WIDTH, useViewportWidth } from './viewport';
 
 interface ProjectSpec {
   owner: string;
@@ -19,6 +21,7 @@ interface ProjectSpec {
 interface Project {
   metadata: { name: string };
   spec: ProjectSpec;
+  status?: { cloned?: boolean } | null;
 }
 
 interface CreateProjectBody {
@@ -33,7 +36,7 @@ const resource = useCrudResource<Project>(client, '/api/projects');
 const { items: fetchedProjects, loading, error } = resource;
 
 function openProject(name: string) {
-  router.push(`/p/${name}`);
+  router.push(`/p/${encodeURIComponent(name)}`);
 }
 
 const formName = ref('');
@@ -42,6 +45,19 @@ const formBranch = ref('');
 const creationError = ref<string | null>(null);
 
 const modalOpen = ref(false);
+
+/** Assistant d'accueil (ContextChat, contexte `home`) : panneau à droite, feuille sous `md`. */
+const width = useViewportWidth();
+const stacked = computed(() => width.value < MD_MIN_WIDTH);
+const assistantOpen = ref(false);
+const homeChatData = {};
+
+/** État du clone initial : tiré du statut du Project, sans recalcul côté client. */
+function cloneLabel(p: Project): string {
+  if (p.status?.cloned === true) return 'Cloné';
+  if (p.status?.cloned === false) return 'En cours';
+  return '—';
+}
 
 onMounted(resource.fetch);
 
@@ -69,11 +85,13 @@ async function deleteProject(name: string) {
 </script>
 
 <template>
-  <div class="dashboard">
+  <div class="dashboard" :class="{ 'dashboard--assistant': assistantOpen && !stacked }">
+    <div class="dashboard__main">
     <h1>Projets</h1>
     <div class="actions-row">
       <button class="btn btn-create" @click="modalOpen = true">Créer un projet</button>
       <button class="btn btn-settings" @click="router.push('/settings')">Paramètres</button>
+      <button class="btn btn-assistant" @click="assistantOpen = !assistantOpen">Assistant</button>
     </div>
 
     <LoadingSkeleton v-if="loading" />
@@ -86,6 +104,7 @@ async function deleteProject(name: string) {
             <tr>
               <th class="th-name">Nom</th>
               <th class="th-repo">Repo</th>
+              <th class="th-state">État</th>
               <th class="th-branch">Branche par défaut</th>
               <th class="th-action"></th>
             </tr>
@@ -95,6 +114,7 @@ async function deleteProject(name: string) {
                 @click="openProject(p.metadata.name)" class="row-clickable">
               <td>{{ p.metadata.name }}</td>
               <td>{{ p.spec.repoUrl }}</td>
+              <td>{{ cloneLabel(p) }}</td>
               <td>{{ p.spec.defaultBranch ?? '—' }}</td>
               <td>
                 <button class="btn btn-delete" @click.stop="deleteProject(p.metadata.name)">
@@ -141,6 +161,19 @@ async function deleteProject(name: string) {
         </template>
       </DialogShell>
     </div>
+    </div>
+
+    <aside
+      v-if="assistantOpen"
+      class="assistant"
+      :data-layout="stacked ? 'sheet' : 'panel'"
+      aria-label="Assistant d'accueil"
+    >
+      <div class="assistant__bar">
+        <button class="btn btn-cancel" @click="assistantOpen = false">Fermer l'assistant</button>
+      </div>
+      <ContextChat kind="home" :data="homeChatData" />
+    </aside>
   </div>
 </template>
 
@@ -176,6 +209,7 @@ h1 {
 
 .th-name,
 .th-repo,
+.th-state,
 .th-branch,
 .th-action {
   text-align: left;
@@ -205,5 +239,54 @@ h1 {
 
 .btn-settings:hover {
   background: #2b2b4a;
+}
+
+.btn-assistant {
+  background: #4c90f0;
+  color: white;
+}
+
+/* Colonne unique sous md ; panneau à droite à partir de md. */
+.dashboard--assistant {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+  gap: 24px;
+  align-items: start;
+}
+
+.dashboard__main {
+  min-width: 0;
+}
+
+.assistant {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 70vh;
+  border: 1px solid #2b2b4a;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0c1420;
+}
+
+/* Feuille plein écran sous md. */
+@media (max-width: 767px) {
+  .dashboard {
+    padding: 24px 16px;
+  }
+  .assistant {
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    height: auto;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+.assistant__bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px;
 }
 </style>

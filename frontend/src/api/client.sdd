@@ -1,0 +1,34 @@
+Spec: client — client HTTP de l'app
+
+Platform: TypeScript
+
+Purpose:
+  Client HTTP unique du frontend vers l'API de l'app (`createApiClient`), avec cookie de session, erreurs typées
+  (`ApiError` : statut, code `VNL-*`, message) et redirection vers la connexion sur 401. Fichier existant, spec
+  rédigée a posteriori (2026-10-18) ; seule la règle des réponses vides est nouvelle (2026-10-18).
+
+Owns:
+  ./client.ts
+
+Exposes:
+  ApiError(status, code?, message), createApiClient(baseUrl?) -> { get, post, put, delete }.
+
+Must:
+  Envoyer `credentials: 'include'` ; pas de `Content-Type` ni de corps sur un POST sans corps.
+  Rendre une réponse de succès à corps vide (`204`, ou `content-length: 0`) comme `undefined`, sans erreur ; un
+    corps NON vide mais malformé reste une erreur (JSON invalide ≠ absence de corps).
+  Lever `ApiError` (statut, code extrait du message `VNL-…`) sur toute réponse non ok, `HTTP <statut>` quand le
+    corps n'est pas du JSON.
+
+Must not:
+  Journaliser des corps de requête ou de réponse ; appeler un hôte autre que celui de l'app.
+
+Scenario: reponse_sans_corps
+  Given une réponse `202` à `content-length: 0`, puis `204`
+  When la requête est faite
+  Then elle résout `undefined`, tandis qu'un `200` au JSON malformé lève une erreur
+
+Scenario: erreur_typee
+  Given une réponse `422` `{ "error": "VNL-LLM-008: …" }`
+  When la requête est faite
+  Then une `ApiError` de statut 422 et de code `VNL-LLM-008`

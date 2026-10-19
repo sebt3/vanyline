@@ -1,0 +1,54 @@
+Spec: contextChatBackend — accès API du chat contextuel
+
+Platform: TypeScript
+
+Purpose:
+  Couche d'accès de `ContextChat` (../components/ContextChat.sdd) à l'API de l'app : trouver ou créer la
+  conversation d'un contexte (`settings`, `home`, `project`, `sandbox`), lister agents et profils de modèle,
+  changer le seul modèle de l'agent système `config`, fabriquer le `ChatBackend` de `@vanyline/ui` pour un
+  contexte et observer la fin des tours. Fichier existant, spec rédigée a posteriori (2026-10-18) à partir
+  du comportement livré.
+
+Owns:
+  ./contextChatBackend.ts
+
+Can read:
+  ../components/ContextChat.sdd
+  /app/src/system_agents.sdd
+  /app/src/api/conversations.sdd
+
+Exposes:
+  systemAgentName(kind) -> `system-<clé>` (`config` pour `settings`, sinon la clé du contexte).
+  findOrCreateContextConversation(kind, data, agentName?) : `GET /api/conversations` pour réutiliser la conversation du
+    même contexte, sinon `POST /api/conversations` avec `{ context: { kind, data }, agent_name? }`.
+  listAgents(), listModelProfiles(), setConfigAgentModel(agent, profileId) : `PUT` de la ligne d'agent avec le SEUL
+    `model_profile_id` modifié.
+  isNoModelProfileError / isNoModelProfileMessage : reconnaissent `NoModelProfile` (422 + marqueur `VNL-LLM-008`).
+  contextChatBackend(source) -> `ChatBackend`, observeTurns(...) : notifie la fin de chaque flux de tour (succès, erreur
+    ou interruption).
+  contextChatErrorMessage(err) : message lisible d'une erreur d'API.
+
+Must:
+  Ne jamais modifier prompt, outils ou nom d'un agent système ; ne journaliser aucun contenu de message.
+  Cibler uniquement des routes `/api/…` de l'app.
+
+Must not:
+  Appeler la sandbox ; contenir de logique d'interface.
+
+Scenario: conversation_reutilisee_sinon_creee
+  Given une conversation existante pour le contexte, puis aucune
+  When findOrCreateContextConversation est appelé
+  Then aucune création la première fois, `POST /api/conversations` la seconde
+
+Scenario: seul_le_modele_change
+  Given l'agent système `config`
+  When setConfigAgentModel est appelé
+  Then la requête `PUT` ne diffère de la ligne d'origine que par `model_profile_id`
+
+Scenario: aucun_profil_reconnu
+  Given une réponse 422 portant `VNL-LLM-008`
+  When isNoModelProfileError est évalué
+  Then il vaut `true`, et `false` pour un autre 422
+
+Tasks:
+  [ ] Tests unitaires du client dédiés (couvert aujourd'hui via `ContextChat.spec.ts`).

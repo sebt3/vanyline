@@ -102,6 +102,11 @@ async function request<T>(
     throw new ApiError(response.status, code, error);
   }
 
+  // Succès à corps vide : 204, ou `content-length: 0` (ex. 202 d'`axum` sans corps) → `undefined`.
+  // Un corps non vide mais malformé reste une erreur (JSON invalide ≠ absence de corps).
+  if (response.status === 204 || response.headers?.get('content-length') === '0') {
+    return undefined as T;
+  }
   return (await response.json()) as T;
 }
 

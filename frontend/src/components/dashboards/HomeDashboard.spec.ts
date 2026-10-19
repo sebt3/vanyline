@@ -2,6 +2,7 @@ import { createMemoryHistory, createRouter } from 'vue-router';
 import { mount } from '@vue/test-utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import HomeDashboard from './HomeDashboard.vue';
+import ContextChat from '../ContextChat.vue';
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -91,6 +92,34 @@ describe('HomeDashboard', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(router.currentRoute.value.path).toBe('/p/proj-alpha');
+  });
+
+  it('nom de projet réservé : navigation vers /p/<nom encodé>, paramètre décodé', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () =>
+        Promise.resolve([
+          { metadata: { name: 'a?b c' }, spec: { owner: 'u1', repoUrl: 'https://x/y', defaultBranch: 'main' } },
+        ]),
+    } as unknown as Response);
+
+    const router = createTestRouter();
+    await router.push('/');
+    await router.isReady();
+
+    const wrapper = mount(HomeDashboard, { global: { plugins: [router] } });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    await wrapper.find('tr.row-clickable').trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(router.currentRoute.value.path).toBe('/p/a%3Fb%20c');
+    expect(router.currentRoute.value.params.projectName).toBe('a?b c');
   });
 
   it('cliquer "Supprimer" appelle DELETE puis re-fetch, pas de navigation', async () => {
@@ -282,5 +311,64 @@ describe('HomeDashboard', () => {
 
     expect(wrapper.text()).toContain('VNL-AUTH-001');
     expect(wrapper.text()).not.toContain('proj-alpha');
+  });
+});
+// ---------------------------------------------------------------------------
+// dashboards.sdd — accueil (Scenario accueil_liste_les_projets) et assistant.
+// ---------------------------------------------------------------------------
+
+function homeFlush() {
+  return (async () => {
+    for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  })();
+}
+
+describe('HomeDashboard — dashboards.sdd (G2a)', () => {
+  it('accueil_liste_les_projets', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () =>
+        Promise.resolve([
+          { metadata: { name: 'p-one' }, spec: { owner: 'u', repoUrl: 'https://x/one' }, status: { cloned: true } },
+          { metadata: { name: 'p-two' }, spec: { owner: 'u', repoUrl: 'https://x/two' }, status: { cloned: false } },
+          { metadata: { name: 'p-three' }, spec: { owner: 'u', repoUrl: 'https://x/three' } },
+        ]),
+    } as unknown as Response);
+
+    const router = createTestRouter();
+    const wrapper = mount(HomeDashboard, { global: { plugins: [router] } });
+    await router.isReady();
+    await homeFlush();
+
+    expect(wrapper.findAll('tbody tr')).toHaveLength(3);
+    const text = wrapper.text();
+    expect(text).toContain('p-one');
+    expect(text).toContain('p-two');
+    expect(text).toContain('p-three');
+    expect(text).toContain('Cloné');
+    expect(text).toContain('En cours');
+    expect(text).toContain('Créer un projet');
+  });
+
+  it('assistant_accueil_ouvre_contexte_home', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () => Promise.resolve([]),
+    } as unknown as Response);
+    const router = createTestRouter();
+    const wrapper = mount(HomeDashboard, { global: { plugins: [router], stubs: { ContextChat: true } } });
+    await router.isReady();
+    await homeFlush();
+    expect(wrapper.findComponent(ContextChat).exists()).toBe(false);
+    await wrapper.find('.btn-assistant').trigger('click');
+    await homeFlush();
+    const chat = wrapper.findComponent(ContextChat);
+    expect(chat.exists()).toBe(true);
+    expect(chat.props('kind')).toBe('home');
   });
 });

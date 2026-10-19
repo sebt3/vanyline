@@ -24,8 +24,8 @@ Can read:
 
 Exposes:
   WorkflowScope = 'project' | 'sandbox'.
-  StepDefinition = { id: string; kind: 'agent' | 'rhai' | 'shell' | 'gate'; depends_on: string[];
-    config: Record<string, unknown> } ; types de configuration par kind (`AgentStepConfig`,
+  StepDefinition = union discriminée par `kind` (`'agent' | 'rhai' | 'shell' | 'gate'`) :
+    `{ id: string; kind; depends_on: string[]; config }` avec `config` typée par kind ; types de configuration par kind (`AgentStepConfig`,
     `RhaiStepConfig`, `ShellStepConfig`, `GateStepConfig`) reflétant ./workflow/steps/*.sdd (champs
     optionnels explicites ; `null` désactive un seuil de gate).
   WorkflowSummary = { id: number; name: string; scope: WorkflowScope; description?: string;
@@ -34,8 +34,13 @@ Exposes:
     'Cancelled' | 'Unknown'.
   StepStatus, RunStatus, RunSummary = { run_id: string; workflow: string; scope: WorkflowScope;
     sandbox?: string; triggered_by: string; started_at: string; status: RunStatus }, RunDetail.
+  HealthSummary = { status: 'passed' | 'failed' | 'errored' | 'skipped'; coverage_percent: number | null;
+    files: { path: string; percent: number }[] } — dérivés côté sandbox (/sandbox/src/health.sdd),
+    jamais recalculés par le frontend.
   HealthState = { phase: 'computing' | 'fresh' | 'stale'; report: HealthReport | null;
-    computed_at?: string; stale_since?: string; base?: string } — `HealthReport` vient de
+    computed_at?: number | null; stale_since?: number | null; base?: string | null;
+    summary: HealthSummary | null } — horodatages en
+    MILLISECONDES unix (u64 côté sandbox, /sandbox/src/health.sdd) — `HealthReport` vient de
     `generated/health-report`.
   Ré-exports depuis l'index du package.
 

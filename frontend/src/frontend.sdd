@@ -18,6 +18,7 @@ Owns:
   ./router.ts
 
 Can read:
+  ./components/ContextChat.sdd
   ./components/dashboards/dashboards.sdd
   ./components/sandbox/sandbox-overview.sdd
   ./components/SettingsView.sdd

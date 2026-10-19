@@ -1,0 +1,102 @@
+Spec: ContextChat — chat contextuel avec un agent
+
+Platform: TypeScript/Vue 3/@vanyline/ui
+
+Purpose:
+  Composant unique du chat contextuel (./../frontend.sdd) : pour un type de contexte (`settings`,
+  `home`, `project`, `sandbox`) et ses données, il crée ou réutilise la conversation
+  correspondante côté app (`POST /api/conversations` avec ce contexte, `GET /api/conversations`
+  pour réutiliser) et affiche le chat de l'agent associé au contexte. Il enrobe `ChatWindow` de
+  `@vanyline/ui` (même transport et même backend de chat que le panneau Chat de l'IDE, adaptés au
+  contexte). L'agent système du contexte (`system-<clé>`, /app/src/system_agents.sdd) est le défaut ;
+  contexte `settings` : agent de configuration imposé, seul son MODÈLE est choisissable ; autres
+  contextes : sélecteur d'agent parmi les agents ORDINAIRES de l'utilisateur (le contenu de
+  l'agent n'est jamais modifiable ici). Le composant est responsive : sous `md` il s'affiche en
+  feuille plein écran ouverte par l'appelant. Fichier neuf, conception.
+
+Owns:
+  ./ContextChat.vue
+
+Can read:
+  ../frontend.sdd
+  ./SettingsView.sdd
+  ./dashboards/dashboards.sdd
+  ./sandbox/sandbox-overview.sdd
+  ../api/httpChatBackend.ts
+  ../api/chatTransport.ts
+  ../api/httpConfigRepo.ts
+  /app/src/system_agents.sdd
+  /app/src/api/conversations.sdd
+
+Exposes:
+  ContextChat — props : `kind: 'settings' | 'home' | 'project' | 'sandbox'`, `data` (objet de
+    contexte : `{}` pour `settings`/`home`, `{ project_name }` pour `project`, `{ sandbox_name }`
+    pour `sandbox`, tel que `ChatContextInput` de /app/src/api/conversations.sdd). Émet
+    `turn-finished` à la fin de chaque tour de l'agent (l'appelant recharge ses listes). En-tête :
+    (1) `settings` : sélecteur de profil de modèle, mettant à jour le seul `model_profile_id` de
+    l'agent système `config` ; (2) autres contextes : sélecteur d'agent (défaut = agent système du
+    contexte). Corps : `ChatWindow`. Les appels d'outils de l'agent sont affichés dans la
+    conversation (comportement de `ChatWindow`).
+
+Must:
+  Ne jamais permettre de modifier prompt, outils ou nom d'un agent système ; seul `model_profile_id`.
+  Ne jamais afficher ni stocker un secret ; ne rien journaliser du contenu des messages.
+  Réutiliser la conversation existante du même contexte plutôt qu'en créer une à chaque ouverture.
+  Rendre l'état `NoModelProfile` (422 de l'app, aucun profil de modèle) comme un état explicite
+    « aucun profil de modèle » avec l'explication, jamais comme une erreur brute ; le chat est alors
+    désactivé.
+  Rendre les erreurs d'un tour (fournisseur injoignable) comme un message lisible dans le chat sans
+    casser l'écran.
+  Passer exclusivement par `./api/` (aucun `fetch` direct dans le composant).
+
+Must not:
+  Contenir de logique de domaine (outils, droits : tout est côté serveur).
+  Appeler la sandbox directement.
+
+Scenario: creation_de_la_conversation_du_contexte
+  Given `kind = 'project'`, `data = { project_name: 'demo' }` et aucune conversation de ce contexte
+  When ContextChat s'affiche
+  Then `POST /api/conversations` est émis avec ce contexte et l'agent système `project` par défaut
+
+Scenario: reutilisation_de_la_conversation
+  Given une conversation existante pour le contexte `project` / `demo`
+  When ContextChat s'affiche
+  Then aucune création n'est émise et la conversation existante est chargée
+
+Scenario: settings_choix_du_modele_seul
+  Given `kind = 'settings'` et deux profils de modèle
+  When l'utilisateur change le modèle
+  Then seul `model_profile_id` de l'agent système `config` est mis à jour et aucun sélecteur d'agent n'est proposé
+
+Scenario: choix_d_un_agent_ordinaire
+  Given `kind = 'sandbox'` et deux agents ordinaires de l'utilisateur
+  When l'utilisateur sélectionne l'un d'eux
+  Then la conversation continue avec cet agent et les agents système ne sont proposés qu'en défaut
+
+Scenario: aucun_profil_de_modele
+  Given une app qui répond `NoModelProfile` (422)
+  When ContextChat s'affiche
+  Then un état explicite « aucun profil de modèle » est montré et la saisie est désactivée
+
+Scenario: fin_de_tour_notifie_l_appelant
+  Given un tour qui se termine
+  When l'événement de fin arrive
+  Then `turn-finished` est émis une fois
+
+Scenario: erreur_d_un_tour
+  Given un tour qui échoue
+  When l'erreur arrive
+  Then un message lisible est affiché dans le chat et le composant reste utilisable
+
+Scenario: aucun_secret_affiche
+  Given une configuration contenant une clé d'API
+  When ContextChat et ses messages s'affichent
+  Then aucune clé n'apparaît dans le composant
+
+Scenario: feuille_plein_ecran_sous_md
+  Given une fenêtre de 360 px
+  When ContextChat est ouvert
+  Then il occupe tout l'écran, aucun défilement horizontal
+
+Tasks:
+  [ ] Écrire `./ContextChat.vue` et ses tests (un test par Scenario, taggé par son titre).

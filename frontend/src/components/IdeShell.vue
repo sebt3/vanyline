@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue';
 import { DockviewVue, type DockviewReadyEvent, type VueComponent, type ContextMenuItem, type GetTabContextMenuItemsParams } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
@@ -15,7 +15,7 @@ import { dirRootUri } from './panels/editorLanguage';
 import { debounce, loadLayout, saveLayout } from './ideLayoutPersistence';
 import { clearIdeActions, registerIdeActions, useIdeSession } from '../composables/useIdeSession';
 
-const props = defineProps<{ sandboxName: string }>();
+const props = defineProps<{ sandboxName: string; projectName?: string }>();
 
 // Client /ws/fs partagé Explorer/Editor — UNE instance par sandbox ouverte.
 // shallowRef : le client contient un WebSocket brut qu'il ne faut pas rendre
@@ -27,6 +27,8 @@ const dockviewApi = shallowRef<DockviewReadyEvent['api'] | null>(null);
 
 provide('sandbox-fs', fsClient);
 provide('sandbox-name', props.sandboxName);
+// Projet de la sandbox : le panneau « Workflows » liste les workflows du projet (ide.sdd).
+provide('project-name', computed(() => props.projectName ?? ''));
 provide('get-lsp-client', (toolchain: string, path: string) =>
   getLspClient(props.sandboxName, toolchain, dirRootUri(path), openFile));
 // Handler fourni à Explorer : ouvre (ou active) l'onglet Editor du fichier —
@@ -218,7 +220,7 @@ function addDefaultPanels(api: DockviewReadyEvent['api']) {
   api.addPanel({
     id: 'workflow',
     component: 'workflow',
-    title: 'sync-media.dag',
+    title: 'Workflows',
     position: { referencePanel: 'explorer', direction: 'right' },
   });
 

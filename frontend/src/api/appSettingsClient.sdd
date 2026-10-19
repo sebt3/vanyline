@@ -1,0 +1,53 @@
+Spec: appSettingsClient — client des réglages globaux et de l'identité administrateur
+
+Platform: TypeScript
+
+Purpose:
+  Client typé de l'API de l'app pour le groupe « Global » des paramètres (./../components/SettingsView.sdd) :
+  savoir si l'utilisateur courant est administrateur (`GET /api/v1/me` de miryad-core, groupe `admin`),
+  lister les fournisseurs LLM, lire et enregistrer le réglage `default_model` de `app-settings`
+  (/app/src/db/entities/app_settings.sdd). Dans le style de ./client.ts (fabriques, erreurs typées).
+  Fichier existant, spec rédigée a posteriori (2026-10-18) à partir du comportement livré.
+
+Owns:
+  ./appSettingsClient.ts
+
+Can read:
+  ./client.sdd
+  /app/src/db/entities/app_settings.sdd
+
+Exposes:
+  DEFAULT_MODEL_KEY = `default_model`, ADMIN_GROUP = `admin`.
+  isAdmin(client) -> Promise<boolean> : `GET /api/v1/me`, vrai ssi `groups` contient `admin` ; toute
+    erreur ou réponse non conforme ⇒ `false` (l'absence de droit est le repli sûr).
+  listProviderOptions(client) -> [{ id, name }] : `GET /api/v1/llm-providers` (aucune clé d'API n'est lue).
+  getDefaultModel(client) -> { id, value } | null : `GET /api/v1/app-settings` (pagination suivie), ligne de clé
+    `default_model`.
+  saveDefaultModel(current, value) : `POST /api/v1/app-settings { key, value }` si la ligne n'existe pas, sinon
+    `PUT /api/v1/app-settings/{id} { key, value }` ; `value = { provider_id, model, options? }`.
+
+Must:
+  Faire de `isAdmin` un confort d'affichage uniquement : l'autorité reste le serveur (écriture `AdminOnly`).
+  Ne jamais lire ni afficher une clé d'API.
+
+Must not:
+  Appeler la sandbox ou une URL hors `/api/`.
+
+Scenario: admin_reconnu_par_son_groupe
+  Given `GET /api/v1/me` répondant `{ groups: ["admin"] }`
+  When `isAdmin` est appelé
+  Then il rend `true`, et `false` pour `{ groups: [] }`
+
+Scenario: erreur_de_me_vaut_non_admin
+  Given `GET /api/v1/me` répondant 404 ou une page HTML
+  When `isAdmin` est appelé
+  Then il rend `false` sans lever d'erreur
+
+Scenario: premiere_sauvegarde_puis_mise_a_jour
+  Given aucune ligne `default_model`, puis une ligne d'identifiant 7
+  When `saveDefaultModel` est appelé
+  Then `POST /api/v1/app-settings` la première fois, `PUT /api/v1/app-settings/7` ensuite
+
+Tasks:
+  [ ] Tests unitaires du client dédiés (aujourd'hui couvert indirectement par `GlobalSettingsScreen.spec.ts` et
+    `SettingsView.spec.ts`).

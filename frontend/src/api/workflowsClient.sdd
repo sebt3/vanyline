@@ -23,7 +23,7 @@ Exposes:
     listWorkflows(project), getWorkflow(project, id), createWorkflow(project, body),
     updateWorkflow(project, id, body), deleteWorkflow(project, id),
     launchWorkflow(project, id, { sandbox? }) -> { run_id, invocation_id },
-    listProjectRuns(project, { limit?, since? }), listSandboxRuns(sandbox, { limit?, since? }),
+    listProjectRuns(project, { limit?: number, since?: number /* jours */ }), listSandboxRuns(sandbox, { limit?: number, since?: number /* jours */ }),
     getRun(runId), cancelRun(runId),
     getCodeHealth(sandbox) -> HealthState, refreshCodeHealth(sandbox, { base? })
   }
@@ -59,9 +59,15 @@ Scenario: moteur_indisponible
   Then `EngineUnavailable`
 
 Scenario: fenetre_des_runs
-  Given `listProjectRuns("demo", { limit: 50, since: "2026-09-20" })`
+  Given `listProjectRuns("demo", { limit: 50, since: 7 })`
   When la requête part
-  Then la query contient `limit=50` et `since=…`
+  Then la query contient `limit=50` et `since=7` (`since` est un entier de JOURS, /app/src/api/workflows.sdd)
+
+Scenario: reponse_sans_corps
+  Given un faux serveur répondant `202` ou `204` sans corps
+  When `cancelRun("r1")` ou `deleteWorkflow("demo", 3)`
+  Then l'appel réussit (résolu avec `undefined`), sans SyntaxError — l'`ApiClient` (client.ts) tolère
+    toute réponse de succès à corps vide
 
 Scenario: aucun_appel_direct
   Given l'ensemble des URL construites

@@ -13,8 +13,10 @@ Purpose:
 
 Owns:
   ./SettingsView.vue
+  ./settings/GlobalSettingsScreen.vue
 
 Can read:
+  ../api/appSettingsClient.sdd
   ../frontend.sdd
   /app/src/system_agents.sdd
   /app/src/mcp_domain.sdd
@@ -89,3 +91,10 @@ Scenario: erreur_de_l_agent
   Given un tour qui échoue (fournisseur injoignable)
   When l'erreur arrive
   Then un message d'erreur lisible dans le chat, la vue reste utilisable
+
+Tasks:
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : assumer — lecture réservée aux administrateurs, qui écrivent déjà ces réglages ; `options` ne doit jamais porter de secret) — `options` du modèle par défaut (revue 2026-10-18) : l'écran « Global » réaffiche le JSON `options` en champ
+    texte ; un secret placé dans `options` serait visible de tout administrateur.
+    Recommandation (Claude, 2026-10-18) : assumer (lecture réservée aux administrateurs, qui écrivent déjà ces réglages) et documenter que `options` ne
+    doit jamais porter de secret.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)

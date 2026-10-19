@@ -113,3 +113,15 @@ Scenario: cartes_sous_md
   Given une fenêtre de 360 px
   When RunList s'affiche
   Then les runs sont rendus en cartes
+
+Scenario: env_secret_masque_dans_l_editeur
+  Given un step shell dont `env` contient `API_TOKEN`, `DB_PASSWORD`, `MY_SECRET`, `SSH_KEY` et `LOG_LEVEL`
+  When WorkflowEditor affiche le formulaire de ce step
+  Then les quatre premières valeurs sont rendues masquées (`type="password"`, bouton « afficher ») et `LOG_LEVEL` en clair ; le mode source JSON n'est pas modifié
+
+Tasks:
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : assumer le clair dans l'éditeur, mais masquer la valeur (`type="password"` + bouton « afficher ») pour toute clé évoquant un secret ; Scenario `env_secret_masque_dans_l_editeur`) — Valeurs d'`env` des steps shell (revue 2026-10-18) : saisies et affichées en clair dans `WorkflowEditor` — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
+    (champ texte) et en mode source JSON ; la spec n'interdit que les listes et `RunDetail`.
+    Recommandation (Claude, 2026-10-18) : assumer (le formulaire sert à éditer ; le rôle de l'utilisateur sur son propre workflow est entier) mais masquer
+    la valeur dans le formulaire (`type="password"` avec bouton « afficher ») dès qu'une clé évoque un secret.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
