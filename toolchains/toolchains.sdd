@@ -1,0 +1,50 @@
+Spec: Images toolchain de la sandbox (`toolchains/`)
+
+Platform: Dockerfiles OCI, build podman/docker depuis la racine du repo, publiées par release.yml
+
+Purpose:
+  Contractualiser les images toolchain montées en `volumes[].image` (lecture seule, process
+  non-root) dans le pod sandbox. Cette spec ne couvre, à ce jour, que l'exigence de santé du
+  code ; le reste des images (LSP, alias rustup, Volar, pyright, hadolint) est documenté par
+  les commentaires de chaque Dockerfile et reste à reverse-spécifier (tâche ouverte).
+
+Owns:
+  ./rust/Dockerfile
+  ./rust/test-toolchain.sh
+  ./rust/test-toolchain-health.sh
+
+Can read:
+  ../health/src/checks.sdd
+  ../AGENTS.md
+
+Must:
+  Embarquer dans l'image `rust` tout ce qu'exige le check `rust-coverage` de
+  `../health/src/checks.sdd` : la commande `cargo llvm-cov` fonctionnelle et le composant
+  rustup `llvm-tools-preview`.
+  Épingler `cargo-llvm-cov` à une version exacte (`cargo install --locked --version X.Y.Z`),
+  jamais flottante ; changer de version = modifier cette ligne.
+  Poser le binaire dans le répertoire `cargo/bin` de la base (déjà dans le `PATH` injecté pour cette
+  toolchain), sans écriture au runtime : le volume est en lecture seule.
+  Conserver intacts le symlink relatif `rust-analyzer` et l'alias `stable-<host>` existants
+  (`./rust/test-toolchain.sh` doit rester vert).
+  Rester sur la famille de distro de la base (trixie).
+
+Must not:
+  Installer quoi que ce soit au runtime du pod (`rustup component add`, `cargo install`) :
+  EROFS.
+  Désépingler ou ignorer un échec de build (`|| true`).
+
+Scenario: cargo_llvm_cov_utilisable_en_lecture_seule
+  Given l'image `rust` construite et lancée `--read-only`, utilisateur 65534, tmpfs
+  When `cargo llvm-cov --version` est exécuté
+  Then la commande réussit et imprime la version épinglée
+
+Scenario: llvm_tools_presents
+  Given la même image et les mêmes conditions
+  When `rustup component list --installed` est exécuté
+  Then `llvm-tools` (ou `llvm-tools-preview`) figure dans la liste
+
+Tasks:
+  [x] Ajouter `llvm-tools-preview` + `cargo-llvm-cov` épinglé à `./rust/Dockerfile` ;
+    écrire `./rust/test-toolchain-health.sh` (mêmes conditions que `test-toolchain.sh`).
+  [ ] Reverse-spécifier les images node, docker et python (et le reste de l'image rust).

@@ -1,0 +1,30 @@
+# Exemple d'Application (vanyline.solidite.fr/v1alpha1) avec moteur de workflow Restate.
+# Valeurs génériques : à adapter (hôte, namespace, noms de Secrets, issuer cert-manager).
+# Le schéma de référence est deploy/controller/crds.yaml (généré depuis crds/src/lib.rs).
+apiVersion: vanyline.solidite.fr/v1alpha1
+kind: Application
+metadata:
+  name: vanyline
+  namespace: vanyline
+spec:
+  # Nom de domaine public de l'Ingress. Sert aussi à dériver OIDC_REDIRECT_URL
+  # (https://<host>/auth/callback) : ne pas la renseigner dans le Secret OIDC.
+  host: vanyline.example.org
+  ingressClassName: nginx
+  # Issuer cert-manager pour le certificat de l'Ingress (ClusterIssuer par défaut).
+  tlsIssuerName: letsencrypt-prod
+  # Secret OIDC : clés issuerUrl, clientId, clientSecret, scopes (+ caCert optionnelle).
+  oidcSecretRef: vanyline-oidc
+  # Secret de base de données : clé `uri` (chaîne de connexion complète).
+  databaseSecretRef: vanyline-db
+  # cookieSecretRef absent : le controller génère lui-même le cookie secret
+  # (Secret `vanyline-cookie`, clé `cookieSecret`) et ne le régénère jamais.
+  #
+  # Moteur de workflow Restate. Sa présence déclenche le StatefulSet `<app>-restate`
+  # (un réplica) et le Service associé. `image` est volontairement absent : le controller
+  # applique son défaut épinglé (1.7.13, flag --restate-image / RESTATE_IMAGE).
+  # Les variables VNL_RESTATE_* sont posées par le controller sur le Deployment de l'app :
+  # ne pas les déclarer ici.
+  restate:
+    # Taille du PVC de données Restate (journal des runs). Défaut controller : 5Gi.
+    storageSize: 5Gi

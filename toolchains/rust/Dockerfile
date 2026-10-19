@@ -31,6 +31,16 @@ FROM docker.io/library/rust:slim-trixie
 RUN rustup component add rust-analyzer rust-src \
     && ln -srf "$(rustup which rust-analyzer)" /usr/local/bin/rust-analyzer
 
+# Couverture de la santé du code (check `rust-coverage`, health/src/checks.sdd) :
+# `cargo llvm-cov` s'appuie sur le composant `llvm-tools-preview` (profdata,
+# cov) et sur le binaire `cargo-llvm-cov`. Comme pour rust-analyzer, ils sont
+# posés au BUILD : le volume monté dans le pod est en lecture seule. Version
+# épinglée (jamais flottante) : changer de version = modifier cette ligne.
+# Le binaire atterrit dans $CARGO_HOME/bin (= /usr/local/cargo/bin, déjà dans
+# le PATH injecté pour la toolchain). Vérification : ./test-toolchain-health.sh.
+RUN rustup component add llvm-tools-preview \
+    && cargo install --locked --version 0.9.1 cargo-llvm-cov
+
 # Alias `stable-<host>` vers la toolchain versionnée installée par la base.
 # Un projet qui épingle `rust-toolchain.toml` (channel = "stable") fait résoudre
 # à rustup le toolchain nominal `stable-<host>` : absent du dossier toolchains,

@@ -1,0 +1,39 @@
+Spec: Manifests de déploiement (`deploy/`)
+
+Platform: Kubernetes (>= 1.31), CRDs `vanyline.solidite.fr/v1alpha1`
+
+Purpose:
+  Contractualiser les manifests livrés. Cette spec ne couvre, à ce jour, que l'exemple
+  d'`Application` complète (avec moteur de workflow Restate) ; les autres manifests
+  (`controller/`, `sandbox/`, `web/` historique) restent à reverse-spécifier (tâche ouverte).
+
+Owns:
+  ./web/application-example.yaml
+
+Can read:
+  ./controller/crds.yaml
+  ../controller/src/application.sdd
+  ../crds/src/lib.sdd
+
+Must:
+  Fournir un exemple d'`Application` valide contre le schéma de `./controller/crds.yaml`,
+  portant `spec.restate` (sans `image` : le défaut épinglé du controller s'applique), afin
+  que le moteur de workflow soit déployé comme sous-ressource de l'Application.
+  N'utiliser que des champs existants du schéma ; référencer les secrets OIDC / base de
+  données / cookie par `secretRef`, jamais de valeur en clair.
+  Utiliser des valeurs d'exemple génériques (hôtes `example.org`), aucun identifiant personnel.
+  Rester validable hors cluster : `kubectl apply --dry-run=client` ou, à défaut, un contrôle
+  des champs contre `./controller/crds.yaml`.
+
+Must not:
+  Modifier `./controller/crds.yaml` (généré par `generate-crds.sh`) ni les manifests existants.
+  Poser les variables `VNL_RESTATE_*` à la main : le controller les pose sur le Deployment.
+
+Scenario: exemple_conforme_au_schema
+  Given `./web/application-example.yaml`
+  When chaque champ de `spec` est comparé au schéma `Application` de `./controller/crds.yaml`
+  Then aucun champ inconnu, aucun champ requis manquant, et `spec.restate` est présent
+
+Tasks:
+  [x] Rédiger `./web/application-example.yaml` (commentaires en français, brefs).
+  [ ] Reverse-spécifier les manifests `controller/`, `sandbox/` et `web/`.
