@@ -302,11 +302,14 @@ Tasks:
     (`write_file_parent_interdit_rejete_en_vnl_tls_004`,
     `list_directory_sous_repertoire_ilisible_sans_enfants`) : à sauter explicitement
     quand les tests tournent en root (CI conteneur), sinon faux négatifs.
-  [?] Frontière de sécurité : aucune garde anti-traversal dans ce crate — @confine_path
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : l'appelant confine, jamais le tool ; verrou = test d'architecture côté sandbox, Scenario `tout_dispatch_de_fichier_confine_son_chemin` de `sandbox/src/tools_impl.sdd`) — Frontière de sécurité : aucune garde anti-traversal dans ce crate — @confine_path
     (`VNL-SBX-*`) est uniquement côté `sandbox`. Un bug d'oubli de @confine dans un
     nouveau dispatch exposerait tout le système de fichiers du pod. Verrouiller la
     responsabilité par spec ( appelant confine, jamais le tool ) ou ajouter une racine
     optionnelle ici ? Arbitrage de sécurité à trancher avec Sébastien.
+    Recommandation (Claude, 2026-10-18) : verrouiller par spec « l'appelant confine, jamais le tool » (le sandbox confine déjà tout dispatch), et ajouter
+    un test d'architecture qui échoue si un dispatch des tools de fichiers n'appelle pas `confine`.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [?] `raw` + `offset` non nul : @read_file en mode `raw` ignore silencieusement
     `offset` et retourne tout le fichier. Comportement accidentel (le champ reste
     accepté) ou contrat « raw = tout le fichier, offset réservé au mode numéroté » ?

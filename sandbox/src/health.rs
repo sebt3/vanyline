@@ -44,7 +44,7 @@ use serde_json::Value;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use vanyline_health::checks::Check;
-use vanyline_health::report::{HealthReport, Issue, Severity};
+use vanyline_health::report::{CheckStatus, CoverageTotals, HealthReport, Issue, Severity};
 use vanyline_health::runner::{
     DEFAULT_OUTPUT_CAP_BYTES, DEFAULT_TAIL_BYTES, RunOptions, run_checks,
 };
@@ -113,6 +113,64 @@ pub struct HealthState {
     pub stale_since: Option<u64>,
     /// Base sticky des recalculs (vue « code neuf »), `None` si inconnue.
     pub base: Option<String>,
+    /// Résumé dérivé de `report` au moment du snapshot, `None` exactement quand
+    /// `report` est `None` (spec : `@HealthSummary`).
+    pub summary: Option<HealthSummary>,
+}
+
+/// Résumé du rapport (spec : `./health.sdd`, `@HealthSummary`) : dérivé de
+/// `report` au `snapshot()`, jamais calculé par un consommateur.
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthSummary {
+    /// Statut global (`report.status()`).
+    pub status: CheckStatus,
+    /// Couverture totale en pourcentage ; `None` quand `coverage` est absente.
+    pub coverage_percent: Option<f64>,
+    /// Couverture par fichier, triée par pourcentage croissant puis par chemin.
+    pub files: Vec<HealthFileSummary>,
+}
+
+/// Couverture d'un fichier dans le résumé (élément de [`HealthSummary::files`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthFileSummary {
+    /// Chemin relatif à la racine du dépôt.
+    pub path: String,
+    /// Pourcentage de lignes couvertes (`100.0` si rien à couvrir).
+    pub percent: f64,
+}
+
+/// Dérive le résumé d'un rapport (spec : `./health.sdd`, `@HealthSummary`).
+/// Pourcentages via [`CoverageTotals::percent`] (formule unique du crate) ;
+/// `files` triés par pourcentage croissant puis par chemin.
+fn summarize(report: &HealthReport) -> HealthSummary {
+    let (coverage_percent, files) = match &report.coverage {
+        None => (None, Vec::new()),
+        Some(coverage) => {
+            let mut files: Vec<HealthFileSummary> = coverage
+                .files
+                .iter()
+                .map(|file| HealthFileSummary {
+                    path: file.path.clone(),
+                    percent: CoverageTotals {
+                        lines_found: file.lines_found,
+                        lines_hit: file.lines_hit,
+                    }
+                    .percent(),
+                })
+                .collect();
+            files.sort_by(|a, b| {
+                a.percent
+                    .total_cmp(&b.percent)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+            (Some(coverage.totals().percent()), files)
+        }
+    };
+    HealthSummary {
+        status: report.status(),
+        coverage_percent,
+        files,
+    }
 }
 
 /// Erreurs du handle `@CodeHealth` (spec : `./health.sdd`, `@HealthError`).
@@ -334,6 +392,7 @@ impl CodeHealth {
             computed_at: f.computed_at,
             stale_since: f.stale_since,
             base: f.base.clone(),
+            summary: f.report.as_ref().map(summarize),
         }
     }
 
@@ -906,6 +965,7 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vanyline_health::report::{CheckKind, CheckResult, CoverageReport, FileCoverage};
 
     fn root() -> std::path::PathBuf {
         std::path::PathBuf::from("/workspace")
@@ -1005,5 +1065,141 @@ mod tests {
         )));
         let source = lsp_preliminary_source(config, Arc::new(LspManager::default()));
         assert!(source().is_empty(), "manager sans session ⇒ rien à verser");
+    }
+
+    /// `CodeHealth` de test (délais nuls, aucune vérification) dont l'état de
+    /// calcul terminé est posé directement : `snapshot()` dérive le résumé.
+    fn health_avec_rapport(report: Option<HealthReport>) -> Arc<CodeHealth> {
+        let config = Arc::new(crate::auth::test_support::test_config(Path::new(
+            "/workspace",
+        )));
+        let health = CodeHealth::with_timing(
+            config,
+            Arc::new(|_: &[String]| -> Vec<Check> { Vec::new() }),
+            Duration::ZERO,
+            Duration::ZERO,
+            empty_preliminary(),
+        );
+        health.fields().report = report;
+        health
+    }
+
+    fn verification(id: &str, status: CheckStatus) -> CheckResult {
+        CheckResult {
+            id: id.to_string(),
+            kind: CheckKind::Lint,
+            status,
+            exit_code: None,
+            duration_ms: 1,
+            output_tail: String::new(),
+        }
+    }
+
+    fn fichier(path: &str, lines_found: u32, lines_hit: u32) -> FileCoverage {
+        FileCoverage {
+            path: path.to_string(),
+            lines_found,
+            lines_hit,
+            uncovered: Vec::new(),
+        }
+    }
+
+    fn rapport(checks: Vec<CheckResult>, coverage: Option<CoverageReport>) -> HealthReport {
+        HealthReport {
+            revision: None,
+            checks,
+            coverage,
+            issues: Vec::new(),
+            new_code: None,
+            unchecked_languages: Vec::new(),
+        }
+    }
+
+    /// Vrai si le nombre JSON vaut `attendu` à 1e-9 près.
+    fn proche(valeur: &serde_json::Value, attendu: f64) -> bool {
+        valeur.as_f64().is_some_and(|v| (v - attendu).abs() < 1e-9)
+    }
+
+    /// Scenario `resume_derive_du_rapport` (spec : `./health.sdd`) : statut
+    /// `failed`, couverture totale 50 %, fichier à 20 % listé avant celui à 80 %.
+    #[test]
+    fn resume_derive_du_rapport() {
+        let report = rapport(
+            vec![
+                verification("clippy", CheckStatus::Failed),
+                verification("fmt", CheckStatus::Passed),
+            ],
+            Some(CoverageReport {
+                files: vec![fichier("src/b.rs", 10, 8), fichier("src/a.rs", 10, 2)],
+            }),
+        );
+        let health = health_avec_rapport(Some(report));
+        let json = serde_json::to_value(health.snapshot()).expect("HealthState sérialisable");
+
+        assert_eq!(json["summary"]["status"], "failed");
+        assert!(proche(&json["summary"]["coverage_percent"], 50.0));
+        assert_eq!(json["summary"]["files"][0]["path"], "src/a.rs");
+        assert!(proche(&json["summary"]["files"][0]["percent"], 20.0));
+        assert_eq!(json["summary"]["files"][1]["path"], "src/b.rs");
+        assert!(proche(&json["summary"]["files"][1]["percent"], 80.0));
+    }
+
+    /// Scenario `resume_sans_mesure_de_couverture` : `coverage` absente ⇒
+    /// `coverage_percent` null (pas « 0 % »), `files` vide, statut = celui de
+    /// `report.status()`.
+    #[test]
+    fn resume_sans_mesure_de_couverture() {
+        let report = rapport(vec![verification("clippy", CheckStatus::Errored)], None);
+        let health = health_avec_rapport(Some(report));
+        let json = serde_json::to_value(health.snapshot()).expect("HealthState sérialisable");
+
+        assert!(json["summary"]["coverage_percent"].is_null());
+        assert!(
+            json["summary"]["files"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+        // Statut attendu littéral (une vérification `errored` ⇒ résumé `errored`), indépendant
+        // de `report.status()` qui est le code testé.
+        assert_eq!(json["summary"]["status"], "errored");
+    }
+
+    /// Égalité de pourcentage départagée par le chemin (tri stable), et fichier sans ligne
+    /// instrumentée (`lines_found == 0`) à 100.0 — rien à couvrir n'est pas un défaut.
+    #[test]
+    fn resume_pourcentages_egalite_par_chemin_et_rien_a_couvrir() {
+        let report = rapport(
+            Vec::new(),
+            Some(CoverageReport {
+                files: vec![
+                    fichier("src/z.rs", 4, 2),
+                    fichier("src/nul.rs", 0, 0),
+                    fichier("src/a.rs", 2, 1),
+                ],
+            }),
+        );
+        let health = health_avec_rapport(Some(report));
+        let json = serde_json::to_value(health.snapshot()).expect("HealthState sérialisable");
+
+        // a.rs (50 %) avant z.rs (50 %) : égalité ⇒ ordre par chemin ; nul.rs (100 %) en dernier.
+        assert_eq!(json["summary"]["files"][0]["path"], "src/a.rs");
+        assert!(proche(&json["summary"]["files"][0]["percent"], 50.0));
+        assert_eq!(json["summary"]["files"][1]["path"], "src/z.rs");
+        assert!(proche(&json["summary"]["files"][1]["percent"], 50.0));
+        assert_eq!(json["summary"]["files"][2]["path"], "src/nul.rs");
+        assert!(proche(&json["summary"]["files"][2]["percent"], 100.0));
+        // Total : 3 lignes hit sur 6 instrumentées (4+0+2) ⇒ 50 %.
+        assert!(proche(&json["summary"]["coverage_percent"], 50.0));
+    }
+
+    /// Scenario `resume_nul_pendant_le_premier_calcul` : `report` null ⇒
+    /// `summary` null.
+    #[test]
+    fn resume_nul_pendant_le_premier_calcul() {
+        let health = health_avec_rapport(None);
+        let json = serde_json::to_value(health.snapshot()).expect("HealthState sérialisable");
+
+        assert!(json["report"].is_null());
+        assert!(json["summary"].is_null());
     }
 }

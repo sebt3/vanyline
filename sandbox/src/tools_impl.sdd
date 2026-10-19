@@ -414,7 +414,19 @@ Example: évasion et édition validée
     `diagnostics APPARUS (1):` / `  src/main.rs:12:9: error: mismatched types` /
     `diagnostics DISPARUS (0):` / `diagnostics INCHANGÉS (2) — non listés`
 
+Scenario: tout_dispatch_de_fichier_confine_son_chemin
+  # Verrou de la décision 2026-10-18 : `vanyline-tools` ne confine pas, l'APPELANT (la sandbox) confine.
+  Given l'ensemble des outils de fichiers exposés par la sandbox (read_file, write_file, edit_file, delete_file, list_directory, find_files, search) et un chemin hors de `sandbox_root` (`/etc/passwd`, `../../x`)
+  When chacun est invoqué avec ce chemin par le dispatch MCP
+  Then chacun est refusé par la garde de confinement (aucun accès au fichier hors racine), et le test échoue si un nouvel outil de fichiers est ajouté sans être couvert
+
 Tasks:
+  [?] Couverture du verrou de confinement (validation 2026-10-18) : `tout_dispatch_de_fichier_confine_son_chemin` classe
+    `lsp_*`, `inspect_symbol` et `edit_and_check` en `HORS_FICHIERS`, alors qu'ils prennent des chemins (`edit_and_check`
+    écrit des fichiers via `confine`) ; un futur outil de fichier mal classé échapperait au verrou.
+    Recommandation (Claude, 2026-10-18) : étendre le test à ces outils (chemin hostile ⇒ refus `VNL-SBX-001`, sentinelle intacte pour `edit_and_check`) et
+    réduire `HORS_FICHIERS` aux seuls outils sans chemin (`execute_command`, `code_health`).
+    Réponse du développeur : (à remplir — « défaut » pour suivre la recommandation)
   [ ] Relecture par Sébastien — spec produite en reverse-engineering (2026-09-26) ; le
     comportement accidentel ne devient contrat qu'après cette relecture
     (`.specdd/bootstrap.project.md`).
@@ -468,10 +480,13 @@ Tasks:
     canonifié) est inatteignable en pratique (`/` existe toujours) et le `unwrap_or
     (&candidate)` de `strip_prefix` est défensif mort : branche à supprimer, à
     contractualiser comme défensive, ou cas réel non vu (namespace, `/` absent) ?
-  [?] @confine_path — marche `.exists()` puis `canonicalize` non atomiques : une
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : hors périmètre de la menace — un attaquant qui peut substituer des symlinks dans le workspace exécute déjà du code dans le pod ; assumé) — @confine_path — marche `.exists()` puis `canonicalize` non atomiques : une
     substitution de symlink entre les deux (TOCTOU, attaquant ayant un shell dans le
     même pod) peut valider un chemin ensuite redirigé hors racine. Le modèle de menace
     (code exécutable dans son propre workspace) rend-il ce race hors périmètre ?
+    Recommandation (Claude, 2026-10-18) : hors périmètre de la menace (un attaquant qui peut substituer des symlinks dans le workspace exécute déjà du
+    code dans le pod) : assumer et le consigner dans la spec.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [?] Coût de la garde : @confine refait @canonicalize à chaque appel, multiplié par
     l'usage (double confine par location dans @render_location, par URI de réf, par
     site de preview) — canonique en cache (root seulement) ou le coût est-il négligeable

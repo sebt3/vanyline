@@ -7206,4 +7206,166 @@ mod tests {
         assert!(note.contains("2×"), "{note}");
         assert!(note.contains("character: 10"), "{note}");
     }
+
+    // Scenario: tout_dispatch_de_fichier_confine_son_chemin
+    // Verrou de la décision 2026-10-18 : `vanyline-tools` ne confine pas, c'est
+    // l'appelant (la sandbox, via `confine`) qui le fait. Le test passe par le
+    // dispatch MCP réel (`handle_tools_list` / `handle_tools_call`).
+    // Sentinelle : `victim.txt` vit dans un répertoire frère de la racine. Les
+    // écritures ne visent JAMAIS `/etc/passwd` ni `../../x` : sans garde, un
+    // write/delete hors racine exécuté en root abîmerait le système. Seuls les
+    // outils de lecture reçoivent ces chemins (lecture seule, sans effet de bord).
+    #[tokio::test]
+    async fn tout_dispatch_de_fichier_confine_son_chemin() {
+        use serde_json::json;
+
+        // Outils de fichiers attendus. Toute nouvelle entrée doit être ajoutée ici
+        // ET avoir un cas dans la table `cas` ci-dessous.
+        const FICHIER: [&str; 7] = [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "delete_file",
+            "list_directory",
+            "find_files",
+            "search",
+        ];
+        // Outils hors périmètre fichier, classés explicitement (un nouvel outil
+        // non classé fait échouer le test).
+        const HORS_FICHIERS: [&str; 10] = [
+            "execute_command",
+            "code_health",
+            "lsp_diagnostics",
+            "lsp_definition",
+            "lsp_references",
+            "lsp_rename",
+            "lsp_document_symbols",
+            "lsp_workspace_symbols",
+            "inspect_symbol",
+            "edit_and_check",
+        ];
+
+        // 1. Dérivation depuis tools/list réel.
+        let resp = crate::mcp::handle_tools_list(Some(json!(1)));
+        let result = resp.result.expect("tools/list renvoie un résultat");
+        let listed: Vec<String> = result["tools"]
+            .as_array()
+            .expect("tools est un tableau")
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for name in &listed {
+            assert!(
+                FICHIER.contains(&name.as_str()) || HORS_FICHIERS.contains(&name.as_str()),
+                "outil `{name}` exposé sans être classé (fichier ou hors fichiers) dans tools_impl.rs"
+            );
+        }
+        for name in FICHIER {
+            assert!(
+                listed.iter().any(|l| l == name),
+                "outil fichier `{name}` absent de tools/list"
+            );
+        }
+        // Les familles fichier de vanyline-tools doivent toutes être couvertes.
+        for t in vanyline_tools::mcp::filesystem_tools()
+            .into_iter()
+            .chain(vanyline_tools::mcp::search_tools())
+        {
+            let name = t["name"].as_str().unwrap_or_default();
+            assert!(
+                FICHIER.contains(&name),
+                "outil fichier `{name}` non couvert par le test"
+            );
+        }
+
+        // 2. Sentinelle hors racine.
+        let (state, root) = make_empty_lsp_state().await;
+        let outside = tempfile::TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "SECRET").unwrap();
+        let outside_name = outside
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            root.path().parent(),
+            outside.path().parent(),
+            "racine et sentinelle doivent partager un parent pour le chemin relatif"
+        );
+        let victim_abs = victim.to_string_lossy().into_owned();
+        let victim_rel = format!("../{outside_name}/victim.txt");
+
+        // 3. Cas par outil : (outil, arguments, chemin hostile).
+        let cas = cas_fichiers_hostiles(&victim_abs, &victim_rel);
+
+        // Chaque outil de la table a au moins un cas (sinon le verrou est vide).
+        for name in FICHIER {
+            assert!(
+                cas.iter().any(|(n, _, _)| *n == name),
+                "aucun cas pour `{name}`"
+            );
+        }
+
+        for (tool, args, chemin) in cas {
+            let params = json!({ "name": tool, "arguments": args });
+            let resp = crate::mcp::handle_tools_call(Some(json!(1)), params, &state).await;
+            let result = resp
+                .result
+                .unwrap_or_else(|| panic!("{tool} sur `{chemin}` : pas de résultat"));
+            let text = result["content"][0]["text"].as_str().unwrap_or_default();
+            assert_eq!(
+                result["isError"], true,
+                "{tool} sur `{chemin}` doit être refusé : {text}"
+            );
+            assert!(
+                text.contains("VNL-SBX-001"),
+                "{tool} sur `{chemin}` doit être refusé par la garde de confinement : {text}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&victim).unwrap(),
+                "SECRET",
+                "{tool} sur `{chemin}` a modifié la sentinelle hors racine"
+            );
+        }
+    }
+
+    // Table (outil, arguments, chemin) du Scenario tout_dispatch_de_fichier_confine_son_chemin.
+    // Les écritures ne reçoivent que la sentinelle (cf. commentaire du test).
+    fn cas_fichiers_hostiles(
+        victim_abs: &str,
+        victim_rel: &str,
+    ) -> Vec<(&'static str, Value, String)> {
+        use serde_json::json;
+        let mut cas: Vec<(&'static str, Value, String)> = Vec::new();
+        for p in [victim_abs, victim_rel, "/etc/passwd", "../../x"] {
+            cas.push(("read_file", json!({ "path": p }), p.to_string()));
+            cas.push(("list_directory", json!({ "path": p }), p.to_string()));
+            cas.push((
+                "find_files",
+                json!({ "pattern": "*", "path": p }),
+                p.to_string(),
+            ));
+            cas.push((
+                "search",
+                json!({ "pattern": "SECRET", "path": p }),
+                p.to_string(),
+            ));
+        }
+        for p in [victim_abs, victim_rel] {
+            cas.push((
+                "write_file",
+                json!({ "path": p, "content": "PWNED" }),
+                p.to_string(),
+            ));
+            cas.push((
+                "edit_file",
+                json!({ "path": p, "old_string": "SECRET", "new_string": "PWNED" }),
+                p.to_string(),
+            ));
+            cas.push(("delete_file", json!({ "path": p }), p.to_string()));
+        }
+        cas
+    }
 }

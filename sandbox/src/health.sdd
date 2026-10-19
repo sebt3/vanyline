@@ -79,6 +79,16 @@ Exposes:
     `computing` (un calcul est en cours ; `report` est le dernier terminé, `null` pendant le
     tout premier), `fresh` (aucune modification depuis le dernier calcul terminé), `stale`
     (modifications survenues depuis, nouveau calcul planifié ou en cours).
+  @HealthSummary — `{ status: CheckStatus, coverage_percent: Option<f64>, files:
+    Vec<{ path: String, percent: f64 }> }` : DÉRIVÉS du `report` au moment du `snapshot()`, jamais
+    calculés par un consommateur (décision 2026-10-18 : `HealthReport::status()` et
+    `CoverageTotals::percent()` sont des méthodes, non sérialisées dans `HealthReport` — type
+    généré par ts-rs, inchangé). `status` = `report.status()` ; `coverage_percent` =
+    `report.coverage.totals().percent()` (`null` quand `coverage` est absente : « pas de mesure »
+    ≠ « 0 % ») ; `files` = pourcentage de couverture de chaque fichier (même formule que
+    `percent()`, `100.0` si `lines_found == 0`), TRIÉS par pourcentage croissant puis par `path`
+    (les moins couverts d'abord), `[]` quand `coverage` est absente. @HealthState porte
+    `summary: Option<HealthSummary>`, `null` exactement quand `report` est `null`.
   Routes (routeur protégé de ./lib.rs, jeton de l'Owner, comme `/git/*` et `/mcp`) :
     `GET /code-health` — 200 + @HealthState, TOUJOURS (jamais 404, y compris pendant le tout
       premier calcul : `phase: "computing"`, `report: null`).
@@ -260,6 +270,22 @@ Scenario: etat_toujours_disponible_des_le_demarrage
   Given un pod qui vient de démarrer, premier calcul en cours
   When `GET /code-health`
   Then 200 avec `phase: "computing"` et `report: null`, jamais 404
+
+Scenario: resume_derive_du_rapport
+  Given un rapport avec une vérification `failed`, couverture totale 50 % et deux fichiers à 20 % et 80 %
+  When `GET /code-health`
+  Then `summary.status` vaut `failed`, `summary.coverage_percent` vaut 50.0 et `summary.files` liste
+    le fichier à 20 % avant celui à 80 %
+
+Scenario: resume_sans_mesure_de_couverture
+  Given un rapport dont `coverage` est absente
+  When `GET /code-health`
+  Then `summary.coverage_percent` est `null`, `summary.files` est `[]` et `summary.status` est celui de `report.status()`
+
+Scenario: resume_nul_pendant_le_premier_calcul
+  Given le tout premier calcul en cours (`report: null`)
+  When `GET /code-health`
+  Then `summary` est `null`
 
 Scenario: calcul_au_demarrage_puis_fresh
   Given un worktree de test avec un preset factice rapide
