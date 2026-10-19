@@ -7,7 +7,7 @@ Purpose:
   `path = "src/main.rs"`) : ce fichier ne contient AUCUNE logique de reconcile et ne construit
   aucun manifeste — il déclare l'arbre de modules du crate (@owner, @project, @sandbox,
   @application, @error — racine de binaire, pas de cible lib) et tient trois responsabilités :
-  (1) parser la configuration de démarrage (@Cli, clap derive — 14 drapeaux longs, chacun
+  (1) parser la configuration de démarrage (@Cli, clap derive — 16 drapeaux longs, chacun
   surchargeable par variable d'environnement, défauts figés à la compilation via
   `env!("CARGO_PKG_VERSION")` / `concat!`), avec un mode spécial `--crds` qui imprime les
   quatre manifests CRD sur stdout puis quitte sans jamais toucher le cluster (source de
@@ -43,7 +43,7 @@ Structure:
   ./main.rs — quatre blocs physiques : ligne 1, exemption `cfg_attr(test, allow(...))` (seule
     ligne modifiable par /tooling.sdd pour ce fichier, ligne 21 de sa section `Can modify`) ;
     déclarations de modules privés @application/@error/@owner/@project/@sandbox (lignes 3-7) ;
-    @Cli (derive @clap::Parser, `#[command(name = "vanyline-controller")]`, 14 champs
+    @Cli (derive @clap::Parser, `#[command(name = "vanyline-controller")]`, 16 champs
     commentés) ; @main (`#[tokio::main]`, ordre strict : parse → branche `--crds` + return →
     init tracing → log de démarrage → client kube (exit 1 à l'échec) → composition des deux
     images → quatre `Context` + quatre streams `.run(...).for_each(warn)` → @tokio::join!).
@@ -56,7 +56,7 @@ Must:
   Déclarer les cinq modules privés @application, @error, @owner, @project, @sandbox :
     ./main.rs est la racine du crate binaire, aucun autre fichier ne déclare ces modules.
   Dériver @Cli de @clap::Parser avec `#[command(name = "vanyline-controller")]` et exactement
-    les 14 drapeaux listés en @Exposes, chacun avec sa variable d'env et son défaut tels
+    les 16 drapeaux listés en @Exposes, chacun avec sa variable d'env et son défaut tels
     qu'écrits (défauts = expressions compilées : `env!("CARGO_PKG_VERSION")` nue pour
     sandbox/app, `concat!("...", "v", env!("CARGO_PKG_VERSION"))` pour les huit toolchain/LSP) ;
     la priorité flag > env > défaut est celle de clap feature `env`.
@@ -114,6 +114,8 @@ Depends on:
     @tokio::join!.
   `kube` 4 (features `runtime`, `derive`) — @kube::Client::try_default ; les flux @Controller
     sont fabriqués par les modules sœurs.
+  `http` 1 — construction de la requête de découverte `GET /.well-known/openid-configuration`
+    (@kube::Client::request_text) pour déduire l'issuer des jetons de ServiceAccount.
   `futures` 0.3 — @StreamExt::for_each sur chaque flux de reconcileur.
   `tracing` 0.1 + `tracing-subscriber` 0.3 (features `fmt` par défaut, `env-filter`) —
     @fmt::try_init, macros `info`/`warn`/`error`, lecture de `RUST_LOG`.
@@ -164,6 +166,16 @@ Exposes:
       sont indissociables et le moteur ne doit pas dériver à un redémarrage) ; image du
       StatefulSet Restate des Applications portant `spec.restate`, consommée par
       `application::Context::restate_image` (contrat ./application.sdd « Moteur de workflow »)
+    - @sa_issuer : `--sa-issuer` / `SA_ISSUER` / SANS défaut (`Option<String>`) — SURCHARGE
+      explicite de l'issuer des jetons de ServiceAccount posé en `VNL_TOKEN_ISSUER` sur les
+      pods sandbox ; absent ⇒ l'issuer est DÉDUIT une fois au démarrage par la découverte de
+      l'apiserver (`GET /.well-known/openid-configuration`, champ `issuer`), décision 2026-10-04
+      (contrat ./sandbox.sdd « token_issuer »)
+    - @ops_allowed_namespaces : `--ops-allowed-namespaces` / `VNL_OPS_ALLOWED_NAMESPACES` /
+      SANS défaut (`Option<String>`, liste de namespaces séparés par des virgules) — restreint
+      la règle d'ingress du port d'exploitation de la NetworkPolicy des sandboxes ; absent ⇒
+      toute source interne au cluster (contrat ./sandbox.sdd « Port d'exploitation ») ; une valeur VIDE (ou
+      uniquement des virgules/espaces) équivaut à l'absence du drapeau (décidé 2026-10-18)
   @main — entrée asynchrone sans argument, ne retournant jamais de valeur (runtime tokio
     multi-thread par défaut du macro @tokio::main).
   Modules privés déclarés ici (tout le crate est arrimé à ce fichier) : @application,
@@ -172,10 +184,10 @@ Exposes:
   Rien d'autre : aucun item `pub` dans ./main.rs.
 
 Accepts:
-  Ligne de commande : le binaire accepte exclusivement les 14 flags de @Exposes et les
+  Ligne de commande : le binaire accepte exclusivement les 16 flags de @Exposes et les
     drapeaux standards dérivés par clap (`--help`) ; AUCUN `--version` n'est généré (aucun
     attribut `version` sur @Cli). Toute autre entrée est une erreur de parse.
-  Environnement : les 13 variables `env = ...` listées ci-dessus sont lues par clap, priorité
+  Environnement : les 15 variables `env = ...` listées ci-dessus sont lues par clap, priorité
     stricte flag > variable d'env > défaut compilé. `RUST_LOG` est lue par tracing-subscriber
     (feature `env-filter`) pour filtrer les logs.
   Mode reconcile : des credentials découvrables par @kube::Client::try_default — soit le
@@ -245,15 +257,15 @@ Tasks:
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-26 (comportement actuel du code, rien de
     nouveau n'est supposé).
-  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : amender la liste (quatorze) et le Scenario ; épingler le défaut de `--restate-image`. (Question d'origine : Liste des drapeaux obsolète depuis S6c (2026-10-13) : `--restate-image` /
+  [ ] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : amender la liste (seize) et le Scenario ; épingler le défaut de `--restate-image`. (Question d'origine : Liste des drapeaux obsolète depuis S6c (2026-10-13) : `--restate-image` /
     `RESTATE_IMAGE` a été ajouté au code (défaut
     `docker.restate.dev/restatedev/restate:latest`, image du StatefulSet Restate des
     Applications, contrat dans ./application.sdd) — la spec dit encore « 13 drapeaux » et le
     Scenario `cli_aide_liste_les_treize_drapeaux` énumère treize flags. Amender la liste
-    (quatorze) et le Scenario ; par la même occasion, trancher l'épinglement du défaut
+    (seize) et le Scenario ; par la même occasion, trancher l'épinglement du défaut
     (`:latest` non versionné — même famille de question que l'asymétrie `v` ci-dessous).)
-    — spec amendée 2026-10-14 : quatorze drapeaux partout, Scenario renommé
-    @cli_aide_liste_les_quatorze_drapeaux, défaut épinglé `1.7.13` ; reste code + tests.
+    — spec amendée 2026-10-14 : seize drapeaux partout, Scenario renommé
+    @cli_aide_liste_les_seize_drapeaux, défaut épinglé `1.7.13` ; reste code + tests.
   [?] `print!` du mode `--crds` (ligne 144) SANS `#[allow(clippy::print_stdout)]` alors que
     `print_stdout` est `deny` dans `[workspace.lints.clippy]` : le harnais ne semble pas mordre
     (CI clippy verrouillée verte, cf. /tooling.sdd ; mécanisme d'exonération non identifié —
@@ -301,7 +313,7 @@ Tasks:
   [ ] Harnais de tests du binaire à trancher avant le premier `implementer` : le crate n'a pas
     de répertoire `tests/` et ./main.rs aucun module `tests`. Proposition : Scenarios
     `crds_imprime_quatre_manifests_et_sort`, `crds_sort_avant_tracing_et_client_kube`,
-    `cli_drapeau_inconnu_exit_2`, `cli_aide_liste_les_quatorze_drapeaux`,
+    `cli_drapeau_inconnu_exit_2`, `cli_aide_liste_les_seize_drapeaux`,
     `cli_version_absente_rejelee`, `client_kube_injoignable_exit_1` en test d'intégration
     `controller/tests/main_cli.rs` lançant le binaire via
     `env!("CARGO_BIN_EXE_vanyline-controller")` (aucun cluster requis — l'absence de cluster
@@ -345,7 +357,7 @@ Scenario: crds_sort_avant_tracing_et_client_kube
 
 Scenario: cli_defauts_compiles_sans_env
   Given @Cli visé par @Cli::try_parse_from avec le seul argv `["vanyline-controller"]`, dans un
-    environnement où les treize variables d'env du controller sont absentes
+    environnement où les quinze variables d'env du controller sont absentes
   When le parse réussit
   Then `crds` est `false`, `sandbox_image_tag` et `app_image_tag` valent
     `env!("CARGO_PKG_VERSION")` (version nue), `sandbox_image_repo` vaut
@@ -377,12 +389,12 @@ Scenario: cli_drapeau_inconnu_exit_2
   Then le code de sortie est 2 (erreur de parse clap par défaut), l'usage est écrit sur stderr,
     et AUCUN log de démarrage ni tentative de construction de client kube n'apparaît
 
-Scenario: cli_aide_liste_les_quatorze_drapeaux
+Scenario: cli_aide_liste_les_seize_drapeaux
   Given le binaire `vanyline-controller`
   When il est invoqué avec `--help`
-  Then le code de sortie est 0 et stdout énumère les quatorze flags longs (`--crds`,
+  Then le code de sortie est 0 et stdout énumère les seize flags longs (`--crds`,
     `--sandbox-image-tag`, `--sandbox-image-repo`, les quatre `--toolchain-image-*`, les
-    quatre `--lsp-image-*`, `--app-image-tag`, `--app-image-repo`, `--restate-image`) sous le
+    quatre `--lsp-image-*`, `--app-image-tag`, `--app-image-repo`, `--restate-image`, `--sa-issuer`, `--ops-allowed-namespaces`) sous le
     nom de commande `vanyline-controller`
 
 Scenario: cli_version_absente_rejelee

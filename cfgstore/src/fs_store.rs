@@ -78,9 +78,34 @@ impl FsConfigStore {
         let content = yaml_serde::to_string(&raw).map_err(|e| {
             CfgStoreError::WriteError(format!("Failed to serialize {}: {}", path.display(), e))
         })?;
-        std::fs::write(&path, content).map_err(CfgStoreError::from)?;
+        write_private_file(&path, content.as_bytes()).map_err(CfgStoreError::from)?;
         Ok(())
     }
+}
+
+/// Écrit `path` en 0600 (Unix) : le mode est fixé à la création via
+/// `OpenOptions::mode`, puis forcé par `set_permissions` pour un fichier
+/// préexistant (dont `mode` n'altère pas les permissions). Le fichier n'est
+/// jamais lisible par tous, y compris pendant la réécriture. Hors Unix :
+/// écriture ordinaire.
+#[cfg(unix)]
+fn write_private_file(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(content)
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, content)
 }
 
 // --- Formes brutes d'une entrée de map nommée dans config.yaml : mêmes
@@ -4628,5 +4653,58 @@ Tu es un agent d'implémentation.",
         assert_eq!(t.prompt.as_deref(), Some("new p"));
         assert_eq!(t.name, "ts");
         assert!(store.get_toolset("rebaptise").await.is_err());
+    }
+
+    // Scenario config_yaml_ecrit_en_0600 : création puis réécriture d'un
+    // config.yaml préexistant en 0644 ; le fichier finit en 0600 dans les deux cas.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn config_yaml_ecrit_en_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let config = tmp.path().join("config.yaml");
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // Création sur store vierge.
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "p1".to_string(),
+                    provider_type: ProviderType::OpenaiCompatible,
+                    endpoint: "http://x".to_string(),
+                    api_key: Some("key123".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            mode(&config),
+            0o600,
+            "création : config.yaml doit être 0600"
+        );
+
+        // Fichier préexistant en 0644, puis réécriture.
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode(&config), 0o644);
+        store
+            .update_provider(
+                Layer::Global,
+                "p1",
+                serde_json::json!({"endpoint": "http://y"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            mode(&config),
+            0o600,
+            "réécriture : config.yaml doit redevenir 0600"
+        );
     }
 }

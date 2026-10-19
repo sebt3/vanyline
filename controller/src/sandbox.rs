@@ -32,8 +32,8 @@ use crate::project::{
     WORKSPACE_MOUNT_PATH, cache_dir_name, effective_caches, effective_pvc_name, worktree_path,
 };
 use vanyline_crds::{
-    Application, EgressPort, EgressRule, LspSpec, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
-    Toolchain, service_name,
+    Application, EgressPort, EgressRule, LspSpec, MCP_PORT, OPS_PORT, Owner, Project, Sandbox,
+    SandboxStatus, Toolchain, service_name,
 };
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
@@ -409,6 +409,9 @@ pub struct SandboxPodContext {
     pub owner_name: String,
     pub owner_pvc_name: String,
     pub owner_service_account: String,
+    /// Issuer des jetons de `ServiceAccount` (`VNL_TOKEN_ISSUER` du pod) : valeur
+    /// de `--sa-issuer` ou déduite de la découverte de l'apiserver (main.rs).
+    pub token_issuer: String,
     /// Image sandbox par défaut (env `SANDBOX_IMAGE` du controller), utilisée
     /// quand `sandbox.spec.image` est `None`.
     pub default_image: String,
@@ -433,8 +436,30 @@ pub struct SandboxPodContext {
     pub lsp_image_python: String,
 }
 
+/// Issuer obligatoire pour réconcilier une Sandbox : sans lui, aucune Sandbox
+/// n'est réconciliée (erreur utilisateur VNL-CTL-011, aucun Pod créé).
+fn require_token_issuer(issuer: Option<&str>) -> Result<&str, ControllerError> {
+    match issuer {
+        Some(issuer) if !issuer.is_empty() => Ok(issuer),
+        _ => Err(ControllerError::SandboxIssuerUnavailable {
+            reason: "--sa-issuer absent et découverte OIDC de l'apiserver non aboutie".to_string(),
+        }),
+    }
+}
+
+/// Namespace de la Sandbox, requis pour l'identité de l'Owner (`VNL_OWNER_SUBJECT`).
+/// Absence ⇒ VNL-CTL-012, aucun repli (sandbox.sdd, Scenario `sandbox_sans_namespace_est_une_erreur`).
+fn require_namespace(sandbox: &Sandbox) -> Result<String, ControllerError> {
+    sandbox
+        .namespace()
+        .ok_or_else(|| ControllerError::SandboxNamespaceMissing {
+            sandbox: sandbox.name_any(),
+        })
+}
+
 /// Construit le Pod sandbox : home Owner + worktree + caches + toolchains,
-/// `--no-auth` (voir décisions de cette tâche), probes `/health`, labels
+/// identité `VNL_OWNER_SUBJECT`/`VNL_TOKEN_ISSUER` (sans argument d'auth), ports
+/// `mcp`/`ops`, sondes `/health` sur `ops`, labels
 /// `vanyline.solidite.fr/{owner,project,sandbox}`, `ownerReference` vers la
 /// Sandbox (GC en cascade).
 // tooling.sdd D4 — sandbox.sdd §"Construire le Pod" : @build_sandbox_pod déroule le
@@ -656,6 +681,26 @@ pub fn build_sandbox_pod(
         }
     }
 
+    // Identité : le SEUL jeton accepté par la sandbox est celui du SA de l'Owner.
+    // Sans namespace, `reconcile` refuse en amont (`require_namespace`, VNL-CTL-012) : le
+    // sujet n'est alors jamais inventé ; l'env est omise et la sandbox refuse de démarrer
+    // (`sandbox/src/config.rs`, `--owner-subject` requis) — fail-closed.
+    if let Some(namespace) = sandbox.namespace() {
+        env.push(EnvVar {
+            name: "VNL_OWNER_SUBJECT".to_string(),
+            value: Some(format!(
+                "system:serviceaccount:{namespace}:{}",
+                ctx.owner_service_account
+            )),
+            ..Default::default()
+        });
+    }
+    env.push(EnvVar {
+        name: "VNL_TOKEN_ISSUER".to_string(),
+        value: Some(ctx.token_issuer.clone()),
+        ..Default::default()
+    });
+
     let mut labels = BTreeMap::new();
     labels.insert(
         "vanyline.solidite.fr/owner".to_string(),
@@ -673,7 +718,7 @@ pub fn build_sandbox_pod(
     let probe = Probe {
         http_get: Some(HTTPGetAction {
             path: Some("/health".to_string()),
-            port: IntOrString::Int(MCP_PORT),
+            port: IntOrString::Int(OPS_PORT),
             ..Default::default()
         }),
         initial_delay_seconds: Some(5),
@@ -704,12 +749,18 @@ pub fn build_sandbox_pod(
                         .clone()
                         .unwrap_or_else(|| ctx.default_image.clone()),
                 ),
-                args: Some(vec!["--no-auth".to_string()]),
-                ports: Some(vec![ContainerPort {
-                    container_port: MCP_PORT,
-                    name: Some("mcp".to_string()),
-                    ..Default::default()
-                }]),
+                ports: Some(vec![
+                    ContainerPort {
+                        container_port: MCP_PORT,
+                        name: Some("mcp".to_string()),
+                        ..Default::default()
+                    },
+                    ContainerPort {
+                        container_port: OPS_PORT,
+                        name: Some("ops".to_string()),
+                        ..Default::default()
+                    },
+                ]),
                 env: Some(env),
                 volume_mounts: Some(mounts),
                 resources: sandbox.spec.resources.clone(),
@@ -730,6 +781,11 @@ const SERVICE_PORT_NAME: &str = "mcp";
 
 pub struct Context {
     pub client: Client,
+    /// Issuer des jetons de `ServiceAccount` (`--sa-issuer` ou découverte au
+    /// démarrage). `None` ⇒ aucune Sandbox ne se réconcilie (erreur explicite).
+    pub token_issuer: Option<String>,
+    /// Namespaces autorisés à joindre le port d'exploitation (vide ⇒ sans restriction).
+    pub ops_allowed_namespaces: Vec<String>,
     pub default_image: String,
     /// Image toolchain par défaut pour "rust" (env `TOOLCHAIN_IMAGE_RUST`).
     pub toolchain_image_rust: String,
@@ -1105,6 +1161,39 @@ fn restate_egress_rule(application_name: &str, app_namespace: &str) -> NetworkPo
     }
 }
 
+/// Règle ingress du port d'exploitation `OPS_PORT` seul. Sans `from` si aucun
+/// namespace n'est configuré (toute source interne au cluster) ; sinon un peer
+/// par namespace autorisé (`kubernetes.io/metadata.name`).
+fn ops_ingress_rule(ops_allowed_namespaces: &[String]) -> NetworkPolicyIngressRule {
+    let from = if ops_allowed_namespaces.is_empty() {
+        None
+    } else {
+        Some(
+            ops_allowed_namespaces
+                .iter()
+                .map(|ns| NetworkPolicyPeer {
+                    namespace_selector: Some(LabelSelector {
+                        match_labels: Some(BTreeMap::from([(
+                            "kubernetes.io/metadata.name".to_string(),
+                            ns.clone(),
+                        )])),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    };
+    NetworkPolicyIngressRule {
+        from,
+        ports: Some(vec![NetworkPolicyPort {
+            port: Some(IntOrString::Int(OPS_PORT)),
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }]),
+    }
+}
+
 /// `NetworkPolicy` : cible le Pod de cette Sandbox, autorise l'ingress
 /// uniquement depuis (1) les pods du même namespace portant
 /// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
@@ -1119,6 +1208,7 @@ pub fn build_sandbox_netpol(
     sandbox: &Sandbox,
     owner_name: &str,
     application: Option<&Application>,
+    ops_allowed_namespaces: &[String],
 ) -> NetworkPolicy {
     let mut pod_selector_labels = BTreeMap::new();
     pod_selector_labels.insert(
@@ -1187,14 +1277,19 @@ pub fn build_sandbox_netpol(
                 ..Default::default()
             }),
             policy_types: Some(vec!["Ingress".to_string()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(from),
-                ports: Some(vec![NetworkPolicyPort {
-                    port: Some(IntOrString::Int(MCP_PORT)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                }]),
-            }]),
+            ingress: Some(vec![
+                NetworkPolicyIngressRule {
+                    from: Some(from),
+                    ports: Some(vec![NetworkPolicyPort {
+                        port: Some(IntOrString::Int(MCP_PORT)),
+                        protocol: Some("TCP".to_string()),
+                        ..Default::default()
+                    }]),
+                },
+                // Port d'exploitation : seule règle qui l'ouvre (sondes kubelet).
+                // Sans `from` par défaut ; restreinte aux namespaces configurés sinon.
+                ops_ingress_rule(ops_allowed_namespaces),
+            ]),
             ..Default::default()
         }),
     }
@@ -1332,6 +1427,8 @@ async fn fetch_application(
 // (status figé en dernier, server-side apply).
 #[allow(clippy::too_many_lines)]
 async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
+    // Sans issuer, aucune ressource n'est créée (sandbox_non_reconciliable_sans_issuer).
+    let token_issuer = require_token_issuer(ctx.token_issuer.as_deref())?.to_string();
     let project = fetch_project(sandbox, ctx, ns).await?;
     if !project.status.as_ref().is_some_and(|s| s.cloned) {
         return Err(ControllerError::ProjectNotReady {
@@ -1412,6 +1509,7 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             owner_name: project.spec.owner.clone(),
             owner_pvc_name,
             owner_service_account,
+            token_issuer: token_issuer.clone(),
             default_image: ctx.default_image.clone(),
             toolchain_image_rust: ctx.toolchain_image_rust.clone(),
             toolchain_image_node: ctx.toolchain_image_node.clone(),
@@ -1448,7 +1546,12 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         .await?;
 
     let netpols: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
-    let netpol = build_sandbox_netpol(sandbox, &project.spec.owner, app_opt.as_ref());
+    let netpol = build_sandbox_netpol(
+        sandbox,
+        &project.spec.owner,
+        app_opt.as_ref(),
+        &ctx.ops_allowed_namespaces,
+    );
     netpols
         .patch(
             &netpol_name(&sandbox.name_any()),
@@ -1568,7 +1671,8 @@ pub async fn reconcile(
     sandbox: Arc<Sandbox>,
     ctx: Arc<Context>,
 ) -> Result<Action, ControllerError> {
-    let ns = sandbox.namespace().unwrap_or_else(|| "default".to_string());
+    // Namespace requis avant toute construction (VNL-CTL-012, sans repli « default »).
+    let ns = require_namespace(&sandbox)?;
     let api: Api<Sandbox> = Api::namespaced(ctx.client.clone(), &ns);
     finalizer(&api, FINALIZER, sandbox, |event| async {
         match event {
@@ -1615,6 +1719,7 @@ mod tests {
             owner_name: "alice".to_string(),
             owner_pvc_name: "owner-alice-home".to_string(),
             owner_service_account: "owner-alice".to_string(),
+            token_issuer: "https://k8s.example".to_string(),
             default_image: "registry.example/vanyline-sandbox:latest".to_string(),
             toolchain_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
             toolchain_image_node: "docker.io/library/node:trixie-slim".to_string(),
@@ -2162,20 +2267,127 @@ mod tests {
         assert_eq!(container2.image, Some("custom:tag".to_string()));
     }
 
-    #[test]
-    fn no_auth_arg() {
-        let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None);
-        let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
-
-        let container = pod.spec.as_ref().unwrap().containers[0].clone();
-        let args = container.args.as_ref().expect("should have args");
-        assert_eq!(args, &["--no-auth".to_string()]);
+    /// Valeur d'une variable d'env du container, `None` si absente.
+    fn env_of(container: &Container, key: &str) -> Option<String> {
+        container
+            .env
+            .as_ref()?
+            .iter()
+            .find(|e| e.name == key)
+            .and_then(|e| e.value.clone())
     }
 
+    // Scenario: pod_sans_aucun_contournement_d_auth
     #[test]
-    fn mcp_port_and_probes() {
+    fn pod_sans_aucun_contournement_d_auth() {
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let app = make_application("main");
+        // Deux Sandboxes : l'Owner de la première référence une Application (Ingress et
+        // NetworkPolicy construits avec elle), celui de la seconde n'en référence aucune.
+        for (name, application) in [("demo-branch", Some(&app)), ("autre-branche", None)] {
+            let sandbox = make_sandbox(name, vec![], None);
+            let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
+            let container = pod.spec.as_ref().unwrap().containers[0].clone();
+            let args = container.args.clone().unwrap_or_default();
+            assert!(
+                !args.iter().any(|a| a.contains("auth")),
+                "aucun drapeau d'authentification dans args : {args:?}"
+            );
+            assert!(container.command.is_none(), "jamais de command");
+            assert_eq!(
+                env_of(&container, "VNL_OWNER_SUBJECT"),
+                Some("system:serviceaccount:ns:owner-alice".to_string())
+            );
+            assert_eq!(
+                env_of(&container, "VNL_TOKEN_ISSUER"),
+                Some("https://k8s.example".to_string())
+            );
+
+            // L'Application (quand elle existe) ne réintroduit aucun contournement d'auth :
+            // aucune annotation d'Ingress ne porte de clé d'authentification.
+            if let Some(app) = application {
+                let ingress = build_sandbox_ingress(&sandbox, app);
+                let annotations = ingress.metadata.annotations.clone().unwrap_or_default();
+                assert!(
+                    annotations
+                        .keys()
+                        .all(|k| !k.to_lowercase().contains("auth")),
+                    "annotations d'Ingress sans contournement d'auth : {annotations:?}"
+                );
+            }
+        }
+    }
+
+    // Scenario: pod_identite_de_l_owner_dans_l_env
+    #[test]
+    fn pod_identite_de_l_owner_dans_l_env() {
+        let mut sandbox = make_sandbox("demo-branch", vec![], None);
+        sandbox.meta_mut().namespace = Some("ns-1".into());
+        let project = make_project(None);
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
+        let spec = pod.spec.as_ref().unwrap();
+        let container = spec.containers[0].clone();
+        assert_eq!(
+            env_of(&container, "VNL_OWNER_SUBJECT"),
+            Some("system:serviceaccount:ns-1:owner-alice".to_string())
+        );
+        assert_eq!(
+            env_of(&container, "VNL_TOKEN_ISSUER"),
+            Some("https://k8s.example".to_string())
+        );
+        assert_eq!(spec.service_account_name, Some("owner-alice".to_string()));
+    }
+
+    // Scenario: sandbox_sans_namespace_est_une_erreur
+    #[test]
+    fn sandbox_sans_namespace_est_une_erreur() {
+        let mut sandbox = make_sandbox("demo-branch", vec![], None);
+        sandbox.meta_mut().namespace = None;
+        let err =
+            require_namespace(&sandbox).expect_err("sans namespace ⇒ erreur, jamais de repli");
+        assert!(
+            matches!(&err, ControllerError::SandboxNamespaceMissing { sandbox } if sandbox == "demo-branch"),
+            "variante SandboxNamespaceMissing attendue, reçu : {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "VNL-CTL-012: sandbox 'demo-branch' has no namespace — cannot build the Owner identity"
+        );
+
+        // Le Pod construit sans namespace n'invente jamais un sujet d'Owner.
+        let project = make_project(None);
+        let pod = build_sandbox_pod(&sandbox, &project, &make_ctx(), None);
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        assert_eq!(
+            env_of(&container, "VNL_OWNER_SUBJECT"),
+            None,
+            "aucun sujet inventé (ni « default », ni namespace vide)"
+        );
+
+        // Avec namespace : le namespace de la CR est retenu tel quel.
+        sandbox.meta_mut().namespace = Some("ns-1".into());
+        assert_eq!(require_namespace(&sandbox).ok(), Some("ns-1".to_string()));
+    }
+
+    // Scenario: sandbox_non_reconciliable_sans_issuer
+    #[test]
+    fn sandbox_non_reconciliable_sans_issuer() {
+        let err = require_token_issuer(None).expect_err("sans issuer, pas de réconciliation");
+        assert!(
+            matches!(err, ControllerError::SandboxIssuerUnavailable { .. }),
+            "erreur utilisateur dédiée attendue, reçu : {err}"
+        );
+        assert_eq!(
+            require_token_issuer(Some("https://k8s.example")).ok(),
+            Some("https://k8s.example")
+        );
+    }
+
+    // Scenario: pod_ports_mcp_et_ops_et_sondes_sur_ops
+    #[test]
+    fn pod_ports_mcp_et_ops_et_sondes_sur_ops() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
@@ -2183,13 +2395,15 @@ mod tests {
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
 
-        // Port
+        // Ports : mcp et ops
         let ports = container.ports.as_ref().expect("should have ports");
-        assert_eq!(ports.len(), 1);
+        assert_eq!(ports.len(), 2);
         assert_eq!(ports[0].container_port, MCP_PORT);
         assert_eq!(ports[0].name, Some("mcp".to_string()));
+        assert_eq!(ports[1].container_port, OPS_PORT);
+        assert_eq!(ports[1].name, Some("ops".to_string()));
 
-        // Probes
+        // Probes readiness ET liveness : GET /health sur le port ops
         let rp = container
             .readiness_probe
             .as_ref()
@@ -2198,23 +2412,13 @@ mod tests {
             .liveness_probe
             .as_ref()
             .expect("should have liveness probe");
-        assert_eq!(
-            rp.http_get.as_ref().unwrap().path,
-            Some("/health".to_string())
-        );
-        assert_eq!(
-            lg.http_get.as_ref().unwrap().path,
-            Some("/health".to_string())
-        );
-        // timings des sondes (Scenario mcp_port_and_probes)
-        assert_eq!(rp.initial_delay_seconds, Some(5));
-        assert_eq!(rp.period_seconds, Some(10));
-        assert_eq!(lg.initial_delay_seconds, Some(5));
-        assert_eq!(lg.period_seconds, Some(10));
-        assert_eq!(
-            rp.http_get.as_ref().unwrap().port,
-            IntOrString::Int(MCP_PORT)
-        );
+        for probe in [rp, lg] {
+            let http = probe.http_get.as_ref().unwrap();
+            assert_eq!(http.path, Some("/health".to_string()));
+            assert_eq!(http.port, IntOrString::Int(OPS_PORT));
+            assert_eq!(probe.initial_delay_seconds, Some(5));
+            assert_eq!(probe.period_seconds, Some(10));
+        }
     }
 
     #[test]
@@ -2715,7 +2919,7 @@ mod tests {
     fn build_sandbox_netpol_shape() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let app: Option<Application> = None;
-        let netpol = build_sandbox_netpol(&sandbox, "alice", app.as_ref());
+        let netpol = build_sandbox_netpol(&sandbox, "alice", app.as_ref(), &[]);
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let pod_sel = spec
@@ -2734,7 +2938,12 @@ mod tests {
         );
 
         let ingress = spec.ingress.as_ref().expect("should have ingress");
-        assert_eq!(ingress.len(), 1);
+        // Règle 0 : port MCP (inchangée) ; règle 1 : port ops seul (netpol_port_ops_*).
+        assert_eq!(ingress.len(), 2);
+        assert_eq!(
+            ingress[1].ports.as_ref().unwrap()[0].port,
+            Some(IntOrString::Int(OPS_PORT))
+        );
 
         let from = ingress[0].from.as_ref().expect("should have from");
         assert_eq!(from.len(), 2);
@@ -2793,7 +3002,7 @@ mod tests {
                 ),
             ]),
         });
-        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app));
+        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app), &[]);
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let ingress = spec.ingress.as_ref().expect("should have ingress");
@@ -2939,6 +3148,113 @@ mod tests {
 
         // read_only must NOT be Some(true)
         assert_ne!(bare_repo_mount.read_only, Some(true));
+    }
+
+    // Scenario: netpol_port_ops_ouvert_au_cluster_par_defaut
+    #[test]
+    fn netpol_port_ops_ouvert_au_cluster_par_defaut() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", None, &[]);
+        let rules = netpol
+            .spec
+            .as_ref()
+            .unwrap()
+            .ingress
+            .clone()
+            .expect("ingress");
+        assert_eq!(rules.len(), 2, "règle MCP inchangée + règle ops");
+        let mcp_ports = rules[0].ports.as_ref().unwrap();
+        assert_eq!(mcp_ports[0].port, Some(IntOrString::Int(MCP_PORT)));
+        let ops = &rules[1];
+        assert!(ops.from.is_none(), "ops sans from par défaut");
+        let ops_ports = ops.ports.as_ref().expect("ports ops");
+        assert_eq!(ops_ports.len(), 1);
+        assert_eq!(ops_ports[0].port, Some(IntOrString::Int(OPS_PORT)));
+        assert_eq!(ops_ports[0].protocol.as_deref(), Some("TCP"));
+    }
+
+    // Scenario: netpol_port_ops_restreinte_par_env
+    #[test]
+    fn netpol_port_ops_restreinte_par_env() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let allowed = vec!["monitoring".to_string(), "kydah-core".to_string()];
+        let netpol = build_sandbox_netpol(&sandbox, "alice", None, &allowed);
+        let rules = netpol
+            .spec
+            .as_ref()
+            .unwrap()
+            .ingress
+            .clone()
+            .expect("ingress");
+        let from = rules[1].from.as_ref().expect("ops restreint");
+        let names: Vec<String> = from
+            .iter()
+            .filter_map(|p| {
+                p.namespace_selector
+                    .as_ref()?
+                    .match_labels
+                    .as_ref()?
+                    .get("kubernetes.io/metadata.name")
+                    .cloned()
+            })
+            .collect();
+        assert_eq!(names, allowed);
+        assert_eq!(from.len(), 2, "uniquement les deux namespaces autorisés");
+        assert_eq!(
+            rules[1].ports.as_ref().unwrap()[0].port,
+            Some(IntOrString::Int(OPS_PORT))
+        );
+    }
+
+    // Scenario: port_ops_jamais_publie
+    #[test]
+    fn port_ops_jamais_publie() {
+        // Owner référençant une Application : Service, Ingress et NetworkPolicy construits.
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let app = make_application("main");
+        let service = build_sandbox_service(&sandbox);
+        let ingress = build_sandbox_ingress(&sandbox, &app);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app), &[]);
+
+        // Service : chaque port (numéro et cible) est MCP_PORT, jamais OPS_PORT.
+        let svc_ports = service.spec.as_ref().unwrap().ports.clone().unwrap();
+        assert!(!svc_ports.is_empty(), "le Service publie au moins mcp");
+        for p in &svc_ports {
+            assert_ne!(p.port, OPS_PORT, "Service.port ne doit pas être OPS_PORT");
+            assert_eq!(
+                p.target_port,
+                Some(IntOrString::Int(MCP_PORT)),
+                "Service.targetPort doit être MCP_PORT, jamais OPS_PORT"
+            );
+        }
+
+        // Ingress : le backend pointe sur MCP_PORT, aucune référence à OPS_PORT.
+        let ing_json = serde_json::to_value(&ingress).unwrap();
+        let backend_port = ing_json["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]
+            ["port"]["number"]
+            .clone();
+        assert_eq!(backend_port, serde_json::json!(MCP_PORT));
+        assert!(
+            !serde_json::to_string(&ingress)
+                .unwrap()
+                .contains(&OPS_PORT.to_string()),
+            "Ingress ne doit pas publier ops"
+        );
+
+        // Contre-épreuve : la règle ops existe bien, et elle n'est que dans la NetworkPolicy.
+        let ops_dans_netpol = netpol
+            .spec
+            .as_ref()
+            .and_then(|s| s.ingress.as_ref())
+            .is_some_and(|rules| {
+                rules.iter().any(|r| {
+                    r.ports.as_ref().is_some_and(|ps| {
+                        ps.iter()
+                            .any(|p| p.port == Some(IntOrString::Int(OPS_PORT)))
+                    })
+                })
+            });
+        assert!(ops_dans_netpol, "la NetworkPolicy porte la règle OPS_PORT");
     }
 
     // ===== netpol_egress_name =====
@@ -4597,6 +4913,8 @@ mod tests {
     fn offline_ctx() -> Arc<Context> {
         Arc::new(Context {
             client: offline_client(),
+            token_issuer: None,
+            ops_allowed_namespaces: Vec::new(),
             default_image: "img:tag".to_string(),
             toolchain_image_rust: String::new(),
             toolchain_image_node: String::new(),

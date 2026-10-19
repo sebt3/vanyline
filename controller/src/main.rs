@@ -1,6 +1,6 @@
 //! Binaire `vanyline-controller` : point d'entrée unique de l'opérateur —
 //! arbre de modules du crate, parsing de la configuration de démarrage
-//! (@Cli, 14 drapeaux), client kube unique et lancement parallèle des quatre
+//! (@Cli, 16 drapeaux), client kube unique et lancement parallèle des quatre
 //! reconcileurs (Owner, Project, Sandbox, Application) (spec : `./main.sdd` ;
 //! les contrats de reconcile vivent dans les modules respectifs).
 
@@ -162,6 +162,71 @@ struct Cli {
         default_value = "docker.restate.dev/restatedev/restate:1.7.13"
     )]
     restate_image: String,
+
+    /// Issuer des jetons de `ServiceAccount` posé en `VNL_TOKEN_ISSUER` sur les
+    /// pods sandbox (surcharge explicite). Absent ⇒ déduit une fois au démarrage
+    /// par la découverte de l'apiserver (`/.well-known/openid-configuration`,
+    /// champ `issuer`). Contrat : `sandbox.sdd` « `token_issuer` ».
+    #[arg(long, env = "SA_ISSUER")]
+    sa_issuer: Option<String>,
+
+    /// Liste de namespaces (séparés par des virgules) autorisés à joindre le
+    /// port d'exploitation `/health` des sandboxes. Absente, vide ou sans nom ⇒
+    /// aucune restriction (toute source interne au cluster). Contrat :
+    /// `sandbox.sdd` « Port d'exploitation ».
+    #[arg(long, env = "VNL_OPS_ALLOWED_NAMESPACES")]
+    ops_allowed_namespaces: Option<String>,
+}
+
+/// Découvre l'issuer des jetons de `ServiceAccount` via la découverte OIDC de
+/// l'apiserver (`GET /.well-known/openid-configuration`, champ `issuer`). Une
+/// seule tentative, au démarrage. `Err(raison)` si la requête échoue, si le
+/// document n'est pas du JSON ou ne porte pas de `issuer` non vide.
+async fn discover_token_issuer(client: &kube::Client) -> Result<String, String> {
+    let req = http::Request::get("/.well-known/openid-configuration")
+        .body(Vec::new())
+        .map_err(|e| format!("requête de découverte invalide : {e}"))?;
+    let body = client
+        .request_text(req)
+        .await
+        .map_err(|e| format!("requête de découverte en échec : {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("document OIDC invalide : {e}"))?;
+    doc.get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .filter(|issuer| !issuer.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "champ `issuer` absent du document OIDC".to_string())
+}
+
+/// Issuer retenu au démarrage : la surcharge `--sa-issuer` (non vide) prime
+/// sans consulter la découverte ; sinon le résultat de la découverte. `None`
+/// si ni l'un ni l'autre (journalisé : les Sandbox ne se réconcilieront pas).
+fn resolve_issuer(flag: Option<String>, discovered: Result<String, String>) -> Option<String> {
+    if let Some(issuer) = flag.map(|f| f.trim().to_string()).filter(|f| !f.is_empty()) {
+        return Some(issuer);
+    }
+    match discovered {
+        Ok(issuer) => Some(issuer),
+        Err(reason) => {
+            tracing::error!(
+                %reason,
+                "issuer des jetons de ServiceAccount inconnu : les Sandbox ne se réconcilieront pas (passer --sa-issuer)"
+            );
+            None
+        }
+    }
+}
+
+/// Parse la liste `VNL_OPS_ALLOWED_NAMESPACES` (séparée par des virgules).
+/// Entrées vides ou blanches ignorées ; valeur vide ou ne contenant que
+/// virgules/espaces ⇒ liste vide ⇒ aucune restriction (sandbox.sdd).
+fn parse_namespaces(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[tokio::main]
@@ -231,8 +296,21 @@ async fn main() {
             }
         });
 
+    // Découverte OIDC seulement si la surcharge --sa-issuer est absente (une fois).
+    let sa_issuer_flag = cli.sa_issuer.clone().filter(|f| !f.trim().is_empty());
+    let discovered = if sa_issuer_flag.is_none() {
+        discover_token_issuer(&client).await
+    } else {
+        Err(String::new())
+    };
+    let token_issuer = resolve_issuer(sa_issuer_flag, discovered);
+
     let sandbox_ctx = Arc::new(sandbox::Context {
         client: client.clone(),
+        token_issuer,
+        ops_allowed_namespaces: parse_namespaces(
+            cli.ops_allowed_namespaces.as_deref().unwrap_or(""),
+        ),
         default_image: sandbox_image.clone(),
         toolchain_image_rust: cli.toolchain_image_rust.clone(),
         toolchain_image_node: cli.toolchain_image_node.clone(),
@@ -253,4 +331,56 @@ async fn main() {
         });
 
     tokio::join!(owner_run, project_run, sandbox_run, application_run);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Scenario-equivalent (main.sdd `Accepts`/`Exposes` — tests unitaires des
+    // fonctions pures ; la découverte réseau reste hors tests, cluster requis).
+    #[test]
+    fn parse_namespaces_liste_et_vide() {
+        assert_eq!(parse_namespaces(""), Vec::<String>::new());
+        assert_eq!(parse_namespaces(" , ,"), Vec::<String>::new());
+        assert_eq!(
+            parse_namespaces("monitoring, kydah-core,"),
+            vec!["monitoring".to_string(), "kydah-core".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_issuer_surcharge_prime_sur_decouverte() {
+        assert_eq!(
+            resolve_issuer(
+                Some("https://surcharge".to_string()),
+                Err("apiserver muet".to_string())
+            ),
+            Some("https://surcharge".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_issuer_decouverte_sans_flag() {
+        assert_eq!(
+            resolve_issuer(None, Ok("https://k8s.example".to_string())),
+            Some("https://k8s.example".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_issuer_flag_vide_utilise_decouverte() {
+        assert_eq!(
+            resolve_issuer(
+                Some("   ".to_string()),
+                Ok("https://k8s.example".to_string())
+            ),
+            Some("https://k8s.example".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_issuer_sans_flag_ni_decouverte_none() {
+        assert_eq!(resolve_issuer(None, Err("pas de issuer".to_string())), None);
+    }
 }

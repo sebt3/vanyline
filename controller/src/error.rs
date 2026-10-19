@@ -47,6 +47,15 @@ pub enum ControllerError {
         "VNL-CTL-010: namespace '{namespace}' is not a vanyline Owner namespace (missing label vanyline.solidite.fr/app-namespace)"
     )]
     NamespaceNotManaged { namespace: String },
+
+    #[error("VNL-CTL-011: cannot determine the service-account token issuer: {reason}")]
+    SandboxIssuerUnavailable { reason: String },
+
+    /// Sandbox sans `metadata.namespace` : l'identité de l'Owner (`VNL_OWNER_SUBJECT`)
+    /// ne peut pas être construite ; aucun repli sur un namespace inventé (sandbox.sdd,
+    /// Scenario `sandbox_sans_namespace_est_une_erreur`, VNL-CTL-012).
+    #[error("VNL-CTL-012: sandbox '{sandbox}' has no namespace — cannot build the Owner identity")]
+    SandboxNamespaceMissing { sandbox: String },
 }
 
 #[cfg(test)]
@@ -66,8 +75,8 @@ mod tests {
     /// Scenario `display_exhaustif_des_marqueurs_vnl_ctl`,
     /// `source_absente_sur_les_cinq_autres_variantes`,
     /// `error_policy_owner_et_application_toujours_trente_secondes` et
-    /// `aucune_erreur_ne_stoppe_le_reconcile`. Les dix variantes (001..010)
-    /// depuis l'étape 4b (namespace.sdd).
+    /// `aucune_erreur_ne_stoppe_le_reconcile`. Les douze variantes (001..012)
+    /// (VNL-CTL-012 ajouté 2026-10-18, sandbox.sdd).
     fn all_variants() -> Vec<ControllerError> {
         vec![
             ControllerError::Kube(kube::Error::LinesCodecMaxLineLengthExceeded),
@@ -99,6 +108,12 @@ mod tests {
             },
             ControllerError::NamespaceNotManaged {
                 namespace: "default".to_string(),
+            },
+            ControllerError::SandboxIssuerUnavailable {
+                reason: "discovery failed".to_string(),
+            },
+            ControllerError::SandboxNamespaceMissing {
+                sandbox: "sb1".to_string(),
             },
         ]
     }
@@ -231,9 +246,17 @@ mod tests {
                 "010",
                 "VNL-CTL-010: namespace 'default' is not a vanyline Owner namespace (missing label vanyline.solidite.fr/app-namespace)",
             ),
+            (
+                "011",
+                "VNL-CTL-011: cannot determine the service-account token issuer: discovery failed",
+            ),
+            (
+                "012",
+                "VNL-CTL-012: sandbox 'sb1' has no namespace — cannot build the Owner identity",
+            ),
         ];
         let variants = all_variants();
-        assert_eq!(variants.len(), exacts.len(), "dix variantes attendues");
+        assert_eq!(variants.len(), exacts.len(), "douze variantes attendues");
         let mut markers = Vec::new();
         for ((marker, exact), error) in exacts.iter().zip(&variants) {
             let rendered = error.to_string();
@@ -251,7 +274,7 @@ mod tests {
         assert_eq!(
             unique.len(),
             markers.len(),
-            "les dix marqueurs sont distincts"
+            "les douze marqueurs sont distincts"
         );
     }
 
@@ -320,6 +343,8 @@ mod tests {
     async fn error_policy_sandbox_discipline_les_variantes_de_controle() {
         let ctx = Arc::new(sandbox::Context {
             client: offline_client(),
+            token_issuer: None,
+            ops_allowed_namespaces: Vec::new(),
             default_image: "img:tag".to_string(),
             toolchain_image_rust: String::new(),
             toolchain_image_node: String::new(),
@@ -386,6 +411,8 @@ mod tests {
         });
         let sandbox_ctx = Arc::new(sandbox::Context {
             client: offline_client(),
+            token_issuer: None,
+            ops_allowed_namespaces: Vec::new(),
             default_image: "img:tag".to_string(),
             toolchain_image_rust: String::new(),
             toolchain_image_node: String::new(),
@@ -405,7 +432,7 @@ mod tests {
         let project_cr = Arc::new(dummy_project());
         let sandbox_cr = Arc::new(dummy_sandbox());
         let app_cr = Arc::new(dummy_application());
-        // 4 politiques × dix variantes = 40 appels.
+        // 4 politiques × douze variantes = 48 appels.
         for error in all_variants() {
             for action in [
                 owner::error_policy(Arc::clone(&owner_cr), &error, Arc::clone(&owner_ctx)),

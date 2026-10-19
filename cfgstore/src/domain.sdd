@@ -245,6 +245,13 @@ Must not:
     + tests `*_wire_shape` + conformance.
 
 Tasks:
+  [?] Secrets dans `Debug` (validation 2026-10-18) : `Provider` (`api_key`), `McpServer` (`headers`) dérivent `Debug` en clair ;
+    aucun site ne les imprime aujourd'hui, mais un futur `{:?}` ou une erreur interpolée les ferait fuiter ; la clause « ne
+    jamais journaliser une clé » de `fs_store.sdd` n'est verrouillée par aucun test.
+    Recommandation (Claude, 2026-10-18) : remplacer le `Debug` dérivé par une implémentation manuelle qui masque `api_key` et `headers` (`"***"` quand présents),
+    pour `Provider`, `McpServer` et le modèle SeaORM `llm_providers`/`mcp_servers` de l'app, avec un test par type (le rendu
+    `{:?}` ne contient pas la valeur).
+    Réponse du développeur : (à remplir — « défaut » pour suivre la recommandation)
   [x] Convertir chaque Scenario sans test existant en un test dédié taggé par
     son titre (flux TTD). Couverts aujourd'hui par `mod tests` de ./domain.rs :
     @provider_type_serde, @mcp_transport_serde, @agent_mode_serde,

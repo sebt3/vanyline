@@ -243,6 +243,9 @@ Exposes:
   @ApplicationSpec, @ApplicationStorageDefaults, @RestateSpec, @ApplicationStatus.
   @crd_manifests — `pub fn () -> String`, @must_use.
   @MCP_PORT — `pub const i32` = `3000`.
+  @OPS_PORT — `pub const i32` = `9090` : port d'exploitation de la sandbox (`/health`, `/metrics`,
+    sans authentification, jamais publié par Service ni Ingress ; défaut de `OPS_LISTEN` côté
+    binaire, `sandbox/src/config.sdd`).
   @service_name — `pub fn (&str) -> String`, @must_use.
   @owner_namespace_name — `pub fn (&str, &str) -> Result<String, String>`, @must_use.
   Rien d'autre : le module `tests` est privé ; tout item non-`pub` est absent du fichier.
@@ -265,6 +268,7 @@ Returns:
   @service_name : le @String `sandbox-<sandbox_name>` concaténé sans séparateur ajouté.
   @owner_namespace_name : le @String `{app_namespace}-{owner}` en cas de validation réussie.
   @MCP_PORT : l'entier `3000`.
+  @OPS_PORT : l'entier `9090`.
   Sérialisation serde : clés camelCase ; `Option::None` ⇒ `"clé": null` SAUF
     @ProjectStatus::detectedAt (clé omise) ; vec/map `#[serde(default)]` vides ⇒ `[]` / `{}`
     SAUF @ProjectStatus::languages (clé omise) ; `cloned`/`suspended` sérialisés même à
@@ -628,6 +632,11 @@ Scenario: mcp_port_vaut_3000
   Then elle vaut exactement `3000` (i32) — la valeur fige le contrat avec `MCP_LISTEN` par
     défaut du binaire sandbox et avec les ports du Service/de la sonde/de l'Ingress posés par
     le controller
+
+Scenario: ops_port_vaut_9090
+  Given la constante @OPS_PORT
+  When elle est lue
+  Then elle vaut 9090, distincte de @MCP_PORT
 
 Scenario: status_structures_defaut_deserialisables
   Given @OwnerStatus, @SandboxStatus et @ApplicationStatus visés par `serde_json`

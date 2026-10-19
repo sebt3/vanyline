@@ -410,6 +410,11 @@ Must not:
     destruction des clés top-level inconnues) comme le contrat voulu tant que
     Sébastien n'a pas tranché.
 
+Scenario: config_yaml_ecrit_en_0600
+  Given un store de fichiers vierge, puis un `config.yaml` existant en `0644`
+  When une configuration est écrite (création, puis réécriture)
+  Then le fichier a les permissions `0600` dans les deux cas (Unix) et aucun log ne contient la valeur d'une `api_key`
+
 Tasks:
   [ ] Dériver les Scenarios sans test équivalent aujourd'hui (les autres Scenario ont
     déjà un test dans `mod tests` du fichier, aux titres proches — rapprocher les noms
@@ -449,10 +454,13 @@ Tasks:
   [?] @split_frontmatter rejette un fichier en CRLF (`---\r` n'est pas `---`) :
     comportement à figer par test (le frontmatter est produit par nous, donc ASCII
     LF garanti en round-trip) ou à assouplir pour les fichiers édités sous Windows ?
-  [?] `api_key` des providers stocké EN CLAIR dans `config.yaml` (aucune référence
+  [ ] DÉCIDÉ 2026-10-18 (recommandation validée : assumer le clair dans le fichier local, MAIS écrire `config.yaml` en permissions `0600` et ne jamais journaliser une clé ; Scenario `config_yaml_ecrit_en_0600`) — `api_key` des providers stocké EN CLAIR dans `config.yaml` (aucune référence — LIVRÉ 2026-10-18 pour « 0600 à la création et à la réécriture » (validateur PASS) ; RESTE ouvert : « ne jamais journaliser une clé » n'est verrouillé par aucun test (voir la question sur `Debug` de `Provider` dans app/src/main.sdd).
     vers un secret externe, aucun masquage). Choix d'architecture assumé (fichier de
     config local au
     workspace) ou dette de sécurité à tracer ?
+    Recommandation (Claude, 2026-10-18) : assumer pour un fichier de config local, mais exiger des permissions `0600` à l'écriture de `config.yaml` et
+    ne jamais le journaliser ; une référence vers un secret externe est une évolution ultérieure.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [?] Marques `#[allow(dead_code)]` sur @FsConfigStore/@new/@layers/@RawProviderEntry/
     @RawMcpEntry/@RawModelEntry et helpers de ./layers.rs : le type est en fait
     construit par le CLI — dettes historiques du cutover 04b à purger (harnais,

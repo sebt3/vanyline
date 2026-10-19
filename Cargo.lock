@@ -7461,6 +7461,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "futures",
+ "http",
  "k8s-openapi",
  "kube",
  "rand 0.8.6",

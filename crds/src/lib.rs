@@ -456,6 +456,12 @@ pub fn crd_manifests() -> String {
 /// `0.0.0.0:3000` côté binaire — cf. `sandbox/src/config.rs`).
 pub const MCP_PORT: i32 = 3000;
 
+/// Port d'exploitation `vanyline-sandbox` (`OPS_LISTEN` par défaut
+/// `0.0.0.0:9090` côté binaire — cf. `sandbox/src/config.sdd`) : `/health` et
+/// `/metrics` sans authentification. Jamais publié (ni Service, ni Ingress) ;
+/// seule la `NetworkPolicy` ingress de la Sandbox l'ouvre au cluster.
+pub const OPS_PORT: i32 = 9090;
+
 /// Nom du Service K8s exposeant le port MCP d'une sandbox.
 #[must_use]
 pub fn service_name(sandbox_name: &str) -> String {
@@ -1238,6 +1244,13 @@ mod tests {
     #[test]
     fn mcp_port_vaut_3000() {
         assert_eq!(MCP_PORT, 3000);
+    }
+
+    // Scenario: ops_port_vaut_9090
+    #[test]
+    fn ops_port_vaut_9090() {
+        assert_eq!(OPS_PORT, 9090);
+        assert_ne!(OPS_PORT, MCP_PORT);
     }
 
     // Scenario: status_structures_defaut_deserialisables

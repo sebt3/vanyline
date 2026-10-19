@@ -459,6 +459,13 @@ Handles:
     (suppression de la CR jamais bloquée éternellement par un prérequis manquant).
 
 Tasks:
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : règle conservée, formulation corrigée ci-dessus ; recommander `VNL_OPS_ALLOWED_NAMESPACES` en déploiement) — Port d'exploitation (revue 2026-10-18) : la règle d'ingress sans `from` est décrite comme « toute source
+    interne au cluster », ce que Kubernetes ne garantit pas — sans `from`, la règle autorise toute source
+    atteignant le pod, selon le CNI ; `/health` et `/metrics` n'ont pas d'authentification.
+    Recommandation (Claude, 2026-10-18) : garder la règle (indispensable aux sondes kubelet), CORRIGER la formulation de la spec (« toute source pouvant
+    atteindre le pod ») et recommander `VNL_OPS_ALLOWED_NAMESPACES` en déploiement ; le port n'est jamais publié
+    par Service ni Ingress.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [x] Activer le wiring restate de @apply (S6b 2026-10-10) : remplacer le `None`
     marqué « BLOQUÉE CRDS » dans le code par le bloc commenté livré (résolution de
     l'Application via `namespace::app_namespace_of` + @fetch_application, motif Ingress
@@ -496,7 +503,7 @@ Tasks:
   [ ] Trancher chaque entrée `[?]`/`[!]` ci-dessous avec Sébastien avant toute tâche
     `[x]`. Relecture de reverse-engineering du 2026-09-26 (aucune spec préexistante
     dans ./).
-  [ ] FAILLE DE SÉCURITÉ À CORRIGER (constat du 2026-09-27, correction redéfinie le
+  [x] FAILLE DE SÉCURITÉ À CORRIGER (constat du 2026-09-27, correction redéfinie le — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
     2026-10-04) : @build_sandbox_pod pose aujourd'hui INCONDITIONNELLEMENT
     `args = ["--no-auth"]` — AUCUNE sandbox ne valide de jeton ; l'Ingress d'une sandbox est
     public dès que l'Owner référence une Application, et son hostname n'est pas un secret
@@ -511,10 +518,10 @@ Tasks:
     `https://kubernetes.default.svc.cluster.local`), le flag `--sa-issuer` / `SA_ISSUER` n'étant
     qu'une SURCHARGE explicite (décision 2026-10-04). Échec de découverte sans flag ⇒ les
     Sandbox ne se réconcilient pas (erreur explicite).
-  [ ] Port d'exploitation et NetworkPolicy (décision 2026-10-04) : @OPS_PORT doit être joignable
+  [x] Port d'exploitation et NetworkPolicy (décision 2026-10-04) : @OPS_PORT doit être joignable — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
     depuis le cluster, nœuds inclus (sondes kubelet). La NetworkPolicy ingress de la Sandbox
     porte donc une SECONDE règle, sur @OPS_PORT seul : par défaut aucun `from` (toute source
-    interne au cluster) ; si le paramètre d'environnement du controller
+    pouvant atteindre le pod, selon le CNI — Kubernetes ne garantit pas « interne au cluster ») ; si le paramètre d'environnement du controller
     `VNL_OPS_ALLOWED_NAMESPACES` (liste de namespaces séparés par des virgules, flag
     `--ops-allowed-namespaces`) est posé, la règle est restreinte à ces namespaces. Le trafic
     nœud → pod (kubelet) reste autorisé par le CNI du cluster (Cilium : entité `host`) ; sur un
@@ -823,6 +830,16 @@ Scenario: sandbox_non_reconciliable_sans_issuer
   Given un controller démarré sans `--sa-issuer`
   When une Sandbox est réconciliée
   Then une erreur utilisateur explicite est rendue et aucun Pod n'est créé
+
+Scenario: sandbox_sans_namespace_est_une_erreur
+  # Revue du validateur 2026-10-18 : aucun repli silencieux sur un namespace « default ».
+  Given une Sandbox dont `metadata.namespace` est absent
+  When le reconcile résout l'identité de l'Owner, via une fonction pure `require_namespace(&Sandbox)
+    -> Result<String, ControllerError>` appelée AVANT le finalizer et toute construction (garde en tête
+    de `reconcile`, `apply` reçoit le namespace validé ; `build_sandbox_pod` garde sa signature et
+    n'émet pas `VNL_OWNER_SUBJECT` sans namespace)
+  Then l'erreur `SandboxNamespaceMissing` (`VNL-CTL-012`) est rendue, aucun Pod n'est créé, et
+    `VNL_OWNER_SUBJECT` n'est jamais construit avec un namespace inventé
 
 Scenario: pod_ports_mcp_et_ops_et_sondes_sur_ops
   Given n'importe quelle Sandbox

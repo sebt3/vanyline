@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 kube = { version = "4", features = ["runtime", "derive"] }
+http = "1"
 k8s-openapi = { version = "0.28", features = ["latest", "schemars"] }
 vanyline-crds = { path = "../crds" }
 serde = { version = "1", features = ["derive"] }

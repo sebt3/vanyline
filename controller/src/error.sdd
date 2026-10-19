@@ -104,11 +104,22 @@ Exposes:
         `"VNL-CTL-010: namespace '{namespace}' is not a vanyline Owner namespace (missing label vanyline.solidite.fr/app-namespace)"` ;
         un champ `String` ; variante d'anomalie (CR Project/Sandbox posée hors d'un
         namespace d'Owner — ./namespace.sdd)
+      @ControllerError::SandboxIssuerUnavailable { reason } —
+        `"VNL-CTL-011: cannot determine the service-account token issuer: {reason}"` ; un champ
+        `String` ; variante d'erreur utilisateur (la Sandbox n'est pas réconciliée tant que
+        `--sa-issuer` n'est pas posé ou que la découverte de l'apiserver n'aboutit pas —
+        ./sandbox.sdd « token_issuer », Scenario `sandbox_non_reconciliable_sans_issuer`) ;
+        requeue par la politique globale sandbox. Décidé 2026-10-18.
+      @ControllerError::SandboxNamespaceMissing { sandbox } —
+        `"VNL-CTL-012: sandbox '{sandbox}' has no namespace — cannot build the Owner identity"` ; un champ
+        `String` ; variante d'anomalie (une Sandbox sans `metadata.namespace` ne peut pas porter
+        `VNL_OWNER_SUBJECT` ; aucun repli sur un namespace inventé — ./sandbox.sdd, Scenario
+        `sandbox_sans_namespace_est_une_erreur`). Décidé 2026-10-18.
       # Les gabarits `VNL-CTL-007..010` sont ceux choisis par l'implémentation 4b et
       # verrouillés par le test `display_exhaustif_des_marqueurs_vnl_ctl` ; ratification
       # Sébastien à confirmer (cf. `[?]` des `Tasks`).
   @std::error::Error — implémenté par la derive : @source() ne rend `Some` que pour
-    @ControllerError::Kube (seul `#[from]`), `None` pour les neuf autres variantes.
+    @ControllerError::Kube (seul `#[from]`), `None` pour les onze autres variantes.
   @std::fmt::Debug — dérivé, utilisable dans les tests/inspect des quatre modules
     consommateurs.
   Contrat de consommation — les @error_policy des quatre reconcilers (définitions vivent
@@ -195,9 +206,9 @@ Handles:
 
 Must:
   Préfixer le @Display de chaque variante par son marqueur `VNL-<DOMAINE>-<NNN>` exact,
-    suivi de `": "`, marqueurs uniques dans l'enum et numérotation contiguë `001..010` —
+    suivi de `": "`, marqueurs uniques dans l'enum et numérotation contiguë `001..012` —
     contractisation AGENTS.md de l'« identifiant unique », même discipline que
-    /lib/src/error.sdd et /tools/src/error.sdd ; les dix rendus de `Exposes` sont stables et
+    /lib/src/error.sdd et /tools/src/error.sdd ; les douze rendus de `Exposes` sont stables et
     verrouillables par test sur le rendu complet (pas un simple `contains`).
   Conserver @From<@kube::Error> généré par `#[from]` sur @ControllerError::Kube : les
     quatre reconcilers s'appuient massivement sur `?` pour les appels kube ; supprimer le
@@ -310,11 +321,12 @@ Scenario: display_exhaustif_des_marqueurs_vnl_ctl
     @WorktreeRemovalPending { sandbox: "sb1" }, @InvalidNamespaceName { name:
     "media-test-seb", reason: "raison" }, @NamespaceCollision { namespace:
     "media-test-seb", owner: "seb" }, @NamespaceTerminating { namespace: "media-test-seb" },
-    @NamespaceNotManaged { namespace: "default" }) et une @ControllerError::Kube construite
+    @NamespaceNotManaged { namespace: "default" }, @SandboxIssuerUnavailable { reason:
+    "discovery failed" }, @SandboxNamespaceMissing { sandbox: "sb1" }) et une @ControllerError::Kube construite
     depuis un @kube::Error minimal via @From
   When chacune est rendue par @Display
   Then chaque rendu est exactement le gabarit de `Exposes` avec payloads injectés,
-    commençant par son marqueur `VNL-CTL-001..010` suivi de `": "`, et les dix marqueurs
+    commençant par son marqueur `VNL-CTL-001..012` suivi de `": "`, et les douze marqueurs
     sont deux à deux distincts
 
 Scenario: conversion_from_kube_error_et_source_chainee
