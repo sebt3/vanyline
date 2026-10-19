@@ -5,11 +5,16 @@
 # ── Stage 1 : frontend ──────────────────────────────────────────────────────
 FROM node:26-alpine AS frontend
 WORKDIR /build
+# Workspaces npm : le frontend dépend de @vanyline/protocol et @vanyline/ui (alias source),
+# leurs package.json doivent être là avant `npm ci`, leurs sources avant le build.
 COPY package*.json ./
 COPY frontend/package*.json frontend/
+COPY packages/protocol/package*.json packages/protocol/
+COPY packages/ui/package*.json packages/ui/
 RUN npm ci
+COPY packages/ packages/
 COPY frontend/ frontend/
-RUN npm run build
+RUN npm run build --workspace=frontend
 
 # ── Stage 2 : chef ──────────────────────────────────────────────────────────
 # ca-certificates + curl : utoipa-swagger-ui (feature swagger-ui de miryad-core) télécharge les
