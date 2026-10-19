@@ -208,3 +208,41 @@ kubectl -n media-test patch application.vanyline.solidite.fr <name> --type merge
   -p '{"spec":{"ingressController":{"namespace":"kydah-core","podLabels":{"app.kubernetes.io/name":"traefik"}}}}'
 kubectl -n media-test annotate sandbox.vanyline.solidite.fr <name> reconcile-trigger="$(date +%s)" --overwrite
 ```
+
+## 8. Smoke test de bout en bout (obligatoire avant de déclarer une release « bonne »)
+
+Piège vécu (2026-10-19, `alpha.8`) : sept défauts n'apparaissaient qu'en cluster, tous à la
+frontière entre deux composants (chacun respectait sa propre spec). La batterie de tests ne les
+voit pas : seul ce parcours, joué sur une base **vierge** avec un utilisateur **neuf**, les révèle.
+À rejouer dans cet ordre, **sans jamais recharger la page** (un rechargement masque les défauts
+de rafraîchissement) ; noter l'étape qui casse :
+
+1. `Application` créée avec `spec.restate` (modèle : `deploy/web/application-example.yaml`) ;
+   l'`app` est `Ready`, ses logs ne montrent aucune boucle d'erreur (`kubectl logs`), en particulier
+   ni `sandbox-state watch error` ni `MRD-WORKFLOW-00x` répété.
+2. Premier utilisateur : connexion OIDC, création d'un Project depuis l'accueil → le Project est
+   créé du premier coup (pas de 403) et l'écran passe seul de « Clone du projet en cours » à prêt.
+3. Création d'une Sandbox → sa phase passe seule à `Running`.
+4. Ouverture de l'IDE : terminal, explorateur de fichiers, onglet Git répondent (aucun 502 : le
+   relais app → sandbox traverse la NetworkPolicy), santé du code s'affiche.
+5. Console du navigateur propre (aucun avertissement dockview « enterprise »).
+6. Workflows : un workflow minimal se lance et atteint un statut terminal ; `kubectl -n <ns>
+   logs sts/<application>-restate` ne montre aucune erreur d'enregistrement de l'endpoint.
+7. Chat : un modèle par défaut est configuré (sinon `422 NoModelProfile` attendu sur une base
+   vierge), un message reçoit une réponse.
+
+## 9. Pièges de build des images (CI `Release`)
+
+Piège vécu (2026-10-19) : trois releases d'affilée cassées par des défauts de Dockerfile qu'aucun
+test local ne couvre. Avant de tagger, si un `Cargo.lock`/`package.json` a gagné une dépendance :
+
+- `app/Dockerfile` copie `packages/` (workspaces npm `@vanyline/protocol` et `@vanyline/ui`)
+  avant `npm ci` ; un nouveau package partagé doit y être ajouté.
+- `jsonnet-sys` (moteur de workflow de miryad-core, tiré par `app` seulement) compile du C++ :
+  `g++` au build, `libstdc++6` au runtime de l'image `app`.
+- `controller` et `sandbox` ne cuisent que leur propre crate (`cargo chef cook -p …`) : sinon
+  ils compilent toute la workspace, `app` comprise, et héritent de ses dépendances système.
+- Un tag déjà poussé ne se déplace pas (force-push de tag interdit sans demande explicite) :
+  corriger puis tagger la version suivante.
+- Ne pas lancer plusieurs builds `podman` + `cargo` en parallèle sur la machine de dev (OOM
+  de code-server vécu) : un à la fois, ou laisser la CI les construire.
