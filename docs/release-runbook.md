@@ -226,6 +226,12 @@ de rafraîchissement) ; noter l'étape qui casse :
 4. Ouverture de l'IDE : terminal, explorateur de fichiers, onglet Git répondent (aucun 502 : le
    relais app → sandbox traverse la NetworkPolicy), santé du code s'affiche.
 5. Console du navigateur propre (aucun avertissement dockview « enterprise »).
+5bis. Mise en page : sur chaque écran (accueil, projet, sandbox `/overview`, réglages avec la colonne
+   d'assistant, en largeur bureau puis en fenêtre étroite) la PAGE ne défile jamais ; seule la région
+   de contenu et la liste de messages du chat défilent, la saisie du chat reste visible en bas, et les
+   barres de contrôle (en-tête du chat, session, saisie) restent des barres de bureau (≈ 22 à 34 px,
+   contrôles ≤ 32 px sur ordinateur). Les gardes de `frontend/src/layout.guard.spec.ts` ne lisent que
+   du CSS : ce contrôle visuel reste obligatoire.
 6. Workflows : un workflow minimal se lance et atteint un statut terminal ; `kubectl -n <ns>
    logs sts/<application>-restate` ne montre aucune erreur d'enregistrement de l'endpoint.
 7. Chat : un modèle par défaut est configuré (sinon `422 NoModelProfile` attendu sur une base
