@@ -139,9 +139,13 @@ Returns:
     l'entrante si l'agent existe, sinon la route a échoué avant), `title` et `todo`
     à `null` explicites, `created_at == updated_at` (même horodatage `now` que le
     `created_at` du contexte créé), `context` = la ligne fraîchement insérée
-    (`kind`/`data` rendus tels quels, `context.id` neuf). Ordre des effets :
-    @resolve_agent_id (si demandé) PUIS insert du @ChatContext PUIS insert de la
-    @Conversation PUIS relecture par id PUIS @to_output.
+    (`kind`/`data` rendus tels quels, `context.id` neuf). Ordre des effets
+    (amendé 2026-10-19) : amorçage des agents système (`ensure_system_agents`, voir « Amorçage à
+    la création ») PUIS @resolve_agent_id (si demandé) PUIS insert du @ChatContext PUIS insert de
+    la @Conversation PUIS relecture par id PUIS @to_output. L'amorçage DOIT précéder la
+    résolution : le client demande l'agent système par son nom (`system-config`) dès la première
+    création, et cet agent n'existe qu'après l'amorçage — vu en cluster 2026-10-19 :
+    `VNL-CFG-003: Unknown agent reference: 'system-config'` sur un utilisateur neuf.
   - `GET /api/conversations/{id}` — @200 @Json(@ConversationOut) de la conversation
     de l'appelant ; @404 (@AppError::@ConversationNotFound, `VNL-CNV-001`) si aucune
     ligne à cet id OU si la ligne appartient à un autre owner — les deux états sont
@@ -591,3 +595,14 @@ Tasks:
       @201/@204/@403/@404/@422, aucun test @VNL-DB-007. Dériver les Scenario non
       couverts en tests taggés par leur titre (précédents @real_db + @issue_token :
       `../db/entities/agents.rs`, harnais @make_app du fichier).
+
+Scenario: la_premiere_conversation_settings_cree_l_agent_systeme_avant_de_le_resoudre
+  Given un utilisateur qui possède un profil de modèle mais AUCUN agent (base réelle `real_db`)
+  When il crée une conversation de contexte `settings` avec `agent_name: "system-config"`
+  Then la réponse est 201, les quatre agents système existent pour lui, et l'`agent` rendu est
+    `system-config` (jamais `VNL-CFG-003`)
+
+Scenario: nom_d_agent_inconnu_reste_une_erreur_apres_amorcage
+  Given le même utilisateur et le nom d'agent `n-existe-pas`
+  When il crée une conversation
+  Then l'erreur reste `VNL-CFG-003` (l'amorçage ne masque pas une vraie faute de nom)

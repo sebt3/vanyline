@@ -181,11 +181,6 @@ pub async fn create_conversation(
         .await
         .map_err(AppError::from)?;
 
-    let agent_id = match &body.agent_name {
-        Some(name) => Some(resolve_agent_id(&state, principal_user.id, name).await?),
-        None => None,
-    };
-
     // Amorçage à la création (`conversations.sdd` §Must, décidé 2026-10-14) : un contexte
     // système appelle `ensure_system_agents` (idempotent) AVANT de rendre la conversation.
     // En `settings` l'agent système `config` est exigé : la panne (ex. `NoModelProfile`)
@@ -206,6 +201,13 @@ pub async fn create_conversation(
         }
         None => {}
     }
+
+    // Résolution APRÈS l'amorçage (`conversations.sdd`, « Ordre des effets ») : l'agent
+    // système `system-config` n'existe qu'une fois `ensure_system_agents` passé.
+    let agent_id = match &body.agent_name {
+        Some(name) => Some(resolve_agent_id(&state, principal_user.id, name).await?),
+        None => None,
+    };
 
     // Effect de bord : créer le ChatContext avant la Conversation
     let now = chrono::Utc::now();
@@ -971,6 +973,77 @@ mod tests {
                 .expect("count"),
             0
         );
+        assert_eq!(
+            conversations::Entity::find()
+                .count(&db)
+                .await
+                .expect("count"),
+            0
+        );
+    }
+
+    /// Scenario : `la_premiere_conversation_settings_cree_l_agent_systeme_avant_de_le_resoudre`.
+    #[tokio::test]
+    async fn la_premiere_conversation_settings_cree_l_agent_systeme_avant_de_le_resoudre() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        seed_profile(&db, alice).await;
+        let body: CreateConversation = serde_json::from_value(serde_json::json!({
+            "agent_name": "system-config",
+            "context": {"kind": "settings", "data": {}}
+        }))
+        .expect("body parses");
+
+        let (status, Json(out)) =
+            create_conversation(State(state_with(db.clone())), alice_user(), Json(body))
+                .await
+                .expect("première création settings avec system-config réussit");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(out.agent_name.as_deref(), Some("system-config"));
+        let mut names: Vec<String> = agents::Entity::find()
+            .filter(agents::Column::OwnerId.eq(alice))
+            .filter(agents::Column::SystemKey.is_not_null())
+            .all(&db)
+            .await
+            .expect("find succeeds")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "system-config",
+                "system-home",
+                "system-project",
+                "system-sandbox"
+            ]
+        );
+    }
+
+    /// Scenario : `nom_d_agent_inconnu_reste_une_erreur_apres_amorcage`.
+    #[tokio::test]
+    async fn nom_d_agent_inconnu_reste_une_erreur_apres_amorcage() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        seed_profile(&db, alice).await;
+        let body: CreateConversation = serde_json::from_value(serde_json::json!({
+            "agent_name": "n-existe-pas",
+            "context": {"kind": "settings", "data": {}}
+        }))
+        .expect("body parses");
+
+        let err = create_conversation(State(state_with(db.clone())), alice_user(), Json(body))
+            .await
+            .expect_err("unknown agent is refused after bootstrap");
+        assert!(matches!(err, AppError::UnprocessableReference(_)));
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("VNL-CFG-003"), "body: {text}");
         assert_eq!(
             conversations::Entity::find()
                 .count(&db)
