@@ -35,6 +35,14 @@ Exposes:
     restent accessibles l'un depuis l'autre).
 
 Must:
+  Menu contextuel des onglets sans fonctionnalité payante (2026-10-19) : dockview 8 refuse
+    `getTabContextMenuItems` sans son module « ContextMenu » de l'édition enterprise (avertissement
+    en console, menu absent) — le projet ne dépend d'AUCUNE fonctionnalité enterprise de dockview.
+    IdeShell n'utilise donc plus la prop `get-tab-context-menu-items` ; le menu des onglets est
+    rendu par le composant maison `ContextMenu.vue` (déjà utilisé par l'arbre, l'éditeur et le
+    terminal), ouvert par un clic droit sur un onglet (composant d'onglet personnalisé dockview
+    ou écouteur délégué), avec les mêmes entrées qu'avant : Fermer, Fermer les autres, Fermer
+    tout, séparateur, puis « Copier le chemin » pour les onglets `editor:<chemin>`.
   Ne pas être adapté au mobile : disposition dockview, aucune règle responsive.
   Montrer la fraîcheur de la santé du code dans l'indicateur (un rapport périmé n'est jamais
     présenté comme à jour).
@@ -68,3 +76,15 @@ Scenario: pas_de_maquette
   Given l'IDE affiché
   When le panneau « Workflows » s'ouvre
   Then aucun nœud codé en dur (`fetch-metadata`, `transcode`…) n'est rendu
+
+Scenario: menu_des_onglets_sans_module_enterprise
+  Given IdeShell monté avec dockview
+  When le composant est rendu
+  Then aucune prop `get-tab-context-menu-items` n'est passée à dockview et aucun avertissement
+    « requires the "ContextMenu" module » n'est émis
+
+Scenario: clic_droit_sur_un_onglet_editeur
+  Given un onglet `editor:src/main.rs` ouvert
+  When l'utilisateur fait un clic droit sur cet onglet
+  Then le menu maison propose Fermer, Fermer les autres, Fermer tout et Copier le chemin ;
+    « Copier le chemin » écrit `src/main.rs` dans le presse-papiers

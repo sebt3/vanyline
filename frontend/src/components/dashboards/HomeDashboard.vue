@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 import { useCrudResource } from '../../composables/useCrudResource';
+import {
+  useSandboxState,
+  reconnectNow,
+  registerProjectRefresh,
+  unregisterProjectRefresh,
+} from '../../composables/useSandboxState';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
@@ -59,7 +65,15 @@ function cloneLabel(p: Project): string {
   return '—';
 }
 
-onMounted(resource.fetch);
+// Hub temps réel : la liste se relit sur tout événement `project`.
+useSandboxState();
+onMounted(() => {
+  resource.fetch();
+  registerProjectRefresh(resource.fetch);
+});
+onBeforeUnmount(() => {
+  unregisterProjectRefresh(resource.fetch);
+});
 
 async function createProject() {
   creationError.value = null;
@@ -70,6 +84,9 @@ async function createProject() {
   };
   try {
     await resource.create(body);
+    // Un utilisateur sans Owner voit son socket fermé aussitôt par le backend :
+    // on rouvre sans attendre le back-off pour s'abonner au premier Project.
+    reconnectNow();
     formName.value = '';
     formRepo.value = '';
     formBranch.value = '';

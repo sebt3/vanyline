@@ -243,21 +243,23 @@ describe('httpConfigRepo — agents (model ↔ model_profile_id)', () => {
     expect(a).not.toHaveProperty('owner_id');
   });
 
-  it('update ne met dans le body que les clés du patch, model→model_profile_id', async () => {
+  it('update fusionne la ligne courante (GET) et traduit model→model_profile_id', async () => {
     let body: Record<string, unknown> | null = null;
+    const agentRow = { id: 1, owner_id: 1, name: 'coder', mode: 'primary', model_profile_id: 1, toolsets: [], skills: 'auto', system_prompt: 'p' };
     handlers.push((url, init) => {
+      const method = init.method ?? 'GET';
       if (get('/api/v1/llm-providers', url, init)) return jsonResponse(providers);
       if (get('/api/v1/model-profiles', url, init)) return jsonResponse(profiles);
-      if (url === '/api/v1/agents/1' && init.method === 'PUT') {
+      if (url === '/api/v1/agents/1' && method === 'GET') return jsonResponse(agentRow);
+      if (url === '/api/v1/agents/1' && method === 'PUT') {
         body = JSON.parse(init.body as string);
-        return jsonResponse({ id: 1, name: 'coder', model_profile_id: 2 });
+        return jsonResponse({ ...agentRow, model_profile_id: 2 });
       }
-      if (get('/api/v1/agents', url, init))
-        return jsonResponse([{ id: 1, owner_id: 1, name: 'coder', mode: 'primary', model_profile_id: 2 }]);
+      if (get('/api/v1/agents', url, init)) return jsonResponse([agentRow]);
       return undefined;
     });
     await httpConfigRepo().update('agents', 'coder', { model: 'qwen' } as never);
-    expect(body).toEqual({ model_profile_id: 2 });
+    expect(body).toEqual({ ...agentRow, model_profile_id: 2 });
   });
 });
 
@@ -274,19 +276,21 @@ describe('httpConfigRepo — mcp / toolsets / skills', () => {
     expect(s).toEqual({ name: 'fs', type: 'http-streamable', url: 'http://mcp:3000', available_tools: ['read'] });
   });
 
-  it('update toolsets — patch partiel, seul local_tools dans le body', async () => {
+  it('update toolsets — fusion : local_tools du patch, le reste de la ligne courante conservé', async () => {
     let body: Record<string, unknown> | null = null;
+    const row = { id: 1, owner_id: 1, name: 'dev', local_tools: [], mcp: [] };
     handlers.push((url, init) => {
-      if (url === '/api/v1/toolsets/1' && init.method === 'PUT') {
+      const method = init.method ?? 'GET';
+      if (url === '/api/v1/toolsets/1' && method === 'GET') return jsonResponse(row);
+      if (url === '/api/v1/toolsets/1' && method === 'PUT') {
         body = JSON.parse(init.body as string);
-        return jsonResponse({ id: 1, name: 'dev' });
+        return jsonResponse({ ...row, local_tools: ['bash', 'git'] });
       }
-      if (get('/api/v1/toolsets', url, init))
-        return jsonResponse([{ id: 1, owner_id: 1, name: 'dev', local_tools: [], mcp: [] }]);
+      if (get('/api/v1/toolsets', url, init)) return jsonResponse([row]);
       return undefined;
     });
     await httpConfigRepo().update('toolsets', 'dev', { local_tools: ['bash', 'git'] } as never);
-    expect(body).toEqual({ local_tools: ['bash', 'git'] });
+    expect(body).toEqual({ ...row, local_tools: ['bash', 'git'] });
   });
 
   it('get skills fait GET /{id} et renvoie le body ; list ne renvoie pas le body', async () => {
@@ -355,5 +359,98 @@ describe('httpConfigRepo — actions', () => {
         : undefined,
     );
     expect(await httpConfigRepo().listLocalTools()).toEqual(['bash', 'read']);
+  });
+});
+
+describe('httpConfigRepo — update par fusion (PUT complet)', () => {
+  const providerRow = {
+    id: 1,
+    owner_id: 1,
+    name: 'smart',
+    provider_type: 'ollama',
+    endpoint: 'http://old',
+    is_default: true,
+    available_models: ['a'],
+  };
+
+  it('update_sans_nom_dans_le_patch_conserve_le_nom', async () => {
+    let body: Record<string, unknown> | null = null;
+    handlers.push((url, init) => {
+      const method = init.method ?? 'GET';
+      if (url === '/api/v1/llm-providers/1' && method === 'PUT') {
+        body = JSON.parse(init.body as string);
+        return jsonResponse({ ...providerRow, endpoint: 'http://x' });
+      }
+      if (url === '/api/v1/llm-providers/1' && method === 'GET') return jsonResponse(providerRow);
+      if (get('/api/v1/llm-providers', url, init)) return jsonResponse([providerRow]);
+      return undefined;
+    });
+    await httpConfigRepo().update('providers', 'smart', { endpoint: 'http://x' } as never);
+    expect(body).toEqual({
+      id: 1,
+      owner_id: 1,
+      name: 'smart',
+      provider_type: 'ollama',
+      endpoint: 'http://x',
+      is_default: true,
+      available_models: ['a'],
+    });
+    expect(body).not.toHaveProperty('api_key');
+  });
+
+  it('update_avec_nom_renomme', async () => {
+    let body: Record<string, unknown> | null = null;
+    handlers.push((url, init) => {
+      const method = init.method ?? 'GET';
+      if (url === '/api/v1/llm-providers/1' && method === 'PUT') {
+        body = JSON.parse(init.body as string);
+        return jsonResponse({ ...providerRow, name: 'autre' });
+      }
+      if (url === '/api/v1/llm-providers/1' && method === 'GET') return jsonResponse(providerRow);
+      if (get('/api/v1/llm-providers', url, init)) return jsonResponse([providerRow]);
+      return undefined;
+    });
+    await httpConfigRepo().update('providers', 'smart', { name: 'autre' } as never);
+    expect(body).toMatchObject({
+      name: 'autre',
+      provider_type: 'ollama',
+      endpoint: 'http://old',
+      is_default: true,
+      available_models: ['a'],
+    });
+  });
+
+  it('update_ecrase_seulement_les_champs_du_patch', async () => {
+    const providers = [{ id: 1, name: 'p', provider_type: 'ollama', endpoint: 'http://x' }];
+    const profiles = [{ id: 3, owner_id: 1, name: 'qwen', provider_id: 1, model: 'qwen2.5' }];
+    const agentRow = {
+      id: 1,
+      owner_id: 1,
+      name: 'coder',
+      mode: 'primary',
+      model_profile_id: 3,
+      toolsets: ['t'],
+      skills: 'auto',
+      system_prompt: 'ancien',
+    };
+    let body: Record<string, unknown> | null = null;
+    handlers.push((url, init) => {
+      const method = init.method ?? 'GET';
+      if (url === '/api/v1/agents/1' && method === 'PUT') {
+        body = JSON.parse(init.body as string);
+        return jsonResponse({ ...agentRow, system_prompt: 'nouveau' });
+      }
+      if (url === '/api/v1/agents/1' && method === 'GET') return jsonResponse(agentRow);
+      if (get('/api/v1/llm-providers', url, init)) return jsonResponse(providers);
+      if (get('/api/v1/model-profiles', url, init)) return jsonResponse(profiles);
+      if (get('/api/v1/agents', url, init)) return jsonResponse([agentRow]);
+      return undefined;
+    });
+    await httpConfigRepo().update('agents', 'coder', { system_prompt: 'nouveau' } as never);
+    expect(body).toMatchObject({
+      model_profile_id: 3,
+      toolsets: ['t'],
+      system_prompt: 'nouveau',
+    });
   });
 });

@@ -4,6 +4,8 @@ import { openSandboxStateWs } from '../api/sandboxStateWs';
 
 /** Record réactif : nom sandbox → phase. Mis à jour par le hub WS en temps réel. */
 export const sandboxPhases = ref(new Map<string, string>());
+/** Record réactif : nom projet → phase (`Cloning` / `Cloned`). */
+export const projectPhases = ref(new Map<string, string>());
 
 /** État global du hub WS (singleton). Un seul WebSocket par application. */
 const ws = shallowRef<WebSocket | null>(null);
@@ -12,8 +14,10 @@ export const connected = ref(false);
 let hubRunning = false;
 let hubRef = 0;
 
-/** Fonctions de rafraîchissement CRUD enregistrées par les dashboards. */
+/** Fonctions de rafraîchissement CRUD enregistrées par les dashboards (événements `sandbox`). */
 const refreshFns = new Set<() => void>();
+/** Fonctions de rafraîchissement enregistrées pour les événements `project`. */
+const projectRefreshFns = new Set<() => void>();
 
 export function registerRefresh(fn: () => void) {
   refreshFns.add(fn);
@@ -21,17 +25,42 @@ export function registerRefresh(fn: () => void) {
 export function unregisterRefresh(fn: () => void) {
   refreshFns.delete(fn);
 }
+export function registerProjectRefresh(fn: () => void) {
+  projectRefreshFns.add(fn);
+}
+export function unregisterProjectRefresh(fn: () => void) {
+  projectRefreshFns.delete(fn);
+}
 
-// Debounce : une salve d'événements (ex. replay initial à la reconnexion) ne
-// déclenche qu'un seul rafraîchissement de l'interface.
-let refreshScheduled = false;
-function scheduleRefresh() {
-  if (refreshScheduled) return;
-  refreshScheduled = true;
-  setTimeout(() => {
-    refreshScheduled = false;
-    for (const fn of refreshFns) fn();
-  }, 300);
+/** Debounce « schedule-once » par famille : une salve d'événements (ex. replay
+ *  initial à la reconnexion) ne déclenche qu'un seul appel de chaque fonction. */
+function makeDebouncedRun(run: () => void): () => void {
+  let scheduled = false;
+  return () => {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(() => {
+      scheduled = false;
+      run();
+    }, 300);
+  };
+}
+const scheduleRefresh = makeDebouncedRun(() => {
+  for (const fn of refreshFns) fn();
+});
+const scheduleProjectRefresh = makeDebouncedRun(() => {
+  for (const fn of projectRefreshFns) fn();
+});
+
+/** Met à jour une Map réactive : `phase` null retire l'entrée. */
+function applyPhase(target: { value: Map<string, string> }, name: string, phase: string | null) {
+  const next = new Map(target.value);
+  if (phase == null) {
+    next.delete(name);
+  } else {
+    next.set(name, phase);
+  }
+  target.value = next;
 }
 
 // Back-off de reconnexion : croît à chaque échec (ou fermeture immédiate —
@@ -42,8 +71,33 @@ const RECONNECT_MAX_MS = 30000;
 const SESSION_STABLE_MS = 5000;
 let reconnectDelay = RECONNECT_MIN_MS;
 
+/** Attente de reconnexion interruptible : `reconnectNow()` la court-circuite. */
+let wakeUp: (() => void) | null = null;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      wakeUp = null;
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    wakeUp = done;
+  });
+}
+
 function bumpBackoff() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+}
+
+/** Rouvre le socket tout de suite (ex. après création d'un Project : le backend
+ *  ferme aussitôt le socket d'un utilisateur sans Owner). Coupe l'attente en
+ *  cours et remet le back-off à zéro. Sans effet si le hub est arrêté ou si un
+ *  socket est déjà ouvert. */
+export function reconnectNow() {
+  if (!hubRunning) return;
+  reconnectDelay = RECONNECT_MIN_MS;
+  if (ws.value) return;
+  wakeUp?.();
 }
 
 function hubTick() {
@@ -78,16 +132,15 @@ function hubTick() {
           } catch {
             return;
           }
-          if (!event.sandbox) return;
-          const next = new Map(sandboxPhases.value);
-          if (event.phase == null) {
-            next.delete(event.sandbox);
-          } else {
-            next.set(event.sandbox, event.phase);
+          if (typeof event?.name !== 'string' || event.name === '') return;
+          if (event.kind === 'sandbox') {
+            applyPhase(sandboxPhases, event.name, event.phase);
+            // Rafraîchir le store CRUD pour les champs hors WS (metadata, spec).
+            scheduleRefresh();
+          } else if (event.kind === 'project') {
+            applyPhase(projectPhases, event.name, event.phase);
+            scheduleProjectRefresh();
           }
-          sandboxPhases.value = next;
-          // Rafraîchir le store CRUD pour les champs hors WS (metadata, spec).
-          scheduleRefresh();
         };
         s.addEventListener('message', evHandler);
 
@@ -102,12 +155,12 @@ function hubTick() {
           reconnectDelay = RECONNECT_MIN_MS;
         } else {
           bumpBackoff();
-          if (hubRunning) await new Promise((r) => setTimeout(r, reconnectDelay));
+          if (hubRunning) await sleep(reconnectDelay);
         }
       } catch {
         bumpBackoff();
         if (hubRunning) {
-          await new Promise((r) => setTimeout(r, reconnectDelay));
+          await sleep(reconnectDelay);
         }
       }
     }

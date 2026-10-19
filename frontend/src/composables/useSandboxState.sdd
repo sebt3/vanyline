@@ -1,0 +1,72 @@
+Spec: Hub d'états temps réel (WebSocket sandbox-state)
+
+Platform: TypeScript/Vue 3
+
+Purpose:
+  Singleton du navigateur qui maintient un WebSocket vers `/api/ws/sandbox-state` (même origine,
+  cookie OIDC) et traduit les événements poussés par l'app (`/app/src/ws/sandbox_state.sdd`) en
+  état réactif et en rafraîchissements d'écrans. Évite le polling : les étapes asynchrones du
+  cluster (clone d'un Project, démarrage d'une Sandbox) mettent l'interface à jour d'elles-mêmes.
+  Regroupe le composable et le miroir du format d'événement : un seul contrat.
+
+Owns:
+  ./useSandboxState.ts
+  ../api/sandboxStateWs.ts
+
+Can read:
+  /app/src/ws/sandbox_state.sdd
+  ../components/dashboards/dashboards.sdd
+
+Exposes:
+  `SandboxStateEvent` = `{ kind: 'sandbox' | 'project'; name: string; phase: string | null }`
+    (miroir exact du Rust, `phase` null = suppression).
+  `useSandboxState()` — démarre le hub au premier utilisateur, l'arrête au dernier ; rend
+    `phases` (Map nom de sandbox -> phase) et `connected`.
+  `projectPhases` — Map nom de projet -> phase (`Cloning` / `Cloned`).
+  `registerRefresh` / `unregisterRefresh` — rafraîchissements déclenchés par un événement
+    `sandbox` (inchangé).
+  `registerProjectRefresh` / `unregisterProjectRefresh` — rafraîchissements déclenchés par un
+    événement `project`.
+  `reconnectNow()` — coupe l'éventuelle attente de reconnexion et rouvre le socket tout de suite,
+    backoff remis à zéro.
+
+Must:
+  Router chaque événement selon `kind` : `sandbox` met à jour `phases` et déclenche les
+    rafraîchissements sandbox ; `project` met à jour `projectPhases` et déclenche les
+    rafraîchissements projet ; un `kind` inconnu ou un `name` vide est ignoré sans erreur.
+  Debouncer chaque famille de rafraîchissements indépendamment (300 ms) : une salve ne produit
+    qu'un appel par fonction enregistrée.
+  Retirer l'entrée de la Map quand `phase` est null.
+  Conserver le back-off de reconnexion (3 s doublant jusqu'à 30 s, remis à zéro après une session
+    stable de 5 s).
+  Appeler `reconnectNow()` après la création réussie d'un Project (`HomeDashboard`) : un
+    utilisateur sans Owner voit son socket fermé aussitôt par le backend, et sans cela l'interface
+    attendrait jusqu'à 30 s avant de s'abonner à son tout premier Project.
+
+Must not:
+  Ouvrir plus d'un WebSocket. Journaliser avec `console.log`.
+
+Scenario: evenement_project_declenche_le_rafraichissement_projet
+  Given une fonction enregistrée par `registerProjectRefresh`
+  When un événement `{kind:'project', name:'vynil', phase:'Cloned'}` arrive
+  Then `projectPhases` contient `vynil -> Cloned` et la fonction est appelée une fois après
+    le debounce, sans que les fonctions de `registerRefresh` soient appelées
+
+Scenario: evenement_sandbox_ne_declenche_pas_le_rafraichissement_projet
+  Given les deux familles de fonctions enregistrées
+  When un événement `{kind:'sandbox', name:'main', phase:'Running'}` arrive
+  Then `phases` contient `main -> Running` et seule la famille sandbox est appelée
+
+Scenario: kind_inconnu_ignore
+  Given un message `{kind:'autre', name:'x', phase:'y'}`
+  When il arrive
+  Then aucun état ni rafraîchissement ne change
+
+Scenario: reconnectNow_rouvre_sans_attendre_le_backoff
+  Given un hub en attente de reconnexion (délai doublé après une fermeture immédiate)
+  When `reconnectNow()` est appelé
+  Then un nouveau socket est ouvert immédiatement et le délai repart à 3 s
+
+Tasks:
+  [x] Implémenter le routage par `kind`, `projectPhases`, les rafraîchissements projet et
+    `reconnectNow()` (tests Vitest sur un faux WebSocket).

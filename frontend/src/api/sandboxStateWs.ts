@@ -4,10 +4,12 @@ function sandboxStateWsUrl(): string {
   return `${protocol}://${globalThis.location.host}/api/ws/sandbox-state`;
 }
 
-/** Event pushé par le backend quand le status.phase d'une sandbox change.
- *  `phase` vaut `null` en suppression (ou avant la première phase connue). */
+/** Event pushé par le backend (miroir du Rust, app/src/ws/sandbox_state.sdd) quand
+ *  la phase d'une Sandbox ou d'un Project change. `kind` choisit la famille,
+ *  `name` la ressource, `phase` vaut `null` en suppression. */
 export interface SandboxStateEvent {
-  sandbox: string;
+  kind: 'sandbox' | 'project';
+  name: string;
   phase: string | null;
 }
 

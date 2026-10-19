@@ -1,0 +1,54 @@
+Spec: httpConfigRepo — dépôt de configuration au-dessus du CRUD REST générique
+
+Platform: TypeScript
+
+Purpose:
+  Implémente le port `ConfigRepo` de `@vanyline/ui` sur le CRUD REST générique de miryad-core
+  (`/api/v1/<ressource>`) : traduit le format canonique (clés par nom) en lignes REST (clés
+  par id) et inversement. Seule la mise à jour est amendée ici (2026-10-19) ; le reste du
+  comportement est celui du code et des tests existants (spec à compléter au fil de l'eau).
+
+Owns:
+  ./httpConfigRepo.ts
+
+Can read:
+  ./client.sdd
+  /app/src/db/entities/llm_providers.sdd
+
+Must:
+  Mise à jour par fusion (2026-10-19, vu en cluster : « Failed to deserialize the JSON body into
+    the target type: missing field `name` » en 422 sur toute modification) : le `PUT` générique du
+    serveur attend un modèle COMPLET et écrit TOUTES les colonnes ; les écrans envoient un
+    sous-ensemble de champs, sans le nom. `update(domain, name, patch)` lit donc d'abord la ligne
+    courante (`GET <endpoint>/<id>`, jamais le cache), traduit le `patch` en REST, et envoie
+    `{ ...ligneCourante, ...patchREST }` : toute colonne que le patch ne mentionne pas est
+    conservée à l'identique (nom, `is_default`, `available_models`, FK, etc.), un `name` présent
+    dans le patch renomme.
+  Ne jamais fabriquer de valeur : une clé absente de la ligne courante reste absente du corps
+    (notamment `api_key`, écriture seule jamais renvoyée par le serveur, que le serveur conserve
+    quand elle manque et efface quand elle vaut la chaîne vide).
+  Rafraîchir les caches `nom <-> id` du domaine après la mise à jour, comme aujourd'hui.
+
+Must not:
+  Envoyer un corps partiel dans un `PUT`.
+
+Scenario: update_sans_nom_dans_le_patch_conserve_le_nom
+  Given un fournisseur `smart` (id 1, `is_default: true`, `available_models: ["a"]`) et un patch
+    `{ endpoint: "http://x" }` sans `name`
+  When `update('providers', 'smart', patch)` s'exécute
+  Then le `PUT /api/v1/llm-providers/1` porte `name: "smart"`, `is_default: true`,
+    `available_models: ["a"]` et `endpoint: "http://x"`, sans clé `api_key`
+
+Scenario: update_avec_nom_renomme
+  Given la même ligne et un patch `{ name: "autre" }`
+  When `update` s'exécute
+  Then le corps porte `name: "autre"` et le reste de la ligne courante inchangé
+
+Scenario: update_ecrase_seulement_les_champs_du_patch
+  Given un agent dont la ligne courante porte `model_profile_id: 3` et `toolsets: ["t"]`, et un
+    patch `{ system_prompt: "nouveau" }`
+  When `update('agents', …)` s'exécute
+  Then le corps garde `model_profile_id: 3` et `toolsets: ["t"]` et porte le nouveau `system_prompt`
+
+Tasks:
+  [x] Implémenter la mise à jour par fusion et ses trois tests (`httpConfigRepo.spec.ts`).

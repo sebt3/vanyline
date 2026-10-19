@@ -4,6 +4,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import HomeDashboard from './HomeDashboard.vue';
 import ContextChat from '../ContextChat.vue';
 
+// Le hub est mocké pour observer l'appel à `reconnectNow` après une création.
+const hub = vi.hoisted(() => ({ reconnectNow: vi.fn(), projectFns: new Set<() => void>() }));
+vi.mock('../../composables/useSandboxState', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../composables/useSandboxState')>();
+  return {
+    ...actual,
+    reconnectNow: hub.reconnectNow,
+    registerProjectRefresh: (fn: () => void) => {
+      hub.projectFns.add(fn);
+    },
+    unregisterProjectRefresh: (fn: () => void) => {
+      hub.projectFns.delete(fn);
+    },
+  };
+});
+
 beforeEach(() => {
   vi.restoreAllMocks();
   // Nettoyer le body après chaque test (téléport reka-ui)
@@ -370,5 +386,56 @@ describe('HomeDashboard — dashboards.sdd (G2a)', () => {
     const chat = wrapper.findComponent(ContextChat);
     expect(chat.exists()).toBe(true);
     expect(chat.props('kind')).toBe('home');
+  });
+});
+
+describe('HomeDashboard — événements project (2026-10-19)', () => {
+  it('creation_de_project_relance_le_hub', async () => {
+    hub.reconnectNow.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/projects' && (init?.method ?? 'GET') === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Map([['content-type', 'application/json']]),
+          json: () => Promise.resolve([]),
+        } as unknown as Response;
+      }
+      if (url === '/api/projects' && init?.method === 'POST') {
+        return {
+          ok: true,
+          status: 201,
+          headers: new Map([['content-type', 'application/json']]),
+          json: () =>
+            Promise.resolve({ metadata: { name: 'mon-projet' }, spec: { owner: 'u1', repoUrl: 'https://github.com/org/repo' } }),
+        } as unknown as Response;
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const router = createTestRouter();
+    await router.push('/');
+    await router.isReady();
+    const wrapper = mount(HomeDashboard, { global: { plugins: [router] } });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    await wrapper.find('.btn-create').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const inputs = dialog.querySelectorAll('input');
+    const setInput = (el: Element, val: string) => {
+      (el as HTMLInputElement).value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setInput(inputs[0], 'mon-projet');
+    setInput(inputs[1], 'https://github.com/org/repo');
+    await (dialog.querySelector('.btn-create') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(hub.reconnectNow).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
   });
 });

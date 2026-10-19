@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils';
-import { inject } from 'vue';
+import { inject, nextTick, type Component } from 'vue';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import IdeShell from './IdeShell.vue';
 
@@ -30,12 +30,22 @@ const mockAddPanel = vi.fn();
 // Valeur injectée `project-name` telle que vue la voit depuis le stub dockview (enfant d'IdeShell).
 const projectNameSeen = vi.hoisted(() => ({ value: undefined as unknown }));
 
+// Ce que IdeShell passe à DockviewVue (attributs non déclarés par le stub) et le
+// registre `tabComponents` : permet de monter le composant d'onglet réel.
+const dockviewState = vi.hoisted(() => ({
+  attrs: {} as Record<string, unknown>,
+  tabComponents: {} as Record<string, unknown>,
+}));
+
 vi.mock('dockview-vue', () => ({
   DockviewVue: {
     template: '<div class="dockview-stub" />',
+    inheritAttrs: false,
     emits: ['ready'],
-    setup(_props: Record<string, unknown>, { emit }: { emit: (name: string, payload: unknown) => void }) {
+    setup(_props: Record<string, unknown>, { emit, attrs }: { emit: (name: string, payload: unknown) => void; attrs: Record<string, unknown> }) {
       projectNameSeen.value = inject('project-name', null);
+      dockviewState.attrs = { ...attrs };
+      dockviewState.tabComponents = (attrs['tab-components'] ?? attrs.tabComponents ?? {}) as Record<string, unknown>;
       // Émettre 'ready' avec une fausse api pour que onReady s'exécute
       const fakeApi = {
         panels: [] as unknown[],
@@ -75,6 +85,56 @@ vi.mock('../api/sandboxWs', () => ({
   openSandboxWs,
   SandboxFsClient: _SandboxFsClient,
 }));
+
+type FakePanel = { id: string; api: { close: ReturnType<typeof vi.fn> } };
+
+function makePanel(id: string): FakePanel {
+  return { id, api: { close: vi.fn() } };
+}
+
+/** Faux onglet dockview : api du panneau + groupe (panels) + close du panneau. */
+function makeTab(id: string, others: FakePanel[] = []) {
+  const close = vi.fn();
+  const self: FakePanel = { id, api: { close } };
+  const panels = [self, ...others];
+  const title = id.startsWith('editor:') ? (id.slice('editor:'.length).split('/').pop() ?? id) : id;
+  const api = {
+    id,
+    title,
+    close,
+    group: { panels },
+    onDidTitleChange: vi.fn(() => ({ dispose: vi.fn() })),
+  };
+  return { api, self, close };
+}
+
+function mountTab(api: unknown) {
+  const Tab = dockviewState.tabComponents.tab as Component;
+  return mount(Tab, {
+    props: { api, containerApi: {}, params: {}, tabLocation: 'header' } as Record<string, unknown>,
+    attachTo: document.body,
+  });
+}
+
+async function flushUi() {
+  await nextTick();
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+/** Clic droit sur le titre de l'onglet, puis lecture des entrées du menu ouvert. */
+async function openMenu(wrapper: ReturnType<typeof mountTab>): Promise<HTMLElement[]> {
+  wrapper.find('.dv-default-tab-content').element.dispatchEvent(
+    new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+  );
+  await flushUi();
+  return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+}
+
+function clickItem(items: HTMLElement[], label: string) {
+  const item = items.find((el) => el.textContent?.trim() === label);
+  expect(item).toBeTruthy();
+  item!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+}
 
 describe('IdeShell', () => {
   beforeEach(() => {
@@ -177,68 +237,112 @@ describe('IdeShell', () => {
     expect(gitCall).not.toBeUndefined();
   });
 
-  describe('menu contextuel des onglets', () => {
+  describe('menu contextuel des onglets (ide.sdd)', () => {
     afterEach(() => {
       // Restaurer le navigator.clipboard originel en jsdom
       if (Object.prototype.hasOwnProperty.call(navigator, 'clipboard')) {
         delete (navigator as unknown as Record<string, unknown>).clipboard;
       }
+      document.body.innerHTML = '';
     });
 
-    it('menu des onglets : close/closeOthers/closeAll/séparateur + Copier le chemin pour un éditeur', async () => {
+    it('menu_des_onglets_sans_module_enterprise', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
       const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
       await new Promise((r) => setTimeout(r, 0));
 
-      const { getTabContextMenuItems } = wrapper.vm as {
-        getTabContextMenuItems: (p: unknown) => unknown[];
-      };
-      const items = getTabContextMenuItems({ panel: { id: 'editor:src/main.py' } });
-
-      const strs = items.filter((i): i is string => typeof i === 'string');
-      expect(strs).toContain('close');
-      expect(strs).toContain('closeOthers');
-      expect(strs).toContain('closeAll');
-      expect(strs).toContain('separator');
-      const custom = items.find((i) => typeof i === 'object' && i !== null && 'label' in i!);
-      expect(custom).not.toBeUndefined();
-      expect((custom as { label: string })!.label).toBe('Copier le chemin');
+      // Aucune prop getTabContextMenuItems passée à dockview (ni en kebab-case ni en camelCase).
+      const keys = Object.keys(dockviewState.attrs);
+      expect(keys).not.toContain('get-tab-context-menu-items');
+      expect(keys).not.toContain('getTabContextMenuItems');
+      // Le composant d'onglet maison est enregistré pour les onglets par défaut.
+      expect(dockviewState.tabComponents.tab).toBeTruthy();
+      // Aucun avertissement « requires the ContextMenu module » (dockview-enterprise).
+      const messages = [...warn.mock.calls, ...error.mock.calls].map((args) => args.map(String).join(' '));
+      expect(messages.some((m) => m.includes('ContextMenu'))).toBe(false);
+      wrapper.unmount();
     });
 
-    it('Copier le chemin écrit le chemin du fichier', async () => {
+    it('clic_droit_sur_un_onglet_editeur', async () => {
       const writeText = vi.fn(() => Promise.resolve());
-      Object.defineProperty(navigator, 'clipboard', {
-        value: { writeText },
-        configurable: true,
-      });
-
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
       const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
       await new Promise((r) => setTimeout(r, 0));
 
-      const { getTabContextMenuItems } = wrapper.vm as {
-        getTabContextMenuItems: (p: unknown) => unknown[];
-      };
-      const items = getTabContextMenuItems({ panel: { id: 'editor:src/main.py' } });
-      const custom = items.find(
-        (i) => typeof i === 'object' && i !== null && 'label' in i! && (i as { label: string }).label === 'Copier le chemin',
-      );
-      (custom as { action: () => void }).action();
+      const other = makePanel('editor:src/lib.rs');
+      const tab = makeTab('editor:src/main.rs', [other]);
+      const tabWrapper = mountTab(tab.api);
+      const items = await openMenu(tabWrapper);
 
-      expect(writeText).toHaveBeenCalledWith('src/main.py');
+      const labels = items.map((el) => el.textContent?.trim());
+      expect(labels).toEqual(['Fermer', 'Fermer les autres', 'Fermer tout', 'Copier le chemin']);
+      expect(document.querySelector('[role="separator"]')).toBeTruthy();
+
+      clickItem(items, 'Copier le chemin');
+      await flushUi();
+      expect(writeText).toHaveBeenCalledWith('src/main.rs');
+
+      tabWrapper.unmount();
+      wrapper.unmount();
+    });
+
+    it('Fermer les autres ferme les autres onglets du groupe, pas celui du clic', async () => {
+      const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const other = makePanel('terminal-2');
+      const tab = makeTab('terminal', [other]);
+      const tabWrapper = mountTab(tab.api);
+      clickItem(await openMenu(tabWrapper), 'Fermer les autres');
+      await flushUi();
+
+      expect(other.api.close).toHaveBeenCalledTimes(1);
+      expect(tab.close).not.toHaveBeenCalled();
+      tabWrapper.unmount();
+      wrapper.unmount();
+    });
+
+    it('onglet personnalisé : titre affiché et bouton de fermeture fonctionnel', async () => {
+      const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const tab = makeTab('editor:src/main.rs');
+      const tabWrapper = mountTab(tab.api);
+      expect(tabWrapper.find('.dv-default-tab-content').text()).toBe('main.rs');
+
+      await tabWrapper.find('.dv-default-tab-action').trigger('click');
+      expect(tab.close).toHaveBeenCalledTimes(1);
+      tabWrapper.unmount();
+      wrapper.unmount();
     });
 
     it('pas de Copier le chemin pour un onglet non éditeur', async () => {
       const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
       await new Promise((r) => setTimeout(r, 0));
 
-      const { getTabContextMenuItems } = wrapper.vm as {
-        getTabContextMenuItems: (p: unknown) => unknown[];
-      };
-      const items = getTabContextMenuItems({ panel: { id: 'terminal' } });
+      const tab = makeTab('terminal');
+      const tabWrapper = mountTab(tab.api);
+      const labels = (await openMenu(tabWrapper)).map((el) => el.textContent?.trim());
+      expect(labels).toEqual(['Fermer', 'Fermer les autres', 'Fermer tout']);
+      tabWrapper.unmount();
+      wrapper.unmount();
+    });
 
-      const custom = items.find(
-        (i) => typeof i === 'object' && i !== null && 'label' in i! && (i as { label: string }).label === 'Copier le chemin',
-      );
-      expect(custom).toBeUndefined();
+    it('Copier le chemin écrit le chemin du fichier', async () => {
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const tab = makeTab('editor:src/main.py');
+      const tabWrapper = mountTab(tab.api);
+      clickItem(await openMenu(tabWrapper), 'Copier le chemin');
+      await flushUi();
+
+      expect(writeText).toHaveBeenCalledWith('src/main.py');
+      tabWrapper.unmount();
+      wrapper.unmount();
     });
   });
 

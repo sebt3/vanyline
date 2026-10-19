@@ -40,6 +40,14 @@ Exposes:
     (dashboards, assistants, paramètres) ; ne contient aucune autre logique.
 
 Must:
+  Étapes pilotées par événements (2026-10-19) : ProjectDashboard et HomeDashboard
+    s'enregistrent par `registerProjectRefresh` (../../composables/useSandboxState.sdd) et relisent
+    le Project (resp. la liste des projets) sur chaque événement `project` — plus jamais de lecture
+    unique au montage. Tant que `status.cloned` n'est pas vrai, ProjectDashboard affiche l'étape
+    en cours (« Clone du projet en cours — la création de sandbox sera disponible une fois
+    terminé. ») avec le bouton de création de sandbox désactivé ; dès que le Project relu porte
+    `cloned: true` le message disparaît et le bouton s'active, SANS rechargement de la page.
+    HomeDashboard appelle `reconnectNow()` après une création de Project réussie.
   Se disposer en une colonne sous `md` (sections empilées, assistant en feuille plein écran) et en
     grille à partir de `md`.
   Rafraîchir les phases de sandbox en direct (WebSocket existant) et les statuts de runs par
@@ -100,3 +108,15 @@ Scenario: assistant_projet
   Given l'écran du projet `demo`
   When l'utilisateur ouvre l'assistant
   Then un `ContextChat` de contexte `project` / `demo` s'ouvre (feuille plein écran sous `md`)
+
+Scenario: le_clone_termine_active_la_creation_de_sandbox_sans_rechargement
+  Given ProjectDashboard monté sur un Project à `cloned: false` (message de clone visible, bouton
+    désactivé)
+  When un événement `project` arrive et que la relecture du Project rend `cloned: true`
+  Then le message de clone disparaît et le bouton de création de sandbox est actif, sans
+    nouveau montage du composant
+
+Scenario: creation_de_project_relance_le_hub
+  Given HomeDashboard et un formulaire de création valide
+  When la création réussit
+  Then `reconnectNow()` est appelé une fois

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue';
-import { DockviewVue, type DockviewReadyEvent, type VueComponent, type ContextMenuItem, type GetTabContextMenuItemsParams } from 'dockview-vue';
+import { computed, defineComponent, h, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch, type PropType } from 'vue';
+import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
+import ContextMenu, { type ContextMenuEntry } from './ContextMenu.vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
 import Workflow from './panels/Workflow.vue';
@@ -190,16 +191,83 @@ function copyPanelPath(panelId: string): void {
   void navigator.clipboard.writeText(path).catch(() => {});
 }
 
-/** Menu contextuel natif des onglets : Fermer / Fermer les autres / Fermer
- *  tout, séparateur, puis « Copier le chemin » pour les onglets éditeur
- *  (`editor:<path>`). */
-function getTabContextMenuItems(params: GetTabContextMenuItemsParams): ContextMenuItem[] {
-  const items: ContextMenuItem[] = ['close', 'closeOthers', 'closeAll', 'separator'];
-  if (params.panel.id.startsWith('editor:')) {
-    items.push({ label: 'Copier le chemin', action: () => copyPanelPath(params.panel.id) });
-  }
-  return items;
+/** Sous-ensemble de l'api de panneau dockview utilisé par l'onglet maison. */
+interface TabApi {
+  id: string;
+  title: string | undefined;
+  group: { panels: Array<{ id: string; api: { close(): void } }> };
+  close(): void;
+  onDidTitleChange(listener: (event: { title: string }) => void): { dispose(): void };
 }
+
+/** Onglet dockview maison, à la place de l'onglet par défaut : titre, bouton de
+ *  fermeture, et menu contextuel ContextMenu.vue au clic droit (Fermer, Fermer
+ *  les autres, Fermer tout, séparateur, Copier le chemin pour `editor:<path>`).
+ *  Pas de fonctionnalité dockview-enterprise (cf. ide.sdd). */
+const TabHeader = defineComponent({
+  name: 'IdeTab',
+  props: {
+    api: { type: Object as PropType<TabApi>, required: true },
+    containerApi: { type: Object, default: undefined },
+    params: { type: Object, default: undefined },
+    tabLocation: { type: String, default: undefined },
+  },
+  setup(props) {
+    const title = ref(props.api.title ?? '');
+    const subscription = props.api.onDidTitleChange((event) => {
+      title.value = event.title;
+    });
+    onBeforeUnmount(() => subscription.dispose());
+
+    function entries(): ContextMenuEntry[] {
+      const api = props.api;
+      const list: ContextMenuEntry[] = [
+        { label: 'Fermer', action: () => api.close() },
+        {
+          label: 'Fermer les autres',
+          action: () => {
+            for (const p of [...api.group.panels]) if (p.id !== api.id) p.api.close();
+          },
+        },
+        {
+          label: 'Fermer tout',
+          action: () => {
+            for (const p of [...api.group.panels]) p.api.close();
+          },
+        },
+        { sep: true },
+      ];
+      if (api.id.startsWith('editor:')) {
+        list.push({ label: 'Copier le chemin', action: () => copyPanelPath(api.id) });
+      }
+      return list;
+    }
+
+    return () =>
+      h(ContextMenu, { entries: entries(), fill: true }, {
+        default: () =>
+          h('div', { class: 'dv-default-tab' }, [
+            h('div', { class: 'dv-default-tab-content' }, title.value),
+            h(
+              'button',
+              {
+                type: 'button',
+                class: 'dv-default-tab-action',
+                'aria-label': "Fermer l'onglet",
+                onClick: (event: MouseEvent) => {
+                  event.stopPropagation();
+                  props.api.close();
+                },
+              },
+              '×',
+            ),
+          ]),
+      });
+  },
+});
+
+/** Registre des composants d'onglet : `default` est utilisé pour tous les onglets. */
+const tabComponents = { tab: TabHeader } as unknown as Record<string, VueComponent>;
 
 function addDefaultPanels(api: DockviewReadyEvent['api']) {
   api.addPanel({
@@ -327,7 +395,7 @@ function onReady(event: DockviewReadyEvent) {
   });
 }
 
-defineExpose({ closeFile, openDiff, getTabContextMenuItems });
+defineExpose({ closeFile, openDiff });
 </script>
 
 <template>
@@ -339,7 +407,8 @@ defineExpose({ closeFile, openDiff, getTabContextMenuItems });
       class="dockview-theme-abyss"
       style="width: 100%; height: 100%"
       :components="components"
-      :get-tab-context-menu-items="getTabContextMenuItems"
+      :tab-components="tabComponents"
+      default-tab-component="tab"
       @ready="onReady"
     />
   </div>

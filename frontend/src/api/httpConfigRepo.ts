@@ -237,7 +237,11 @@ export function httpConfigRepo(): ConfigRepo {
     async update(domain: ConfigDomain, name: string, patch: Row): Promise<Row> {
       await ensureRefs(domain);
       const id = await idOf(domain, name);
-      const body = await toRest(domain, { ...patch });
+      // Le PUT générique du serveur attend un modèle complet : fusion avec la ligne courante (lue
+      // sur le serveur, pas dans le cache) pour ne pas perdre les colonnes absentes du patch.
+      const current = await client.get<Row>(`${ENDPOINTS[domain]}/${id}`);
+      const patchRest = await toRest(domain, { ...patch });
+      const body = { ...current, ...patchRest };
       const updated = await client.put<Row>(`${ENDPOINTS[domain]}/${id}`, body);
       await fetchRows(domain);
       return fromRest(domain, updated);

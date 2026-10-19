@@ -6,7 +6,13 @@ import type { RunLaunch, Workflow, WorkflowCreate, WorkflowSummary, WorkflowUpda
 import { ApiError, createApiClient } from '../../api/client';
 import { createWorkflowsClient, EngineUnavailable } from '../../api/workflowsClient';
 import { useCrudResource } from '../../composables/useCrudResource';
-import { useSandboxState, registerRefresh, unregisterRefresh } from '../../composables/useSandboxState';
+import {
+  useSandboxState,
+  registerRefresh,
+  unregisterRefresh,
+  registerProjectRefresh,
+  unregisterProjectRefresh,
+} from '../../composables/useSandboxState';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
@@ -70,10 +76,13 @@ onMounted(() => {
   // de phase — cf. `useSandboxState`.
   registerRefresh(resource.fetch);
   fetchProject();
+  // Événement `project` (clone terminé) : relire le Project, sans recharger la page.
+  registerProjectRefresh(fetchProject);
 });
 
 onBeforeUnmount(() => {
   unregisterRefresh(resource.fetch);
+  unregisterProjectRefresh(fetchProject);
 });
 
 async function fetchProject() {

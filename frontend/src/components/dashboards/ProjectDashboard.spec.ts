@@ -4,6 +4,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ProjectDashboard from './ProjectDashboard.vue';
 import ContextChat from '../ContextChat.vue';
 
+// Capture des rafraîchissements `project` : le test déclenche lui-même l'événement
+// (le hub reste réel pour le reste du fichier).
+const projectRefresh = vi.hoisted(() => ({ fns: new Set<() => void>() }));
+vi.mock('../../composables/useSandboxState', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../composables/useSandboxState')>();
+  return {
+    ...actual,
+    registerProjectRefresh: (fn: () => void) => {
+      projectRefresh.fns.add(fn);
+    },
+    unregisterProjectRefresh: (fn: () => void) => {
+      projectRefresh.fns.delete(fn);
+    },
+  };
+});
+
 beforeEach(() => {
   vi.restoreAllMocks();
   // Nettoyer le body après chaque test (téléport reka-ui)
@@ -903,5 +919,50 @@ describe('ProjectDashboard — flux de workflow (création, édition, erreurs)',
     // Le reste de la page fonctionne toujours.
     expect(wrapper.text()).toContain('build');
     expect(wrapper.find('[data-section="sandboxes"]').exists()).toBe(true);
+  });
+});
+
+describe('ProjectDashboard — événements project (2026-10-19)', () => {
+  it('le_clone_termine_active_la_creation_de_sandbox_sans_rechargement', async () => {
+    projectRefresh.fns.clear();
+    let cloned = false;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    (fetchSpy as any).mockImplementation(async (url: string, init?: RequestInit) => {
+      const m = (init?.method ?? 'GET') as string;
+      const u = String(url);
+      if (m === 'GET' && u === '/api/projects/foo') {
+        return jsonResponse({ metadata: { name: 'foo' }, status: { cloned } });
+      }
+      if (m === 'GET' && u === '/api/sandboxes') return jsonResponse([]);
+      return new Response(null, { status: 500 });
+    });
+
+    const router = createTestRouter();
+    await router.push('/p/foo');
+    await router.isReady();
+    const wrapper = mount(ProjectDashboard, {
+      global: { plugins: [router] },
+      props: { projectName: 'foo' },
+    });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(wrapper.text()).toContain('Clone du projet en cours');
+    const createBtn = wrapper.find('.btn-create').element as HTMLButtonElement;
+    expect(createBtn.disabled).toBe(true);
+
+    // Événement `project` : le clone est terminé côté backend, la relecture rend cloned: true.
+    cloned = true;
+    expect(projectRefresh.fns.size).toBe(1);
+    for (const fn of projectRefresh.fns) fn();
+    await new Promise((r) => setTimeout(r, 0));
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.text()).not.toContain('Clone du projet en cours');
+    expect((wrapper.find('.btn-create').element as HTMLButtonElement).disabled).toBe(false);
+    // Même instance de bouton : pas de nouveau montage.
+    expect(wrapper.find('.btn-create').element).toBe(createBtn);
+    wrapper.unmount();
+    expect(projectRefresh.fns.size).toBe(0);
   });
 });
