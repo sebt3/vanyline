@@ -85,12 +85,7 @@ impl MiryadResource for Entity {
             ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
             ActiveValue::NotSet => "",
         };
-        if mode != "primary" && mode != "subagent" && mode != "all" {
-            return Err(HookError::with_code(
-                "VNL-AGENT-001",
-                format!("mode must be 'primary', 'subagent' or 'all', got: {mode}"),
-            ));
-        }
+        verifier_mode(mode)?;
         // AGENTS SYSTÈME (`Must` agents.sdd l.191-197, system_agents.sdd) : `system_key` et
         // `system_version` sont des colonnes serveur — un corps de création client qui en
         // porte une est refusé. Le CRUD générique ne crée que des agents ordinaires.
@@ -152,6 +147,11 @@ impl MiryadResource for Entity {
                 ));
             }
         }
+        // `agents.sdd` (DÉCIDÉ 2026-10-18) : un `mode` posé par le PUT est revalidé comme à la
+        // création. Après la garde système : sur une ligne système, `VNL-AGENT-002` prime.
+        if let ActiveValue::Set(mode) = &active.mode {
+            verifier_mode(mode)?;
+        }
         Ok(active)
     }
 
@@ -166,6 +166,17 @@ impl MiryadResource for Entity {
         }
         Ok(())
     }
+}
+
+/// Valeurs admises de `mode` (création et mise à jour) : `VNL-AGENT-001` sinon.
+fn verifier_mode(mode: &str) -> Result<(), HookError> {
+    if mode != "primary" && mode != "subagent" && mode != "all" {
+        return Err(HookError::with_code(
+            "VNL-AGENT-001",
+            format!("mode must be 'primary', 'subagent' or 'all', got: {mode}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Vrai quand `current` porte une valeur explicitement posée (`Set`) différente de la
@@ -264,6 +275,53 @@ mod tests {
     fn before_create_rejects_unknown_mode() {
         let err = Entity::before_create(sample("bogus"), &test_principal()).unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-001"));
+    }
+
+    /// `agents.sdd` (tâche DÉCIDÉ 2026-10-18) : `before_update` valide `mode` comme
+    /// `before_create` (mêmes valeurs, même code `VNL-AGENT-001`).
+    #[test]
+    fn before_update_accepte_les_modes_connus() {
+        let existing = sample_model("primary");
+        for mode in ["primary", "subagent", "all"] {
+            let mut active = existing.clone().into_active_model();
+            active.mode = Set(mode.to_string());
+            assert!(
+                Entity::before_update(active, &existing, &test_principal()).is_ok(),
+                "mode {mode} doit passer"
+            );
+        }
+    }
+
+    #[test]
+    fn before_update_rejette_mode_inconnu_avec_vnl_agent_001() {
+        let existing = sample_model("primary");
+        let mut active = existing.clone().into_active_model();
+        active.mode = Set("bogus".to_string());
+        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-AGENT-001"));
+    }
+
+    /// Un update qui ne touche pas `mode` (`NotSet`/`Unchanged`) n'est pas revalidé : la
+    /// valeur relue reste la responsabilité de la ligne existante.
+    #[test]
+    fn before_update_sans_mode_pose_ne_revalide_pas() {
+        let existing = sample_model("primary");
+        let mut active = existing.clone().into_active_model();
+        active.mode = sea_orm::ActiveValue::NotSet;
+        active.system_prompt = Set("autre".to_string());
+        assert!(Entity::before_update(active, &existing, &test_principal()).is_ok());
+    }
+
+    /// La garde des agents SYSTÈME (VNL-AGENT-002) coexiste avec la validation du mode et lui
+    /// est PRIORITAIRE : sur une ligne système, tout changement de `mode` (même invalide) est
+    /// refusé par la garde, la validation du mode n'est jamais atteinte.
+    #[test]
+    fn before_update_garde_systeme_reste_prioritaire_sur_le_mode() {
+        let existing = existing_system_row();
+        let mut active = existing.clone().into_active_model();
+        active.mode = Set("bogus".to_string());
+        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-AGENT-002"));
     }
 
     // ── AGENTS SYSTÈME (agents.sdd `Must` l.191-197 ; Scenario de system_agents.sdd) ──
@@ -519,5 +577,100 @@ mod resource_router_regression {
             first_json["id"], second_json["id"],
             "two creates must not collide on the same auto-increment id"
         );
+    }
+
+    /// Ligne d'agent ordinaire d'`owner` insérée directement ; rend son id.
+    async fn seed_agent_row(db: &DatabaseConnection, owner: i32, profile: i32) -> i32 {
+        crate::db::entities::agents::Entity::insert(crate::db::entities::agents::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set("reviewer".to_string()),
+            description: Set(None),
+            mode: Set("primary".to_string()),
+            model_profile_id: Set(profile),
+            toolsets: Set(serde_json::json!([])),
+            skills: Set(serde_json::json!("auto")),
+            system_prompt: Set(String::new()),
+            system_key: Set(None),
+            system_version: Set(None),
+        })
+        .exec(db)
+        .await
+        .expect("agent row inserts")
+        .last_insert_id
+    }
+
+    /// `PUT /api/v1/agents/{id}` via `resource_router` ; rend le statut et le corps.
+    async fn put_json(
+        app: Router,
+        uri: &str,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("valid request");
+        let resp = app.oneshot(req).await.expect("router does not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("readable body");
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    /// Scenario `put_mode_invalide_rejete_ligne_intacte` (agents.sdd) : un PUT au `mode`
+    /// inconnu est rejeté avec `VNL-AGENT-001` et la ligne en base reste INCHANGÉE ; un PUT
+    /// à valeur valide réussit.
+    #[tokio::test]
+    async fn put_mode_invalide_rejete_ligne_intacte() {
+        let db = real_db().await;
+        let alice = resolve_user(&db, "alice", None)
+            .await
+            .expect("alice resolves");
+        let profile_id = seed_model_profile(&db, alice.id).await;
+        let row_id = seed_agent_row(&db, alice.id, profile_id).await;
+        let state = test_auth_state_with_db(db);
+        let token = bearer_for(&state.db, "alice").await;
+        let app = Router::new()
+            .merge(resource_router::<AgentEntity, _>())
+            .with_state(state.clone());
+        let uri = format!("/api/v1/agents/{row_id}");
+        let body = |mode: &str| {
+            serde_json::json!({
+                "name": "reviewer",
+                "mode": mode,
+                "model_profile_id": profile_id,
+                "toolsets": [],
+                "skills": "auto",
+                "system_prompt": "",
+            })
+        };
+
+        let (status, text) = put_json(app.clone(), &uri, &token, &body("bogus")).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PUT au mode inconnu rejeté : {text}"
+        );
+        assert!(text.contains("VNL-AGENT-001"), "code rendu : {text}");
+        let stored = AgentEntity::find_by_id(row_id)
+            .one(&state.db)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(stored.mode, "primary", "la ligne est restée intacte");
+
+        let (status, text) = put_json(app, &uri, &token, &body("subagent")).await;
+        assert_eq!(status, StatusCode::OK, "PUT valide réussit : {text}");
+        let stored = AgentEntity::find_by_id(row_id)
+            .one(&state.db)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(stored.mode, "subagent");
     }
 }

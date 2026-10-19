@@ -258,4 +258,242 @@ mod tests {
             .expect("a exists");
         assert!(!a.is_default, "previous default must be unset");
     }
+
+    /// Sécurité (2026-09-27) : `api_key` est écriture seule en REST, mais `discover_models`
+    /// doit toujours envoyer la clé stockée en `Authorization: Bearer` (lecture interne de la
+    /// ligne relue en base). Serveur HTTP factice local qui capture la requête.
+    #[tokio::test]
+    async fn discover_models_sends_api_key_stored_in_db() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let state = test_state().await;
+        let db = &state.auth.db;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accepts");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut chunk).await.expect("reads");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(chunk.get(..n).unwrap_or_default());
+            }
+            let body = r#"{"data":[{"id":"m1"}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.expect("writes");
+            String::from_utf8_lossy(&buf).to_string()
+        });
+
+        let id = LlmProviderEntity::insert(ActiveModel {
+            id: NotSet,
+            name: Set("authed-provider".to_string()),
+            provider_type: Set("openai-compatible".to_string()),
+            endpoint: Set(format!("http://127.0.0.1:{port}")),
+            api_key: Set(Some("sk-stored".to_string())),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(false),
+        })
+        .exec(db)
+        .await
+        .expect("provider inserts")
+        .last_insert_id;
+        let row = LlmProviderEntity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("query")
+            .expect("row exists");
+
+        let models = discover_models(&row).await.expect("discovery succeeds");
+        let request = server.await.expect("server task joins");
+
+        assert_eq!(models, vec!["m1".to_string()]);
+        assert!(
+            request.contains("authorization: Bearer sk-stored")
+                || request.contains("Authorization: Bearer sk-stored"),
+            "stored api_key must be sent as Bearer, request was: {request}"
+        );
+    }
+
+    /// `AppState` admin (groupe `admin`) sur la base sqlite de test.
+    async fn admin_state() -> AppState {
+        let state = test_state().await;
+        let db = &state.auth.db;
+        let admin = resolve_user(db, "admin-user", None)
+            .await
+            .expect("admin resolves");
+        sync_group_memberships(db, admin.id, &["admin".to_string()])
+            .await
+            .expect("sync admin group");
+        state
+    }
+
+    /// Cookie de session admin (même clé que `test_state`).
+    fn admin_cookie() -> String {
+        let identity = miryad_core::auth::OidcIdentity {
+            id_token: "e30.eyJleHAiOjQxMDI0NDQ4MDB9.signature".to_string(),
+            subject: "admin-user".to_string(),
+            email: None,
+            preferred_username: None,
+        };
+        miryad_core::auth::cookie::build_set_cookie(
+            &identity,
+            &cookie::Key::from(&[0u8; 64]),
+            false,
+        )
+        .split(';')
+        .next()
+        .expect("cookie has a name=value pair")
+        .to_string()
+    }
+
+    async fn seed_provider(state: &AppState, api_key: Option<&str>) -> i32 {
+        LlmProviderEntity::insert(ActiveModel {
+            id: NotSet,
+            name: Set("seeded".to_string()),
+            provider_type: Set("openai-compatible".to_string()),
+            endpoint: Set("https://llm.example.com".to_string()),
+            api_key: Set(api_key.map(str::to_string)),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(false),
+        })
+        .exec(&state.auth.db)
+        .await
+        .expect("provider inserts")
+        .last_insert_id
+    }
+
+    /// `PUT /api/v1/llm-providers/{id}` via le `resource_router` réel de miryad-core ; rend le
+    /// statut et le corps sans rien asserter.
+    async fn put_provider_raw(
+        state: &AppState,
+        id: i32,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, String) {
+        let app = axum::Router::new()
+            .merge(miryad_core::rest::resource_router::<
+                LlmProviderEntity,
+                AppState,
+            >())
+            .with_state(state.clone());
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/llm-providers/{id}"))
+            .header("Cookie", admin_cookie())
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("valid request");
+        let resp = tower::ServiceExt::oneshot(app, req)
+            .await
+            .expect("router does not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    /// `PUT` qui doit réussir ; rend le corps.
+    async fn put_provider(state: &AppState, id: i32, body: serde_json::Value) -> String {
+        let (status, text) = put_provider_raw(state, id, body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "PUT must succeed: {text}"
+        );
+        text
+    }
+
+    async fn stored_api_key(state: &AppState, id: i32) -> Option<String> {
+        LlmProviderEntity::find_by_id(id)
+            .one(&state.auth.db)
+            .await
+            .expect("query")
+            .expect("row exists")
+            .api_key
+    }
+
+    /// Décision 2026-10-18 (`llm_providers.sdd`, Tasks « MISE À JOUR DES SECRETS ») : un PUT
+    /// sans `api_key` conserve la clé existante (bout en bout, `resource_router`).
+    #[tokio::test]
+    async fn rest_put_sans_api_key_conserve_la_cle() {
+        let state = admin_state().await;
+        let id = seed_provider(&state, Some("sk-secret-123")).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "provider_type": "openai-compatible",
+            "endpoint": "https://llm.example.com"
+        });
+        put_provider(&state, id, body).await;
+        assert_eq!(
+            stored_api_key(&state, id).await.as_deref(),
+            Some("sk-secret-123")
+        );
+    }
+
+    /// `api_key: ""` efface la clé.
+    #[tokio::test]
+    async fn rest_put_api_key_vide_efface_la_cle() {
+        let state = admin_state().await;
+        let id = seed_provider(&state, Some("sk-secret-123")).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "provider_type": "openai-compatible",
+            "endpoint": "https://llm.example.com",
+            "api_key": ""
+        });
+        put_provider(&state, id, body).await;
+        assert_eq!(stored_api_key(&state, id).await, None);
+    }
+
+    /// `api_key` non vide remplace la clé existante.
+    #[tokio::test]
+    async fn rest_put_api_key_non_vide_remplace_la_cle() {
+        let state = admin_state().await;
+        let id = seed_provider(&state, Some("sk-secret-123")).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "provider_type": "openai-compatible",
+            "endpoint": "https://llm.example.com",
+            "api_key": "sk-new"
+        });
+        put_provider(&state, id, body).await;
+        assert_eq!(stored_api_key(&state, id).await.as_deref(), Some("sk-new"));
+    }
+
+    /// Scenario `put_provider_type_invalide_rejete_ligne_intacte` (`llm_providers.sdd`) : un PUT
+    /// au `provider_type` inconnu est rejeté avec `VNL-LLM-005` ; la ligne (type ET clé) reste
+    /// intacte.
+    #[tokio::test]
+    async fn rest_put_provider_type_invalide_rejete_ligne_intacte() {
+        let state = admin_state().await;
+        let id = seed_provider(&state, Some("sk-secret-123")).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "provider_type": "bogus",
+            "endpoint": "https://llm.example.com"
+        });
+        let (status, text) = put_provider_raw(&state, id, body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{text}"
+        );
+        assert!(text.contains("VNL-LLM-005"), "code rendu : {text}");
+        let row = LlmProviderEntity::find_by_id(id)
+            .one(&state.auth.db)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(row.provider_type, "openai-compatible");
+        assert_eq!(row.api_key.as_deref(), Some("sk-secret-123"));
+    }
 }

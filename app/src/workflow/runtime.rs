@@ -376,6 +376,63 @@ async fn retry_enregistrement(
         }
     }
 }
+/// Fenêtre de rétention des runs terminés/échoués (`main.sdd`, purge quotidienne).
+pub(crate) const RETENTION_RUNS_JOURS: i64 = 30;
+
+/// Période de la purge des runs : une fois par jour.
+pub(crate) const PERIODE_PURGE_RUNS: Duration = Duration::from_hours(24);
+
+/// Démarre la purge quotidienne des runs (`workflow_runs::purge_older_than`) : une seule tâche
+/// de fond, appelée par `main` uniquement quand le moteur est configuré. Le premier passage
+/// a lieu IMMÉDIATEMENT au démarrage, puis un par période (décision 2026-10-18).
+pub(crate) fn demarrer_purge_quotidienne(
+    db: sea_orm::DatabaseConnection,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(boucle_purge(
+        || async {
+            tokio::time::sleep(PERIODE_PURGE_RUNS).await;
+            true
+        },
+        move || {
+            let db = db.clone();
+            async move {
+                crate::db::entities::workflow_runs::purge_older_than(&db, RETENTION_RUNS_JOURS)
+                    .await
+            }
+        },
+    ))
+}
+
+/// Boucle de purge (`main.sdd`, Scenario `purge_au_demarrage_puis_quotidienne`) : une purge
+/// IMMÉDIATE, puis `attendre` rend `true` pour continuer, `false` pour arrêter ; une purge en
+/// erreur est journalisée (`tracing::warn!`, `VNL-WF-007`) sans arrêter la tâche, un succès
+/// l'est en `tracing::info!` (`VNL-WF-008`). Le pas de temps est injecté
+/// (`attendre`) pour rester testable sans `sleep` réel.
+pub(crate) async fn boucle_purge<Attente, AttenteFut, Purge, PurgeFut>(
+    mut attendre: Attente,
+    mut purger: Purge,
+) where
+    Attente: FnMut() -> AttenteFut,
+    AttenteFut: std::future::Future<Output = bool>,
+    Purge: FnMut() -> PurgeFut,
+    PurgeFut: std::future::Future<Output = Result<u64, sea_orm::DbErr>>,
+{
+    loop {
+        match purger().await {
+            Ok(supprimes) => {
+                tracing::info!(
+                    "VNL-WF-008: purge quotidienne des runs terminée, {supprimes} run(s) supprimé(s)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("VNL-WF-007: purge quotidienne des runs échouée: {e}");
+            }
+        }
+        if !attendre().await {
+            break;
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,6 +925,87 @@ mod tests {
             sends.as_slice(),
             [format!("/DagInterpreter/{}/run/send", anse.run_key)],
             "la cible est l'ingress, suffixe /send, clé de run dans l'URI"
+        );
+    }
+
+    /// Tampon d'écriture partagé : capture la sortie du subscriber de test.
+    #[derive(Clone, Default)]
+    struct Tampon(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Tampon {
+        fn write(&mut self, octets: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("tampon non empoisonné")
+                .extend_from_slice(octets);
+            Ok(octets.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Scenario: `purge_au_demarrage_puis_quotidienne` (`main.sdd`) — la première purge
+    /// précède TOUTE attente (passage immédiat au démarrage), puis une purge par attente
+    /// acquittée ; un échec est journalisé `VNL-WF-007` sans arrêter la tâche, un succès
+    /// `VNL-WF-008` avec le nombre de lignes supprimées ; la tâche s'arrête quand l'attente
+    /// rend `false`. Aucune attente réelle (pas de `sleep`).
+    #[tokio::test]
+    async fn purge_au_demarrage_puis_quotidienne() {
+        let tampon = Tampon::default();
+        let sortie = tampon.clone();
+        let abonne = tracing_subscriber::fmt()
+            .with_writer(move || sortie.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _garde = tracing::subscriber::set_default(abonne);
+
+        let journal = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let attentes = Arc::new(AtomicUsize::new(0));
+        let purges = Arc::new(AtomicUsize::new(0));
+        let (j_attente, a) = (journal.clone(), attentes.clone());
+        let (j_purge, p) = (journal.clone(), purges.clone());
+        boucle_purge(
+            move || {
+                let (j, a) = (j_attente.clone(), a.clone());
+                async move {
+                    j.lock().expect("journal").push("attente");
+                    a.fetch_add(1, Ordering::SeqCst) < 1
+                }
+            },
+            move || {
+                let (j, n) = (j_purge.clone(), p.fetch_add(1, Ordering::SeqCst));
+                async move {
+                    j.lock().expect("journal").push("purge");
+                    if n == 0 {
+                        Err(sea_orm::DbErr::Custom("base indisponible".to_string()))
+                    } else {
+                        Ok(3)
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            journal.lock().expect("journal").as_slice(),
+            ["purge", "attente", "purge", "attente"],
+            "purge immédiate au démarrage, puis une purge par attente acquittée"
+        );
+        assert_eq!(
+            purges.load(Ordering::SeqCst),
+            2,
+            "l'erreur de la première purge n'arrête pas la tâche"
+        );
+        let logs = String::from_utf8(tampon.0.lock().expect("tampon").clone()).expect("logs UTF-8");
+        assert!(
+            logs.contains("VNL-WF-007"),
+            "échec journalisé avec VNL-WF-007 : {logs}"
+        );
+        assert!(
+            logs.contains("VNL-WF-008") && logs.contains("3 run(s) supprimé(s)"),
+            "succès journalisé avec VNL-WF-008 et le nombre de lignes : {logs}"
         );
     }
 }

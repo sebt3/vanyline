@@ -361,7 +361,7 @@ Tasks:
   [?] Corps de @load_skill brut vs corps TRIMÉ de fs_store (./db/entities/skills.sdd
     `[?]`) : lequel consomme le sandbox/les agents — arbitrer ET aligner les deux
     implémentations dans la même tâche.
-  [ ] BUG CONFIRMÉ (Sébastien, 2026-09-27) : empoisonnement cross-owner de @list_agents —
+  [x] BUG CONFIRMÉ (Sébastien, 2026-09-27) : empoisonnement cross-owner de @list_agents — — FAIT 2026-10-18 (validateur indépendant PASS, mutation démontrée)
     FK `model_profile_id` sans contrôle d'owner + @load_model_profiles filtré => un
     agent dont `model_profile_id` est absent du jeu de profils filtré owner (profil
     d'un autre owner, ou réellement orphelin — @resolve_model_profile_name ne peut pas

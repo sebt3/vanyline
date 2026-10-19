@@ -255,7 +255,7 @@ Scenario: local_tools_absent_du_mode_toolbox
   And les tools locaux du CLI ne sont pas joints au tour (la toolbox MCP les remplace)
 
 Tasks:
-  [!] Aucun confinement côté CLI : @ExecuteCommandTool exécute toute commande
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : assumer — le CLI s'exécute avec les droits de l'utilisateur sur sa propre machine, comme un shell ; aucun confinement partiel qui donnerait une fausse garantie ; le mode `--toolbox` reste la voie confinée) — Aucun confinement côté CLI : @ExecuteCommandTool exécute toute commande
     dans `sh -c` au bénéfice du processus utilisateur, et read/write/delete
     acceptent tout chemin absolu ou `../` (preuve : Scenario
     `aucun_chemin_est_confiné_au_répertoire_courant`). La sandbox confine dans
@@ -264,6 +264,10 @@ Tasks:
     du développeur, qui fait ses propres choix » à contractualiser noir sur
     blanc, ou garde à poser (périmètre de chemins, confirmation avant
     `execute_command`) ?
+    Recommandation (Claude, 2026-10-18) : assumer : le CLI s'exécute avec les droits de l'utilisateur sur sa propre machine (même modèle qu'un
+    shell) ; documenter le contrat tel quel et NE PAS ajouter de confinement partiel qui donnerait une fausse
+    garantie. Le mode `--toolbox` (sandbox) reste la voie confinée.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [!] Panics et unwraps en chemin de production dans @tool_definition
     (`panic!` + deux `as_str().unwrap()`) : contraires au harnais de
     `../../tooling.sdd` (famille panic/unwrap deny hors `cfg(test)`). Dette

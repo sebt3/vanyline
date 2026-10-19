@@ -25,7 +25,9 @@ pub struct Model {
     pub name: String,
     pub server_type: String,
     pub url: String,
-    #[serde(default = "default_json_object")]
+    // Écriture seule (décision Sébastien, 2026-09-27) : `Authorization` et autres en-têtes ne
+    // sont jamais sérialisés dans une réponse REST ; la désérialisation en entrée reste inchangée.
+    #[serde(default = "default_json_object", skip_serializing)]
     pub headers: serde_json::Value,
     #[serde(default = "default_json_array")]
     pub available_tools: serde_json::Value,
@@ -61,12 +63,33 @@ impl MiryadResource for Entity {
             ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
             ActiveValue::NotSet => "",
         };
-        if server_type != "sse" && server_type != "http-streamable" {
-            return Err(HookError::with_code(
-                "VNL-MCP-003",
-                format!("server_type must be 'sse' or 'http-streamable', got: {server_type}"),
-            ));
+        verifier_server_type(server_type)?;
+        Ok(active)
+    }
+
+    /// Mise à jour. (1) `server_type` posé par le PUT est revalidé comme à la création
+    /// (`mcp_servers.sdd`, DÉCIDÉ 2026-10-18). (2) Secrets (décision 2026-10-18, Tasks « MISE À
+    /// JOUR DES SECRETS ») : `headers` n'est jamais relu par un client, donc un `PUT` qui ne le
+    /// porte pas ne doit pas l'effacer. `headers` absent (`{}` par défaut serde) ou objet vide
+    /// ⇒ valeur existante conservée ; objet non vide ⇒ remplacé ; `null` explicite ⇒ effacé.
+    fn before_update(
+        mut active: Self::ActiveModel,
+        existing: &Model,
+        _principal: &AuthPrincipal,
+    ) -> Result<Self::ActiveModel, HookError> {
+        if let ActiveValue::Set(server_type) = &active.server_type {
+            verifier_server_type(server_type)?;
         }
+        let incoming = match &active.headers {
+            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+            ActiveValue::NotSet => default_json_object(),
+        };
+        let effective = match incoming {
+            serde_json::Value::Null => default_json_object(),
+            serde_json::Value::Object(ref map) if map.is_empty() => existing.headers.clone(),
+            other => other,
+        };
+        active.headers = ActiveValue::Set(effective);
         Ok(active)
     }
 }
@@ -74,6 +97,17 @@ impl MiryadResource for Entity {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Valeurs admises de `server_type` (création et mise à jour) : `VNL-MCP-003` sinon.
+fn verifier_server_type(server_type: &str) -> Result<(), HookError> {
+    if server_type != "sse" && server_type != "http-streamable" {
+        return Err(HookError::with_code(
+            "VNL-MCP-003",
+            format!("server_type must be 'sse' or 'http-streamable', got: {server_type}"),
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -122,5 +156,186 @@ mod tests {
     fn before_create_rejects_unknown_server_type() {
         let err = Entity::before_create(sample("bogus"), &test_principal()).unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-MCP-003"));
+    }
+
+    /// `mcp_servers.sdd` (tâche DÉCIDÉ 2026-10-18) : `before_update` valide `server_type`
+    /// comme `before_create` (mêmes valeurs, même code `VNL-MCP-003`).
+    #[test]
+    fn before_update_accepte_les_server_types_connus() {
+        let existing = sample_with_headers();
+        for server_type in ["sse", "http-streamable"] {
+            let mut active = existing.clone().into_active_model();
+            active.server_type = sea_orm::ActiveValue::Set(server_type.to_string());
+            assert!(
+                Entity::before_update(active, &existing, &test_principal()).is_ok(),
+                "server_type {server_type} doit passer"
+            );
+        }
+    }
+
+    #[test]
+    fn before_update_rejette_server_type_inconnu_avec_vnl_mcp_003() {
+        let existing = sample_with_headers();
+        let mut active = existing.clone().into_active_model();
+        active.server_type = sea_orm::ActiveValue::Set("bogus".to_string());
+        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("VNL-MCP-003"));
+    }
+
+    fn sample_with_headers() -> Model {
+        Model {
+            id: 9,
+            name: "secret-mcp".to_string(),
+            server_type: "http-streamable".to_string(),
+            url: "http://localhost:3000/mcp".to_string(),
+            headers: serde_json::json!({"Authorization": "Bearer sk-hdr-123"}),
+            available_tools: serde_json::json!(["fs.read"]),
+        }
+    }
+
+    /// Sécurité (décision Sébastien, 2026-09-27) : `headers` (porte souvent `Authorization`)
+    /// est écriture seule. La ligne seule (GET par id) ne la rend jamais.
+    #[test]
+    fn headers_are_absent_from_single_row_json() {
+        let v = serde_json::to_value(sample_with_headers()).expect("serializes");
+        assert!(
+            v.get("headers").is_none(),
+            "headers must not be serialized in REST responses, got: {v}"
+        );
+        assert_eq!(v["name"], "secret-mcp", "les autres clés restent lisibles");
+    }
+
+    /// Sécurité (2026-09-27) : la page de liste (GET collection) ne rend pas `headers`.
+    #[test]
+    fn headers_are_absent_from_list_page_json() {
+        let page = miryad_core::query::PagedResult {
+            items: vec![sample_with_headers()],
+            page: 1,
+            per_page: 20,
+            total_items: 1,
+            total_pages: 1,
+        };
+        let v = serde_json::to_value(page).expect("serializes");
+        assert!(v["items"][0].get("headers").is_none());
+        assert!(
+            !v.to_string().contains("sk-hdr-123"),
+            "secret leaked in list page: {v}"
+        );
+    }
+
+    /// Écriture inchangée : `headers` reste acceptée en entrée (désérialisation).
+    #[test]
+    fn headers_are_still_accepted_on_input() {
+        let m: Model = serde_json::from_value(serde_json::json!({
+            "name": "p",
+            "server_type": "sse",
+            "url": "http://localhost:3000/mcp",
+            "headers": {"Authorization": "Bearer sk-in"}
+        }))
+        .expect("deserializes");
+        assert_eq!(
+            m.headers,
+            serde_json::json!({"Authorization": "Bearer sk-in"})
+        );
+    }
+
+    /// Écriture inchangée + lecture interne : `headers` reçus en entrée sont persistés et
+    /// relus telle quelle par le chemin `SeaORM`, rotation comprise.
+    #[tokio::test]
+    async fn headers_written_on_input_are_persisted_and_read_internally() {
+        let db = crate::db::test_support::real_db().await;
+        let body: Model = serde_json::from_value(serde_json::json!({
+            "name": "stored",
+            "server_type": "http-streamable",
+            "url": "http://localhost:3000/mcp",
+            "headers": {"Authorization": "Bearer sk-in"}
+        }))
+        .expect("deserializes");
+        let mut active = body.into_active_model();
+        active.id = sea_orm::ActiveValue::NotSet;
+        let id = Entity::insert(active)
+            .exec(&db)
+            .await
+            .expect("insert")
+            .last_insert_id;
+
+        let row = Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(
+            row.headers,
+            serde_json::json!({"Authorization": "Bearer sk-in"})
+        );
+
+        let mut active = row.into_active_model();
+        active.headers =
+            sea_orm::ActiveValue::Set(serde_json::json!({"Authorization": "Bearer sk-rotated"}));
+        Entity::update(active).exec(&db).await.expect("update");
+        let row = Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("row exists");
+        assert_eq!(
+            row.headers,
+            serde_json::json!({"Authorization": "Bearer sk-rotated"})
+        );
+    }
+
+    /// `ActiveModel` tel que `rest::core::update` le passe au hook (`mark_all_set`) avec le
+    /// `headers` donné dans le body.
+    fn put_active(headers: serde_json::Value) -> ActiveModel {
+        let mut a = sample_with_headers().into_active_model();
+        a.headers = sea_orm::ActiveValue::Set(headers);
+        a
+    }
+
+    fn headers_of(a: &ActiveModel) -> serde_json::Value {
+        match &a.headers {
+            sea_orm::ActiveValue::Set(v) | sea_orm::ActiveValue::Unchanged(v) => v.clone(),
+            sea_orm::ActiveValue::NotSet => panic!("headers must be Set after before_update"),
+        }
+    }
+
+    /// Décision 2026-10-18 (`mcp_servers.sdd`, Tasks « MISE À JOUR DES SECRETS ») : `headers`
+    /// absent (donc `{}` par le défaut serde) ou objet vide ⇒ la valeur existante est conservée.
+    #[test]
+    fn put_sans_headers_conserve_les_headers() {
+        let out = Entity::before_update(
+            put_active(serde_json::json!({})),
+            &sample_with_headers(),
+            &test_principal(),
+        )
+        .expect("hook accepts");
+        assert_eq!(
+            headers_of(&out),
+            serde_json::json!({"Authorization": "Bearer sk-hdr-123"})
+        );
+    }
+
+    /// Objet non vide ⇒ remplacé.
+    #[test]
+    fn put_headers_non_vide_remplace() {
+        let out = Entity::before_update(
+            put_active(serde_json::json!({"X-Api-Key": "k2"})),
+            &sample_with_headers(),
+            &test_principal(),
+        )
+        .expect("hook accepts");
+        assert_eq!(headers_of(&out), serde_json::json!({"X-Api-Key": "k2"}));
+    }
+
+    /// `null` EXPLICITE ⇒ efface (`{}` en base).
+    #[test]
+    fn put_headers_null_efface() {
+        let out = Entity::before_update(
+            put_active(serde_json::Value::Null),
+            &sample_with_headers(),
+            &test_principal(),
+        )
+        .expect("hook accepts");
+        assert_eq!(headers_of(&out), serde_json::json!({}));
     }
 }

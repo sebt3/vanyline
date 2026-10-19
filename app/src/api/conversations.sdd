@@ -144,11 +144,10 @@ Returns:
     @Conversation PUIS relecture par id PUIS @to_output.
   - `GET /api/conversations/{id}` — @200 @Json(@ConversationOut) de la conversation
     de l'appelant ; @404 (@AppError::@ConversationNotFound, `VNL-CNV-001`) si aucune
-    ligne à cet id ; @403 (@AppError::@ConversationAccessDenied, `VNL-CNV-002`) si la
-    ligne existe mais appartient à un autre owner — les deux états sont
-    DIFFÉRENCIABLES (cf. `Tasks` `[!]`).
+    ligne à cet id OU si la ligne appartient à un autre owner — les deux états sont
+    INDISCERNABLES (décision 2026-10-18 : l'identifiant d'autrui ≡ inexistant, comme pour l'agent étranger).
   - `DELETE /api/conversations/{id}` — @204 @NO_CONTENT, corps vide, après suppression
-    réelle ; @404 puis @403 dans le même ordre d'évaluation que @get_conversation ;
+    réelle ; @404 (inexistante ou d'un autre owner, comme @get_conversation) ;
     @404 également si le @delete_many (re-filtré sur id ET owner_id) ne touche
     AUCUNE ligne (course entre la lecture et la suppression). La suppression des
     @messages est effectuée par le CASCADE SQL, dont SeaORM ignore l'effet ; le
@@ -156,7 +155,7 @@ Returns:
   - `GET /api/conversations/{id}/messages` — @200 @Json : ARRAY des @MessageModel
     bruts de cette conversation (les 6 clés snake_case verrouillées par
     `../db/entities/messages.sdd`, `owner_id` INCLUS), triées `created_at` ASC
-    (ordre indéfini à égalité), `[]` si aucune ; mêmes @404/@403 que @get_conversation
+    (ordre indéfini à égalité), `[]` si aucune ; même @404 que @get_conversation (inexistante ou d'un autre owner)
     AVANT toute requête sur les messages. La requête messages ne filtre QUE sur
     `conversation_id` — l'autorisation repose entièrement sur le contrôle owner
     préalable de la conversation.
@@ -181,11 +180,10 @@ Raises:
   - @AppError::@ConversationNotFound → @404, `VNL-CNV-001: Conversation not found` :
     id inconnu sur @get_conversation, @delete_conversation et @get_messages ; et sur
     @delete_conversation quand le @delete_many affecte 0 ligne.
-  - @AppError::@ConversationAccessDenied → @403, `VNL-CNV-002: Access denied to
-    conversation` : les trois routes à `{id}` quand `conv.owner_id != principal_user.id`.
-    RISQUE ACCEPTÉ (Sébastien, 2026-09-27) : la distinction @403/@404 permet à un
-    attaquant authentifié de discriminer l'existence d'une conversation d'autrui —
-    dette documentée, pas de correction prévue.
+  - @AppError::@ConversationAccessDenied (`VNL-CNV-002`) : variante RÉSERVÉE, plus émise par ce fichier depuis
+    2026-10-18 — les trois routes à `{id}` rendent @404 (`VNL-CNV-001`) quand `conv.owner_id !=
+    principal_user.id` (oracle d'existence fermé, décision du développeur ; remplace le risque accepté
+    du 2026-09-27).
   - @AppError::@UnprocessableReference(@VnyError::@UnknownReference(`"agent"`, nom))
     → @422 sur @create_conversation (agent demandé introuvable POUR CET OWNER —
     un agent du même nom appartenant à autrui produit le même 422, sans fuite
@@ -212,7 +210,7 @@ Handles:
     - @create_conversation : `owner_id` forcé à l'id résolu (non fournisable par le
       corps) ; agent résolu AVEC filtre owner — EFFECTIF.
     - @get_conversation / @delete_conversation / @get_messages : comparaison manuelle
-      `conv.owner_id != principal_user.id` → @403, plus (delete) re-filtre SQL
+      `conv.owner_id != principal_user.id` → @404 (`VNL-CNV-001`), plus (delete) re-filtre SQL
       id+owner_id sur le @delete_many — EFFECTIF.
     - À l'intérieur de @to_output : la résolution d'agent (@find_by_id sur `agent_id`)
       n'a AUCUN filtre owner. FAILLE DE SÉCURITÉ CONFIRMÉE (Sébastien, 2026-09-27) :
@@ -272,7 +270,7 @@ Must:
     `../db/entities/conversations.sdd` ; ne jamais rendre une conversation
     d'un autre owner.
   - Sur les trois routes à `{id}` : charger la ligne, répondre @404(@VNL-CNV-001) si
-    absente, @403(@VNL-CNV-002) si `owner_id` différent, ET seulement ensuite agir.
+    absente OU d'un autre owner (même @404, indiscernables), ET seulement ensuite agir.
     @delete_conversation conserve le re-filtre SQL (id + owner_id) sur son
     @delete_many et le @rows_affected == 0 → @404.
   - Résoudre l'agent à la création EXCLUSIVEMENT par @resolve_agent_id (filtre
@@ -427,15 +425,14 @@ Scenario: création_avec_agent_inconnu_retourne_422_sans_aucune_écriture
     précède tout effet) — l'agent d'autrui est refusé comme l'inexistant, sans
     distinction
 
-Scenario: lecture_unitaire_retourne_404_403_ou_200_selon_appartenance
+Scenario: lecture_unitaire_retourne_404_pour_inexistante_et_pour_autrui_ou_200
   Given @real_db, les bearer tokens de `alice` et `bob`, et une conversation de
     bob (avec messages) ; id_inexistant = un id sans ligne
   When `GET /conversations/{id}` est adressé trois fois authentifié par alice :
     id_inexistant, id de bob, id d'une conversation d'alice (créée au préalable)
   Then les réponses sont respectivement @404 (corps contenant `VNL-CNV-001`),
-    @403 (corps contenant `VNL-CNV-002`), puis @200 avec le @ConversationOut complet
-    de la conversation d'alice — une conversation d'autrui est DONC distinguable
-    d'une absence (comportement verrouillé tel quel, cf. `Tasks` `[!]`)
+    @404 (corps IDENTIQUE, contenant `VNL-CNV-001`), puis @200 avec le @ConversationOut complet
+    de la conversation d'alice — une conversation d'autrui est INDISCERNABLE d'une absence
 
 Scenario: suppression_retourne_204_supprime_en_cascade_les_messages_et_le_404_suivant
   Given @real_db, alice authentifiée (bearer), une conversation d'alice portant
@@ -443,7 +440,7 @@ Scenario: suppression_retourne_204_supprime_en_cascade_les_messages_et_le_404_su
   When `DELETE /conversations/{id}` authentifié par alice est adressé sur la
     conversation de bob (rejet), puis sur celle d'alice, puis à nouveau sur celle
     d'alice
-  Then les statuts sont @403 (conversation de bob intacte en base), puis @204
+  Then les statuts sont @404 (conversation de bob intacte en base), puis @204
     (corps vide), puis @404 (`VNL-CNV-001`) ; après le @204, les lignes de messages
     de cette conversation ont été supprimées par le CASCADE SQL et la ligne de
     @vanyline_chat_contexts associée est ENCORE PRÉSENTE (comportement documenté,
@@ -460,10 +457,10 @@ Scenario: messages_triés_en_six_clés_brutes_ou_tableau_vide
     (Model brut, contrat `../db/entities/messages.sdd`), ordonnés `created_at`
     ASCendant ; la seconde est @200 avec le ARRAY vide `[]`
 
-Scenario: messages_d_autrui_retourne_403_avant_toute_requête
+Scenario: messages_d_autrui_retourne_404_avant_toute_requête
   Given @real_db, bearer d'alice, une conversation de bob avec messages
   When `GET /conversations/{id_de_bob}/messages` authentifié par alice est adressé
-  Then la réponse a le statut @403 avec `VNL-CNV-002` dans le corps — la requête
+  Then la réponse a le statut @404 avec `VNL-CNV-001` dans le corps — la requête
     sur @vanyline_messages n'est jamais exécutée (l'autorisation est portée par la
     conversation, la requête messages elle-même ne filtre que sur `conversation_id`)
 
@@ -518,6 +515,17 @@ Depends on:
     lints, exemptions `cfg(test)`), conventions `AGENTS.md` (identifiants VNL-*).
 
 Tasks:
+  [ ] Couverture à compléter (validation 2026-10-18) : (a) le Scenario de suppression n'est testé que sur la partie « 404 comme une
+    absente » — ajouter les assertions de CASCADE (messages et `chat_contexts` supprimés après un DELETE de SA conversation) ;
+    (b) verrouiller « avant toute requête » du Scenario messages d'autrui (un compteur de requêtes ou une ligne `messages`
+    piégée qui ferait échouer le test si la requête était exécutée) ; (c) tester le câblage `run_socket → verifier_proprietaire`
+    de ws/chat.rs (aujourd'hui seul la fonction extraite est testée).
+  [x] DÉCIDÉ 2026-10-18 — Oracle d'existence fermé (code à livrer : `get`/`delete`/`messages` de conversations.rs et la garde de ws/chat.rs rendent ConversationNotFound pour un owner différent ; variante ConversationAccessDenied conservée mais non émise, `#[allow(dead_code)]` justifié par cette spec) (revue 2026-10-18) : `get`/`delete` rendent 403 (`ConversationAccessDenied`, `VNL-CNV-002`) — FAIT 2026-10-18 (validateur indépendant PASS ; réserve : le CRUD générique miryad-core garde un oracle 403/404, tracé dans app/src/main.sdd)
+    pour la conversation d'un autre owner mais 404 pour une conversation inexistante ; un utilisateur peut donc
+    sonder l'existence d'identifiants appartenant à autrui.
+    Recommandation (Claude, 2026-10-18) : rendre 404 dans les deux cas pour `get` et `delete` (identifiant d'autrui ≡ inexistant, comme déjà fait pour
+    l'agent étranger), et retirer `VNL-CNV-002` des chemins concernés.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [ ] Lacune constatée en passe P3 (2026-10-14) : le §Must « une conversation de contexte
       `settings` utilise l'AGENT SYSTÈME `config` et le client ne peut pas lui en substituer
       un autre » (et le Scenario `parametres_exige_l_agent_systeme` de
@@ -525,7 +533,7 @@ Tasks:
       `agent_name` ordinaire est accepté en contexte `settings`. Le câbler (imposer
       l'agent système, ou refuser 422 l'agent ordinaire — trancher la forme) + Scenario
       testé.
-  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : @to_output résout l'agent
+  [x] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : @to_output résout l'agent — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       par @find_by_id SANS filtre owner — si une conversation référence l'agent d'un
       autre owner (possible via `../ws/chat.rs`, la FK ne vérifie que l'existence),
       son NOM fuit dans `ConversationOut.agent_name`. Ajouter le filtre `owner_id` à

@@ -95,12 +95,15 @@ impl Drop for BusyGuard {
     }
 }
 
-async fn run_socket(
-    socket: WebSocket,
-    state: AppState,
-    user: AuthUser,
+/// Garde d'appartenance de `run_socket` (`chat.sdd`, DÉCIDÉ 2026-10-18, oracle d'existence
+/// fermé) : rend l'id de l'appelant. La conversation d'un autre owner rend EXACTEMENT l'erreur
+/// d'une conversation inexistante (`ConversationNotFound`, `VNL-CNV-001`), jamais
+/// `ConversationAccessDenied` : un utilisateur ne peut pas sonder l'existence d'un id d'autrui.
+async fn verifier_proprietaire(
+    state: &AppState,
+    user: &AuthUser,
     conversation_id: i32,
-) -> Result<(), AppError> {
+) -> Result<(i32, crate::db::entities::conversations::Model), AppError> {
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
@@ -114,8 +117,18 @@ async fn run_socket(
         .ok_or(AppError::ConversationNotFound)?;
 
     if conv.owner_id != user_id {
-        return Err(AppError::ConversationAccessDenied);
+        return Err(AppError::ConversationNotFound);
     }
+    Ok((user_id, conv))
+}
+
+async fn run_socket(
+    socket: WebSocket,
+    state: AppState,
+    user: AuthUser,
+    conversation_id: i32,
+) -> Result<(), AppError> {
+    let (user_id, conv) = verifier_proprietaire(&state, &user, conversation_id).await?;
 
     // `AuthUser` n'est pas `Clone` (miryad-core) : un `Arc` par socket, cloné vers
     // chaque tâche de tour.
@@ -269,7 +282,10 @@ async fn handle_message(
     user_msg: &str,
 ) -> Result<(), AppError> {
     let db = &state.auth.db;
+    // Filtre owner (ws/chat.sdd Handles, étape 1) : un agent d'un autre owner est
+    // introuvable, comme un agent absent.
     let agent_name: String = crate::db::entities::agents::Entity::find_by_id(agent_id)
+        .filter(crate::db::entities::agents::Column::OwnerId.eq(user_id))
         .one(db)
         .await
         .map_err(AppError::from)?
@@ -694,6 +710,113 @@ mod tests {
         tx
     }
 
+    /// IDOR (ws/chat.sdd `Tasks`, « BUG DE SÉCURITÉ CONFIRMÉ » ; Handles étape 1) : un
+    /// `agent_id` appartenant à un autre owner est traité comme introuvable —
+    /// `AppError::AgentNotFound`, AUCUN message persisté, aucun tour lancé.
+    #[tokio::test]
+    async fn handle_message_refuse_un_agent_dun_autre_owner() {
+        use crate::db::entities::{agents, conversations, messages};
+        use sea_orm::{ColumnTrait, PaginatorTrait, QueryFilter};
+
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let db = state.auth.db.clone();
+        let alice = miryad_core::users::resolve_user(&db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        let bob = miryad_core::users::resolve_user(&db, "bob", None)
+            .await
+            .expect("bob resolves")
+            .id;
+        let provider = crate::db::entities::llm_providers::Entity::insert(
+            crate::db::entities::llm_providers::ActiveModel {
+                id: NotSet,
+                name: Set("prov-bob".to_string()),
+                provider_type: Set("ollama".to_string()),
+                endpoint: Set("http://127.0.0.1:9".to_string()),
+                api_key: Set(None),
+                available_models: Set(serde_json::json!([])),
+                is_default: Set(false),
+            },
+        )
+        .exec(&db)
+        .await
+        .expect("provider inserts")
+        .last_insert_id;
+        let profile_bob = model_profiles::Entity::insert(model_profiles::ActiveModel {
+            id: NotSet,
+            owner_id: Set(bob),
+            name: Set("qwen-bob".to_string()),
+            provider_id: Set(provider),
+            model: Set("qwen".to_string()),
+            temperature: Set(None),
+            max_tokens: Set(None),
+            options: Set(serde_json::json!({})),
+        })
+        .exec(&db)
+        .await
+        .expect("profile inserts")
+        .last_insert_id;
+        let agent_bob = agents::Entity::insert(agents::ActiveModel {
+            id: NotSet,
+            owner_id: Set(bob),
+            name: Set("agent-de-bob".to_string()),
+            description: Set(None),
+            mode: Set("primary".to_string()),
+            model_profile_id: Set(profile_bob),
+            toolsets: Set(serde_json::json!([])),
+            skills: Set(serde_json::json!("auto")),
+            system_prompt: Set(String::new()),
+            system_key: Set(None),
+            system_version: Set(None),
+        })
+        .exec(&db)
+        .await
+        .expect("agent inserts")
+        .last_insert_id;
+        let context_id = seed_context(&state, "chat", serde_json::json!({})).await;
+        let conv = conversations::Entity::insert(conversations::ActiveModel {
+            id: NotSet,
+            owner_id: Set(alice),
+            agent_id: Set(None),
+            context_id: Set(context_id),
+            title: Set(None),
+            todo: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+        })
+        .exec(&db)
+        .await
+        .expect("conversation inserts")
+        .last_insert_id;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            handle_message(
+                &tx,
+                &state,
+                conv,
+                context_id,
+                agent_bob,
+                alice,
+                &test_user(),
+                "bonjour",
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(AppError::AgentNotFound))),
+            "agent d'un autre owner doit être AgentNotFound, obtenu : {result:?}"
+        );
+        let persisted = messages::Entity::find()
+            .filter(messages::Column::ConversationId.eq(conv))
+            .count(&db)
+            .await
+            .expect("count");
+        assert_eq!(persisted, 0, "aucun message ne doit être persisté");
+    }
+
     /// ws/chat.sdd `Must` : une conversation HORS contexte système (ex. `chat`) ne reçoit
     /// aucun serveur forcé et ne fait émettre AUCUN jeton.
     #[tokio::test]
@@ -935,5 +1058,70 @@ mod tests {
             0,
             "le jeton émis pour le tour doit être révoqué même quand le tour échoue"
         );
+    }
+
+    /// Oracle d'existence fermé (`chat.sdd`, DÉCIDÉ 2026-10-18) : pour alice, l'id d'une
+    /// conversation de bob rend EXACTEMENT l'erreur de l'id inexistant (`VNL-CNV-001`) ; la
+    /// conversation d'alice elle-même passe la garde.
+    #[tokio::test]
+    async fn garde_conversation_d_autrui_indiscernable_d_une_absente() {
+        use crate::db::entities::conversations;
+        use sea_orm::EntityTrait;
+
+        let state = test_state_with_db(crate::db::test_support::real_db().await);
+        let db = state.auth.db.clone();
+        let alice = miryad_core::users::resolve_user(&db, "alice", None)
+            .await
+            .expect("alice resolves")
+            .id;
+        let bob = miryad_core::users::resolve_user(&db, "bob", None)
+            .await
+            .expect("bob resolves")
+            .id;
+        let context_id = seed_context(&state, "chat", serde_json::json!({})).await;
+        let insert_conv = |owner: i32| {
+            let db = db.clone();
+            async move {
+                conversations::Entity::insert(conversations::ActiveModel {
+                    id: NotSet,
+                    owner_id: Set(owner),
+                    agent_id: Set(None),
+                    context_id: Set(context_id),
+                    title: Set(None),
+                    todo: Set(None),
+                    created_at: Set(chrono::Utc::now()),
+                    updated_at: Set(chrono::Utc::now()),
+                })
+                .exec(&db)
+                .await
+                .expect("conversation inserts")
+                .last_insert_id
+            }
+        };
+        let bob_conv = insert_conv(bob).await;
+        let alice_conv = insert_conv(alice).await;
+        let absent = bob_conv + 1_000;
+
+        let alice_user = test_user();
+        let err_absent = verifier_proprietaire(&state, &alice_user, absent)
+            .await
+            .expect_err("id inexistant refusé");
+        let err_autrui = verifier_proprietaire(&state, &alice_user, bob_conv)
+            .await
+            .expect_err("id d'autrui refusé");
+        assert_eq!(
+            err_autrui.to_string(),
+            err_absent.to_string(),
+            "un id d'autrui doit être indiscernable d'un id absent"
+        );
+        assert!(
+            err_autrui.to_string().starts_with("VNL-CNV-001"),
+            "code attendu VNL-CNV-001, reçu : {err_autrui}"
+        );
+        let (id_garde, conv_garde) = verifier_proprietaire(&state, &alice_user, alice_conv)
+            .await
+            .expect("la conversation d'alice passe la garde");
+        assert_eq!(id_garde, alice);
+        assert_eq!(conv_garde.id, alice_conv);
     }
 }

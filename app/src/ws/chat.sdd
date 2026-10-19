@@ -763,7 +763,7 @@ Tasks:
     @stream_agent_events, puis celui de la tâche de tour avec double marqueur @From) —
     le `[?]` de `../../../lib/src/event.sdd` sur le code dupliqué doit être tranché ICI
     en cohérence.
-  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : résolution d'agent SANS filtre
+  [x] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : résolution d'agent SANS filtre — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
     owner (@agents::find_by_id(agent_id) par id seul) — miroir de la même correction
     dans ../db/entities/agents.sdd et ../api/conversations.sdd. Ajouter
     `owner_id = user_id` à cette résolution ; agent d'un autre owner → traité comme

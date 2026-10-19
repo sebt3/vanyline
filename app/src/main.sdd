@@ -15,7 +15,7 @@ Purpose:
   6 @resource_router mergés en chemins complets, swagger, @nest `/api` et `/api/v1`,
   routes WS, @with_state, @fallback_service statique SPA) — la frontière avec
   ./api/mod.sdd est celle-là : les préfixes `/api` et `/api/v1` sont la propriété
-  EXCLUSIVE des @nest d'ici ; (4) @openapi_spec, la fusion des six fragments OpenAPI.
+  EXCLUSIVE des @nest d'ici ; (4) @openapi_spec, la fusion des sept fragments OpenAPI.
   Le serveur est en HTTP PLAIN (@tokio::net::TcpListener sans TLS) : le TLS est terminé
   en amont (Ingress de l'Application — cf. ../../docs/architecture.md). Les comportements
   internes des modules (handlers, WS, migrations enfants, config par variable, mapping
@@ -59,17 +59,18 @@ Structure:
   contractuelle (voir Returns/Handles), chaque étape fatale = exactement une ligne
   @tracing::error! avec identifiant `VNL-*` puis @std::process::exit(1).
   @health — fonction privée `async fn health() -> &'static str`, corps littéral `"ok"`.
-  @openapi_spec — fonction privée (documentée par le commentaire de code) : six fragments
+  @openapi_spec — fonction privée (documentée par le commentaire de code) : sept fragments
   @resource_openapi fusionnés par @OpenApi::merge, `info` posé une seule fois sur le
   document final.
   @mod tests (cfg(test)) — un seul test,
-  `openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme` ; c'est le
+  `openapi_spec_exposes_all_seven_resources_without_duplicate_security_scheme` ; c'est le
   SEUL test du fichier ; tout le reste de ./main.rs (séquence, assemblage, codes de
   sortie) n'est testé par aucun test du dépôt (cf. Tasks).
-  Ordre de merge des 6 ressources dans le router : `llm_providers`, `mcp_servers`,
-  `skills`, `toolsets`, `model_profiles`, `agents` ; ordre de fusion dans @openapi_spec :
-  `llm_providers`, `mcp_servers`, `model_profiles`, `toolsets`, `skills`, `agents` — les
-  deux listes diffèrent par l'ordre des 4 dernières (mêmes ensembles, routes disjointes,
+  Ordre de merge des 7 ressources dans le router : `llm_providers`, `mcp_servers`,
+  `skills`, `toolsets`, `model_profiles`, `agents`, `app_settings` (ajouté 2026-10-18 : API du
+  modèle par défaut, écriture AdminOnly) ; ordre de fusion dans @openapi_spec :
+  `llm_providers`, `mcp_servers`, `model_profiles`, `toolsets`, `skills`, `agents`,
+  `app_settings` — les deux listes diffèrent par l'ordre des 4 ressources centrales (mêmes ensembles, routes disjointes,
   résultat équivalent — cf. Tasks).
 
 Exposes:
@@ -210,9 +211,9 @@ Returns:
     attestés par le test de @openapi_spec, le frontend les appelle littéralement).
   - @merge(@mcp_config_router()) — monté revue 2026-10-14 (part `[x]` de la tâche « Moteur
     de workflow et MCP » ci-dessous) : `miryad_core::mcp::@mcp_router` sur @route
-    `"/mcp"`, `POST` seul, registre @McpToolRegistry (@OutputFormat::Json) avec les SIX
+    `"/mcp"`, `POST` seul, registre @McpToolRegistry (@OutputFormat::Json) avec les SEPT
     entités de configuration dans l'ordre llm_providers, mcp_servers, skills, toolsets,
-    model_profiles, agents — CRUD de la configuration par MCP avec l'identité de l'appelant
+    model_profiles, agents, app_settings — CRUD de la configuration par MCP avec l'identité de l'appelant
     (401 sans jeton, jamais 404 ; test `mcp_config_monte_et_authentifie`) ; sans collision
     avec `/mcp/domain` (chemins distincts, pas de préfixe partagé en service).
   - @merge(mcp_domain::@mcp_domain_router()) — monté M1 2026-10-11 (avant les deux
@@ -238,9 +239,9 @@ Returns:
     — SPA : fichier statique sous `STATIC_DIR`, sinon `index.html`. Le @fallback_service
     est branché APRÈS @with_state ; `static_dir` est cloné avant le move de `config` dans
     l'état.
-  @openapi_spec() : document @utoipa OpenAPI — pour chacune des 6 ressources (noms
+  @openapi_spec() : document @utoipa OpenAPI — pour chacune des 7 ressources (noms
     kebab-case `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`, `skills`,
-    `agents`) un chemin collection `/api/v1/{resource}` et un chemin item
+    `agents`, `app-settings`) un chemin collection `/api/v1/{resource}` et un chemin item
     `/api/v1/{resource}/{id}` ; `info.title` = `"vanyline"`, `info.version` =
     `env!("CARGO_PKG_VERSION")` (posés sur le document FINAL, les fragments ne portent
     pas d'`info`) ; exactement UN @security_schemes (le schéma Bearer commun, dédoublonné
@@ -392,7 +393,23 @@ Depends on:
   ../../deploy/web/deployment.yaml + ../../deploy/web/configmap.yaml — consommateurs
     opérationnels de `GET /health`, `LISTEN_ADDR`, `STATIC_DIR`.
 
+Scenario: purge_au_demarrage_puis_quotidienne
+  Given le moteur de workflow configuré et une boucle de purge à attente injectée
+  When la tâche de purge démarre
+  Then une première purge est exécutée IMMÉDIATEMENT, puis une par période de 24 h ; un échec est journalisé en `warn` avec `VNL-WF-007` sans arrêter la tâche, un succès en `info` avec `VNL-WF-008`
+
 Tasks:
+  [?] Oracle d'existence résiduel du CRUD générique (validation 2026-10-18) : le `resource_router` de miryad-core 0.1.5
+    (`rest/core.rs` get/update/delete) rend 404 pour un id inexistant mais 403 pour la ligne d'un autre owner (lecture
+    `OwnerOnly`) sur `/api/v1/agents|model-profiles|skills|toolsets/{id}` et via l'outil MCP générique `/mcp` ; un utilisateur
+    peut sonder l'existence d'identifiants d'autrui. Cet écart est amont, hors de nos lots.
+    Recommandation (Claude, 2026-10-18) : assumer pour l'instant (identifiants entiers séquentiels : l'information divulguée est faible, aucune donnée
+    n'est lisible) et ouvrir un ticket amont chez miryad-core pour un 404 uniforme ; ne PAS réécrire le CRUD générique ici.
+    Réponse du développeur : (à remplir — « défaut » pour suivre la recommandation)
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : première purge AU DÉMARRAGE puis toutes les 24 h ; logs de purge porteurs d'un identifiant `VNL-WF-007` (échec) et `VNL-WF-008` (information : lignes supprimées) ; Scenario `purge_au_demarrage_puis_quotidienne`) — Première purge des runs (revue 2026-10-18) : `demarrer_purge_quotidienne` attend 24 h avant le premier — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
+    passage ; un pod redémarré plus souvent que toutes les 24 h ne purge jamais.
+    Recommandation (Claude, 2026-10-18) : purger une première fois au démarrage (puis toutes les 24 h), les logs de purge portant un identifiant `VNL-*`.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : appeler AUSSI `ensure_system_agents` (idempotent) à la création de conversation en contexte `settings` (`api/conversations.rs`) ; pas de hook miryad-core amont. (Question d'origine : Amorçage des agents système (S8, 2026-10-13) : le point d'appel contracté est
     `ensure_system_agents` à la PREMIÈRE CONNEXION d'un utilisateur, mais `auth_router` de
     miryad-core ne prête aucun hook de login. L'implémentation branche l'amorçage idempotent
@@ -416,6 +433,21 @@ Tasks:
     générique) et les trois migrations (../migration/mod.sdd) ; appeler `ensure_system_agents` à la
     première connexion d'un utilisateur ; planifier `workflow_runs::purge_older_than(30)` une fois
     par jour.
+  [x] MONTAGE DE `app_settings` ET PURGE DES RUNS (décision 2026-10-18) : (1) monter — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
+    `resource_router::<app_settings::Entity>()` (septième ressource : routes, fragment OpenAPI,
+    registre MCP — le frontend édite le modèle par défaut par `/api/v1/app-settings`) ; Scenario
+    `app_settings_monte_ecriture_admin_seule` (un utilisateur ordinaire reçoit 403 en écriture,
+    200 en lecture ; un administrateur peut écrire) ; (2) planifier `workflow_runs::purge_older_than(30)`
+    une fois par jour dans une tâche de fond démarrée avec le moteur de workflow (jamais plus d'une
+    instance, erreur journalisée `tracing::warn` sans arrêter la tâche) ; Scenario
+    `purge_au_demarrage_puis_quotidienne` (ci-dessus) testable par injection de l'attente.
+  [x] MONTAGE DE `GET /api/v1/me` (décision 2026-10-18) : monter `miryad_core::rest::me::me_router::<AppState>()` — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
+    dans le routeur racine (réponse `{ subject, email, groups }`, 401 sans authentification ; le
+    frontend y lit `groups` pour savoir si l'utilisateur est administrateur — groupe `admin`). Sans lui le
+    groupe « Global » des paramètres reste invisible pour tous. Scenario `me_v1_monte_et_rend_les_groupes` :
+    un utilisateur du groupe `admin` reçoit `groups` contenant `"admin"`, un utilisateur ordinaire un
+    tableau sans `"admin"`, une requête sans session reçoit 401. Aucune collision avec `GET /api/me`
+    (route propre à l'app, `api/me.sdd`) ni avec `nest("/api/v1", api_v1_router())`.
   [!] Frontière miryad-core : routes réelles d'@auth_router (hors le callback
     `/auth/callback` mentionné par la doc), chemins/enveloppes exacts de @resource_router,
     modes d'échec de @OidcClient::new (contact issuer au démarrage ?), routes et payload
@@ -566,12 +598,22 @@ Scenario: RUST_LOG=off silence les traces de démarrage
   Then la sortie standard de logging ne contient PAS la ligne `"VNL-CFG-008"` (le filtre
     EnvFilter issu de `RUST_LOG` prime sur le défaut `"vanyline_app=debug,…"`)
 
-Scenario: openapi_spec fusionne six ressources avec un seul schéma de sécurité
+Scenario: routeur_de_production_assemble_sans_panique
+  # Revue du validateur 2026-10-18 : axum PANIQUE au démarrage sur un conflit de chemins ; le routeur
+  # complet n'était jamais assemblé en test.
+  Given la fonction d'assemblage du routeur racine extraite de @main (resources_router, `GET /api/v1/me`,
+    mcp_config_router, mcp_domain_router, `nest("/api/v1", api_v1_router())`, `nest("/api", api_router())`)
+  When elle est appelée avec un @AppState de test (sqlite mémoire)
+  Then elle rend un routeur sans paniquer, et `GET /api/v1/me`, `GET /api/v1/app-settings`, `POST /mcp`,
+    `POST /mcp/domain` répondent autrement que 404 (401 sans authentification)
+
+Scenario: openapi_spec fusionne sept ressources avec un seul schéma de sécurité
   Given un appel direct à @openapi_spec() dans le module de test de ./main.rs (test
-    existant `openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme`)
+    `openapi_spec_exposes_all_seven_resources_without_duplicate_security_scheme`)
   When le document est inspecté
   Then les chemins `/api/v1/{resource}` et `/api/v1/{resource}/{id}` existent pour
-    `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`, `skills`, `agents`
+    `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`, `skills`, `agents`,
+    `app-settings`
     And `info.title` vaut `"vanyline"` et `info.version` la version du crate
     And `components.security_schemes` compte exactement 1 entrée (Bearer dédoublonné)
     And la sécurité globale du document compte exactement 1 entrée

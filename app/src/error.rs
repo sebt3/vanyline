@@ -22,6 +22,8 @@ pub enum AppError {
     UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-CNV-001: Conversation not found")]
     ConversationNotFound,
+    // Réservée, plus émise (`api/conversations.sdd`, oracle d'existence fermé DÉCIDÉ 2026-10-18) : conservée pour `error.sdd`.
+    #[allow(dead_code)]
     #[error("VNL-CNV-002: Access denied to conversation")]
     ConversationAccessDenied,
     #[error("VNL-REQ-001: Request error: {0}")]

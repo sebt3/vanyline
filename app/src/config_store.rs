@@ -277,10 +277,23 @@ impl ConfigStore for PgConfigStore {
     async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
         let rows = self.load_agent_records().await?;
         let profiles = self.load_model_profiles().await?;
-        rows.iter()
-            .map(|r| domain_agent_record(r, &profiles))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| cfg_err(&e))
+        let mut agents = Vec::with_capacity(rows.len());
+        for row in &rows {
+            match domain_agent_record(row, &profiles) {
+                Ok(agent) => agents.push(agent),
+                // Profil absent du jeu de l'owner (autre owner, ou orphelin) : la ligne
+                // est sautée, elle n'empoisonne pas la liste (config_store.sdd, BUG CONFIRMÉ).
+                Err(VnyError::UnknownReference("model", profile_id)) => {
+                    tracing::warn!(
+                        "Skipping agent '{}': model profile '{}' not found for this owner",
+                        row.name,
+                        profile_id
+                    );
+                }
+                Err(e) => return Err(cfg_err(&e)),
+            }
+        }
+        Ok(agents)
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
@@ -1147,6 +1160,29 @@ mod tests {
             &by_name("a-named").skills,
             SkillSelection::Named(names) if names == &vec!["pdf".to_string(), "render".to_string()]
         ));
+    }
+
+    /// Scenario : `list_agents_profil_dun_autre_owner_est_saute_sans_empoisonner_la_liste`.
+    /// Décision Sébastien 2026-09-27 : l'agent dont le profil appartient à un autre owner
+    /// est sauté (+ warn), il ne fait pas échouer la liste de l'owner.
+    #[tokio::test]
+    async fn list_agents_profil_dun_autre_owner_est_saute_sans_empoisonner_la_liste() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        let provider = insert_provider(&db, "ollama-local", "ollama", None).await;
+        let p_alice = insert_profile(&db, alice, "qwen-alice", provider, None).await;
+        let p_bob = insert_profile(&db, bob, "qwen-bob", provider, None).await;
+        insert_agent(&db, alice, "a-valide", p_alice, serde_json::json!("auto")).await;
+        insert_agent(&db, alice, "a-croise", p_bob, serde_json::json!("auto")).await;
+
+        let agents = PgConfigStore::new(db.clone(), alice)
+            .list_agents()
+            .await
+            .expect("la liste d'alice reste lisible malgré le profil de bob");
+        let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["a-valide"]);
+        assert_eq!(agents[0].model, "qwen-alice");
     }
 
     /// Scenario : `les_quatre_tables_owner_filtrees_isolent_les_owners`.

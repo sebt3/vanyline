@@ -209,7 +209,7 @@ Must:
       (décision Sébastien, 2026-09-27).
 
 Must not:
-  - Porter de hook @before_update ou @before_save sans étendre cette spec et la
+  - Porter un hook @before_update (hors celui des secrets, ci-dessous) ou @before_save sans étendre cette spec et la
       migration : en l'état, `server_type` n'est validé qu'à la création (état
       documenté, pas un état voulu — voir Tasks `[!]`).
   - Valider `url`, `name` ou la forme de `headers`/`available_tools` à l'écriture :
@@ -293,44 +293,29 @@ Scenario: Valeurs de headers non string sont acceptées sans filtre à la désé
     SÉRIALISATION, lui, perd `headers` (écriture seule, décision 2026-09-27) — ce
     Scenario teste la désérialisation seule, pas un round-trip.
 
-Scenario: Aucun hook n'intercepte la mise à jour de server_type
-  Given une ligne valide (`server_type: "sse"`) insérée via @Entity::insert sur la
-    base réelle (`../test_support.sdd`, `@real_db`), puis un @ActiveModel qui pose
-    `server_type` à `"bogus"`
-  When @McpServerEntity::update est exécuté
-  Then la mise à jour réussit (aucun @before_update, pas de CHECK SQL) et
-    @build_domain_server de `../../api/mcp_servers.rs` retourne l'erreur
-    `"VNL-MCP-003"` sur la ligne résultante — ce Scenario capture le trou documenté
-    en Tasks `[!]`, pas un état voulu
-
-Depends on:
-  @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, prelude), @serde,
-    @serde_json, @utoipa (@ToSchema), @miryad_core (@auth::AuthPrincipal,
-    @resource::{@AccessPolicy, @HookError, @MiryadResource}) — miryad-core est un
-    crate externe 0.1, hors dépôt.
-  ../../migration/m20260825_000004_create_vanyline_mcp_servers.rs — DDL source de
-    vérité de la table (sa spec propre est en cours).
-  ./mod.rs — déclaration `pub mod mcp_servers;` (cf. `./mod.sdd`).
-  Consommateurs (hors périmètre, comportements cités) : ../../config_store.rs
-    (@domain_mcp_server, @headers_from_json, @list_mcp_servers),
-    ../../api/mcp_servers.rs (@build_domain_server, @test_server) et
-    ../../api/mod.rs (route `/mcp-servers/{id}/test`), ../../main.rs
-    (@resource_router, @resource_openapi, test `openapi_spec_exposes_all_six_resources...`),
-    ../test_support.sdd (base réelle pour le Scenario update).
-  Contrats voisins articulés (jamais fusionnés) :
-    `../../../../cfgstore/src/domain.sdd` (@McpServer/@McpTransport du domaine
-    config), `../../../../lib/src/prefixed_mcp.sdd` (@VnyError::SseNotImplemented,
-    marqueur `"VNL-MCP-004"`).
+Scenario: put_server_type_invalide_rejete_ligne_intacte
+  Given une ligne valide existante
+  When un PUT porte `server_type` = "bogus"
+  Then la mise à jour est rejetée avec `VNL-MCP-003` et la ligne en base est INCHANGÉE ; un PUT à valeur valide réussit
 
 Tasks:
-  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : `headers` (dont
+  [x] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : `headers` (dont — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       `Authorization` des serveurs MCP) est exposé en clair en lecture Public.
       DÉCISION : `headers` devient écriture seule — jamais sérialisé dans une réponse
       REST (`#[serde(skip_serializing)]` ou équivalent), désérialisation en entrée
       inchangée. Répercuter dans `../../api/mcp_servers.sdd` (cohérence
       @build_domain_server, qui doit continuer à lire `headers` en interne depuis la
       ligne chargée, pas depuis une réponse HTTP).
-  [!] `server_type` non validé à la mise à jour : le CHECK SQL d'origine (cité en
+  [x] MISE À JOUR DES SECRETS (décision 2026-10-18, suite de la décision ci-dessus ; le trait — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
+      @MiryadResource de miryad-core 0.1.5 EXPOSE `before_update(active, existing, principal)` —
+      les mentions « pas de before_update » de ce fichier sont périmées pour CE hook) : comme
+      `headers` n'est plus jamais relu par un client, un `PUT` qui ne le porte pas ne doit PAS
+      l'effacer. Implémenter `before_update` : `headers` absent (donc `{}` par le défaut serde) ou
+      objet vide ⇒ la valeur de `existing` est CONSERVÉE ; objet non vide ⇒ remplacée ; `null`
+      EXPLICITE ⇒ EFFACÉE (`{}` en base). Scenario à écrire : `put_sans_headers_conserve_les_headers`,
+      `put_headers_non_vide_remplace`, `put_headers_null_efface`. Ne PAS profiter du hook pour
+      valider `server_type` : cet arbitrage (`[!]` ci-dessous) reste ouvert.
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : valider `server_type` dans `before_update`, mêmes valeurs que `before_create` (`sse`, `http-streamable`), rejet `VNL-MCP-003`, ligne intacte ; Scenario `put_server_type_invalide_rejete_ligne_intacte`) — état avant décision : `server_type` non validé à la mise à jour : le CHECK SQL d'origine (cité en — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       commentaire du fichier, cf. `docs/features/miryad-core-integration.md`)
       n'existe pas dans la migration et @before_create ne couvre que la création ;
       un PUT via `resource_router` (ou tout @McpServerEntity::update) peut mettre un
@@ -340,6 +325,11 @@ Tasks:
       miryad-core en expose un), rétablir un CHECK dans une migration, ou assumer.
       La spec sœur `./toolsets.sdd` (Tasks) signale le même écart depuis l'autre
       côté (validation en `before_create` ailleurs que partout).
+    MISE À JOUR 2026-10-18 : l'affirmation « pas de `before_update` » est PÉRIMÉE — miryad-core 0.1.5 expose
+    `before_update(active, existing, principal)` (déjà utilisé pour les secrets de cette entité / des agents système).
+    Recommandation (Claude, 2026-10-18) : valider `server_type` dans `before_update` (même liste de valeurs que `before_create`, rejet 422 avec le
+    même identifiant `VNL-*`), avec un Scenario de PUT invalide qui laisse la ligne intacte.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [?] miryad-core (crate externe, source non lisible depuis le dépôt) : sémantique
       réelle de @AccessPolicy::Public (tous utilisateurs authentifiés ? anonymes
       admis ?), de @AccessPolicy::AdminOnly (rôle, api token ?), statut HTTP rendu

@@ -3,10 +3,12 @@ use axum::{
     body::to_bytes,
     extract::{Path, Request, State},
     http::StatusCode,
+    response::IntoResponse,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
+use vanyline_lib::k8s::VnlK8sClient;
 
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
@@ -209,26 +211,32 @@ pub async fn ws_ticket(
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(AppError::RequestError)?;
+    let ticket = post_ws_ticket(&http, &url, &owner_token.token).await?;
+
+    Ok(Json(WsTicketOut { ticket, ws_host }))
+}
+
+/// `POST /ws/ticket` vers la sandbox, Bearer du jeton d'Owner, et extraction du champ
+/// `ticket`. Toute panne de transport (connexion, statut d'erreur, lecture ou décodage du
+/// corps en cours de route) passe par `map_relay_err` : jamais de `reqwest::Error` brute
+/// vers le navigateur (`./sandboxes.sdd`, Scenario `panne_de_lecture_du_corps_sans_fuite_d_url`).
+async fn post_ws_ticket(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<String, AppError> {
     let resp = http
-        .post(&url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", owner_token.token),
-        )
+        .post(url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .send()
         .await
         .map_err(|e| map_relay_err(&e))?
         .error_for_status()
         .map_err(|e| map_relay_err(&e))?;
-    let body: serde_json::Value = resp.json().await?;
-    let ticket = body["ticket"].as_str().ok_or_else(|| {
+    let body: serde_json::Value = resp.json().await.map_err(|e| map_relay_err(&e))?;
+    body["ticket"].as_str().map(str::to_string).ok_or_else(|| {
         AppError::InternalError("VNL-SBX-002: sandbox ticket response missing 'ticket'".into())
-    })?;
-
-    Ok(Json(WsTicketOut {
-        ticket: ticket.to_string(),
-        ws_host,
-    }))
+    })
 }
 
 /// Proxy générique vers la sandbox : construit la requête (méthode, URL,
@@ -261,7 +269,7 @@ async fn proxy_git_request(
     // par axum pour une route sandbox non matchée) ne doit pas faire
     // échouer le proxy — on le enveloppe plutôt que de perdre le vrai
     // statut/message derrière une erreur générique.
-    let bytes = resp.bytes().await?;
+    let bytes = resp.bytes().await.map_err(|e| map_relay_err(&e))?;
     let value = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(
         |_| serde_json::json!({ "error": String::from_utf8_lossy(&bytes).into_owned() }),
     );
@@ -317,19 +325,8 @@ pub async fn git_proxy(
     // l'extractor Path) est délibérément ignoré, cf. doc de raw_git_tail.
     let raw_path = raw_git_tail(req.uri().path())?;
 
-    // 1. scoping owner identique à ws_ticket
-    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
-        .await
-        .map_err(AppError::from)?;
-    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
-        return Err(AppError::Forbidden);
-    };
-    let client = k8s::client(&state).await?;
-    let sandbox = client.get_sandbox(&owner, &name).await?;
-    let project = client.get_project(&owner, &sandbox.spec.project).await?;
-    if project.spec.owner != owner {
-        return Err(AppError::Forbidden);
-    }
+    // 1. scoping owner identique à ws_ticket (factorisé dans scope_owned_sandbox)
+    let (owner, client) = scope_owned_sandbox(&state, &user, &name).await?;
 
     // 2. URL interne
     let mut base_url = client.sandbox_git_url(&owner, &name, &raw_path).await?;
@@ -374,6 +371,114 @@ pub async fn git_proxy(
         proxy_git_request(&http, &base_url, method, headers, body, &owner_token.token).await?;
 
     Ok((status, Json(value)))
+}
+
+/// Scoping owner complet d'une sandbox (`./sandboxes.sdd` §Must : `AuthUser` →
+/// `resolve_user` → `resolve_owner_name` → `get_sandbox` → `get_project` → match
+/// d'owner), partagé par `git_proxy` et les relais `/code-health`. Ne demande
+/// AUCUN jeton : l'appelant le fait APRÈS ce contrôle.
+async fn scope_owned_sandbox(
+    state: &AppState,
+    user: &AuthUser,
+    name: &str,
+) -> Result<(String, VnlK8sClient), AppError> {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let Some(owner) = owners::resolve_owner_name(state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
+    };
+    let client = k8s::client(state).await?;
+    let sandbox = client.get_sandbox(&owner, name).await?;
+    let project = client.get_project(&owner, &sandbox.spec.project).await?;
+    if project.spec.owner != owner {
+        return Err(AppError::Forbidden);
+    }
+    Ok((owner, client))
+}
+
+/// URL interne d'un sous-chemin `/code-health*` de la sandbox, dérivée de son
+/// URL `/mcp` (`VnlK8sClient::sandbox_mcp_url`, même service et même port). Une
+/// URL MCP d'une autre forme est une erreur interne, jamais une requête devinée.
+fn code_health_url(mcp_url: &str, suffix: &str) -> Result<String, AppError> {
+    let base = mcp_url
+        .strip_suffix("/mcp")
+        .ok_or_else(|| AppError::InternalError("URL MCP de sandbox inattendue".into()))?;
+    Ok(format!("{base}/code-health{suffix}"))
+}
+
+/// Relais REST `GET /api/sandboxes/{name}/code-health` (`./sandboxes.sdd`
+/// §Exposes `code_health`) : scoping owner, jeton du SA de l'Owner en Bearer,
+/// statut + JSON de la sandbox transmis tels quels. Jamais l'`id_token`.
+pub async fn code_health(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let (owner, client) = scope_owned_sandbox(&state, &user, &name).await?;
+    let mcp_url = client.sandbox_mcp_url(&owner, &name).await?;
+    let url = code_health_url(&mcp_url, "")?;
+    let owner_token = client.owner_token(&owner).await?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(AppError::RequestError)?;
+    let (status, value) = proxy_git_request(
+        &http,
+        &url,
+        reqwest::Method::GET,
+        Vec::new(),
+        Bytes::new(),
+        &owner_token.token,
+    )
+    .await?;
+    Ok((status, Json(value)).into_response())
+}
+
+/// Corps transmis à la sandbox pour `POST /code-health/refresh` : `None` si la
+/// requête n'a pas de corps (la sandbox traite l'absence comme « base et langages
+/// inchangés », cf. `sandbox/src/health.rs` `handle_refresh`), sinon le corps reçu
+/// tel quel (un JSON invalide est refusé par la sandbox, 400 transmis).
+fn refresh_payload(raw: Bytes) -> Option<Bytes> {
+    if raw.is_empty() { None } else { Some(raw) }
+}
+
+/// Relais REST `POST /api/sandboxes/{name}/code-health/refresh`
+/// (`./sandboxes.sdd` §Exposes `code_health_refresh`) : corps JSON transmis tel
+/// quel, 202/400/500 de la sandbox transmis tels quels.
+pub async fn code_health_refresh(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<axum::response::Response, AppError> {
+    let (owner, client) = scope_owned_sandbox(&state, &user, &name).await?;
+    let mcp_url = client.sandbox_mcp_url(&owner, &name).await?;
+    let url = code_health_url(&mcp_url, "/refresh")?;
+    // Corps brut (pas d'extracteur `Json`, qui rendrait 415 sans Content-Type) :
+    // sans corps, rien n'est transmis, pas même un content-type.
+    let (headers, payload) = match refresh_payload(body) {
+        Some(raw) => (
+            vec![("content-type".to_string(), "application/json".to_string())],
+            raw,
+        ),
+        None => (Vec::new(), Bytes::new()),
+    };
+    let owner_token = client.owner_token(&owner).await?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(AppError::RequestError)?;
+    let (status, value) = proxy_git_request(
+        &http,
+        &url,
+        reqwest::Method::POST,
+        headers,
+        payload,
+        &owner_token.token,
+    )
+    .await?;
+    Ok((status, Json(value)).into_response())
 }
 
 #[cfg(test)]
@@ -500,7 +605,252 @@ mod tests {
             .route("/sandboxes/{name}/ws-ticket", post(ws_ticket))
             .route("/sandboxes/{name}/suspend", post(set_sandbox_suspended))
             .route("/sandboxes/{name}/git/{*path}", any(git_proxy))
+            .route("/sandboxes/{name}/code-health", get(code_health))
+            .route(
+                "/sandboxes/{name}/code-health/refresh",
+                post(code_health_refresh),
+            )
             .with_state(state)
+    }
+
+    // ── Scenario: code_health_sans_session_retourne_401 ──
+    #[tokio::test]
+    async fn code_health_sans_session_retourne_401() {
+        let app = make_app(test_key());
+        let get_req = Request::builder()
+            .uri("/sandboxes/s1/code-health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(get_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "GET sans session");
+        let post_req = Request::builder()
+            .uri("/sandboxes/s1/code-health/refresh")
+            .method("POST")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(post_req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "POST refresh sans session"
+        );
+    }
+
+    // ── Scenario: code_health_non_owner_n_appelle_jamais_la_sandbox ──
+    // Base réelle sans lien Owner : refus 403 AVANT tout client K8s et AVANT
+    // toute demande de jeton ; les deux routes sont couvertes.
+    #[tokio::test]
+    async fn code_health_non_owner_n_appelle_jamais_la_sandbox() {
+        let db = crate::db::test_support::real_db().await;
+        let state = test_state_with_db(db);
+        let Err(err) = code_health(State(state.clone()), test_user(), Path("s1".to_string())).await
+        else {
+            panic!("non-owner doit être refusé (GET)");
+        };
+        assert!(
+            matches!(err, AppError::Forbidden),
+            "GET : attendu Forbidden, obtenu {err:?}"
+        );
+        let Err(err) = code_health_refresh(
+            State(state.clone()),
+            test_user(),
+            Path("s1".to_string()),
+            Bytes::from_static(br#"{"base":"main"}"#),
+        )
+        .await
+        else {
+            panic!("non-owner doit être refusé (POST refresh)");
+        };
+        assert!(
+            matches!(err, AppError::Forbidden),
+            "POST : attendu Forbidden, obtenu {err:?}"
+        );
+        assert!(
+            state.k8s.lock().await.is_none(),
+            "aucun client K8s (donc aucun jeton ni appel sandbox) pour un non-owner"
+        );
+    }
+
+    // ── Scenario: code_health_relaye_get_avec_jeton_owner_et_passthrough
+    // (partie hors cluster : URL dérivée, Bearer du jeton d'Owner, statut 200 et
+    // JSON inchangés ; l'obtention du jeton par apiserver reste cluster-manuel) ──
+    #[tokio::test]
+    async fn code_health_relaye_get_avec_jeton_owner_et_passthrough() {
+        let (base, cap) = spawn_sandbox_capture(
+            200,
+            "application/json",
+            r#"{"phase":"fresh","report":null}"#,
+        )
+        .await;
+        let url = code_health_url(&format!("{base}/mcp"), "").unwrap();
+        let (status, value) = proxy_git_request(
+            &reqwest::Client::new(),
+            &url,
+            reqwest::Method::GET,
+            Vec::new(),
+            Bytes::new(),
+            "owner-sa-jeton-alice",
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK, "statut 200 transmis");
+        assert_eq!(value, serde_json::json!({"phase": "fresh", "report": null}));
+        let seen = cap.lock().unwrap().remove(0);
+        assert_eq!(seen.method, "GET");
+        assert_eq!(seen.path_and_query, "/code-health");
+        // Égalité EXACTE du header reçu par la sandbox : `Bearer <jeton du SA>`, rien de plus
+        // (ni préfixe, ni suffixe, ni autre jeton). Le relais ne reçoit que ce jeton en
+        // paramètre : l'exclusion de l'id_token est structurelle à ce niveau.
+        assert_eq!(
+            seen.authorization.as_deref(),
+            Some("Bearer owner-sa-jeton-alice"),
+            "le header Authorization reçu est exactement `Bearer <jeton du SA de l'Owner>`"
+        );
+    }
+
+    // ── Scenario: code_health_refresh_relaye_post_avec_corps_et_statut_202 ──
+    #[tokio::test]
+    async fn code_health_refresh_relaye_post_avec_corps_et_statut_202() {
+        let (base, cap) =
+            spawn_sandbox_capture(202, "application/json", r#"{"accepted":true}"#).await;
+        let url = code_health_url(&format!("{base}/mcp"), "/refresh").unwrap();
+        let (status, value) = proxy_git_request(
+            &reqwest::Client::new(),
+            &url,
+            reqwest::Method::POST,
+            vec![("content-type".to_string(), "application/json".to_string())],
+            Bytes::from_static(br#"{"base":"main"}"#),
+            "owner-sa-jeton-alice",
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::ACCEPTED, "202 transmis");
+        assert_eq!(value, serde_json::json!({"accepted": true}));
+        let seen = cap.lock().unwrap().remove(0);
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path_and_query, "/code-health/refresh");
+        assert_eq!(seen.body, r#"{"base":"main"}"#, "corps transmis tel quel");
+        assert_eq!(seen.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            seen.authorization.as_deref(),
+            Some("Bearer owner-sa-jeton-alice")
+        );
+    }
+
+    // ── Scenario: code_health_refresh_sans_corps_est_accepte ──
+    // Sans corps ⇒ AUCUN corps transmis à la sandbox (elle traite l'absence comme
+    // « base et langages inchangés », cf. sandbox/src/health.rs `handle_refresh`) ;
+    // avec corps JSON ⇒ transmis tel quel. Le fil est vérifié : pas de corps, pas de
+    // content-type, statut 202 rendu tel quel.
+    #[tokio::test]
+    async fn code_health_refresh_sans_corps_est_accepte() {
+        assert_eq!(
+            refresh_payload(Bytes::new()),
+            None,
+            "corps vide ⇒ rien à transmettre"
+        );
+        let raw = Bytes::from_static(br#"{"base":"main"}"#);
+        assert_eq!(
+            refresh_payload(raw.clone()),
+            Some(raw),
+            "corps JSON transmis tel quel"
+        );
+
+        let (base, cap) =
+            spawn_sandbox_capture(202, "application/json", r#"{"accepted":true}"#).await;
+        let url = code_health_url(&format!("{base}/mcp"), "/refresh").unwrap();
+        let (status, _value) = proxy_git_request(
+            &reqwest::Client::new(),
+            &url,
+            reqwest::Method::POST,
+            Vec::new(),
+            Bytes::new(),
+            "owner-sa-jeton-alice",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "202 rendu tel quel sans corps"
+        );
+        let seen = cap.lock().unwrap().remove(0);
+        assert_eq!(seen.body, "", "aucun corps transmis");
+        assert_eq!(seen.content_type, None, "aucun content-type sans corps");
+    }
+
+    // ── Scenario: code_health_statut_derreur_de_la_sandbox_transmis ──
+    #[tokio::test]
+    async fn code_health_statut_derreur_de_la_sandbox_transmis() {
+        let (base, _cap) = spawn_sandbox_capture(
+            400,
+            "application/json",
+            r#"{"error":"VNL-SBX-CH-001: invalid ref"}"#,
+        )
+        .await;
+        let url = code_health_url(&format!("{base}/mcp"), "/refresh").unwrap();
+        let (status, value) = proxy_git_request(
+            &reqwest::Client::new(),
+            &url,
+            reqwest::Method::POST,
+            Vec::new(),
+            Bytes::from_static(br#"{"base":"x"}"#),
+            "owner-sa-jeton",
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "400 d'origine conservé");
+        assert_eq!(
+            value,
+            serde_json::json!({"error": "VNL-SBX-CH-001: invalid ref"}),
+            "JSON d'origine, pas d'error_for_status"
+        );
+    }
+
+    // ── Scenario: code_health_panne_de_relais_sans_fuite_d_url
+    // (partie hors cluster : panne de transport réelle sur le relais code-health
+    // → 502 opaque, sans l'URL interne ; la sandbox injoignable en cluster reste
+    // cluster-manuel) ──
+    #[tokio::test]
+    async fn code_health_panne_de_relais_sans_fuite_d_url() {
+        use axum::response::IntoResponse;
+        let url = code_health_url("http://127.0.0.1:1/mcp", "").unwrap();
+        let Err(err) = proxy_git_request(
+            &reqwest::Client::new(),
+            &url,
+            reqwest::Method::GET,
+            Vec::new(),
+            Bytes::new(),
+            "owner-sa-jeton",
+        )
+        .await
+        else {
+            panic!("adresse fermée ⇒ panne de transport attendue");
+        };
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("corps lisible");
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"VNL-SBX-017: sandbox unavailable"}"#.as_slice()
+        );
+    }
+
+    // ── code_health_url : dérivation de l'URL interne code-health depuis l'URL /mcp ──
+    #[test]
+    fn code_health_url_derive_depuis_l_url_mcp() {
+        assert_eq!(
+            code_health_url("http://sandbox-s1.own.svc:3000/mcp", "").unwrap(),
+            "http://sandbox-s1.own.svc:3000/code-health"
+        );
+        assert_eq!(
+            code_health_url("http://sandbox-s1.own.svc:3000/mcp", "/refresh").unwrap(),
+            "http://sandbox-s1.own.svc:3000/code-health/refresh"
+        );
+        assert!(code_health_url("http://sandbox-s1.own.svc:3000/autre", "").is_err());
     }
 
     #[tokio::test]
@@ -843,6 +1193,98 @@ mod tests {
         assert!(
             !rendu.contains("127.0.0.1") && !rendu.contains("svc"),
             "ni l'adresse fermée ni le suffixe du service interne ne sortent : {rendu}"
+        );
+    }
+
+    /// Serveur TCP brut : lit la requête, répond des en-têtes annonçant `Content-Length: 100`,
+    /// envoie un morceau de corps puis COUPE la connexion (panne pendant la lecture du corps).
+    async fn spawn_coupure_en_cours_de_corps() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let mut recu = Vec::new();
+                while !recu.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => recu.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"par",
+                    )
+                    .await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    // ── Scenario: panne_de_lecture_du_corps_sans_fuite_d_url ──
+    // Coupure de la sandbox APRÈS les en-têtes, pendant la lecture du corps : le relais rend
+    // 502 `VNL-SBX-017` exact, sans l'URL interne ni le message reqwest d'origine.
+    #[tokio::test]
+    async fn panne_de_lecture_du_corps_sans_fuite_d_url() {
+        use axum::response::IntoResponse;
+
+        let base = spawn_coupure_en_cours_de_corps().await;
+        let err = proxy_git_request(
+            &reqwest::Client::new(),
+            &format!("{base}/code-health"),
+            reqwest::Method::GET,
+            Vec::new(),
+            Bytes::new(),
+            "owner-sa-jeton-alice",
+        )
+        .await
+        .expect_err("coupure pendant le corps ⇒ erreur de relais");
+        assert!(
+            matches!(err, AppError::SandboxRelayUnavailable),
+            "panne de lecture ⇒ erreur opaque, obtenu {err:?}"
+        );
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("corps lisible");
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"VNL-SBX-017: sandbox unavailable"}"#.as_slice(),
+            "corps exact, sans fuite"
+        );
+    }
+
+    // ── Même défaut sur le relais de ticket WS (`post_ws_ticket`) ──
+    #[tokio::test]
+    async fn panne_de_lecture_du_ticket_sans_fuite_d_url() {
+        use axum::response::IntoResponse;
+
+        let base = spawn_coupure_en_cours_de_corps().await;
+        let err = post_ws_ticket(
+            &reqwest::Client::new(),
+            &format!("{base}/ws/ticket"),
+            "jeton",
+        )
+        .await
+        .expect_err("coupure pendant le corps ⇒ erreur de relais");
+        assert!(
+            matches!(err, AppError::SandboxRelayUnavailable),
+            "panne de lecture ⇒ erreur opaque, obtenu {err:?}"
+        );
+
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("corps lisible");
+        let rendu = String::from_utf8_lossy(&body);
+        assert!(
+            !rendu.contains("127.0.0.1") && !rendu.contains("ws/ticket"),
+            "ni l'URL interne ni le message d'origine ne sortent : {rendu}"
         );
     }
 

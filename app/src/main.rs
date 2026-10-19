@@ -192,6 +192,9 @@ async fn main() {
                         std::process::exit(1);
                     }),
             );
+            // Purge quotidienne des runs (une seule tâche, moteur configuré seulement) ;
+            // le handle est détaché : la tâche vit avec le processus.
+            let _purge_runs = workflow::runtime::demarrer_purge_quotidienne(state.auth.db.clone());
         }
         Err(e) => {
             tracing::error!("VNL-WF-001: moteur de workflow incapable de démarrer: {e}");
@@ -199,21 +202,30 @@ async fn main() {
         }
     }
 
-    let app = Router::new()
+    let app = build_router(state, &static_dir);
+
+    let listener = tokio::net::TcpListener::bind(listen_addr)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("VNL-NET-001: failed to bind {}: {}", listen_addr, e);
+            std::process::exit(1);
+        });
+    tracing::info!("listening on {}", listen_addr);
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        tracing::error!("VNL-NET-002: server error: {}", e);
+        std::process::exit(1);
+    });
+}
+
+/// Assemblage COMPLET du routeur racine (`main.sdd`, Scenario
+/// `routeur_de_production_assemble_sans_panique`) : extrait de `main` pour être testé tel
+/// qu'en production. Un conflit de chemins entre sous-routeurs fait paniquer axum au montage.
+fn build_router(state: AppState, static_dir: &str) -> Router {
+    Router::new()
         .route("/health", get(health))
         .merge(miryad_core::auth::auth_router())
-        .merge(resource_router::<
-            db::entities::llm_providers::Entity,
-            AppState,
-        >())
-        .merge(resource_router::<db::entities::mcp_servers::Entity, AppState>())
-        .merge(resource_router::<db::entities::skills::Entity, AppState>())
-        .merge(resource_router::<db::entities::toolsets::Entity, AppState>())
-        .merge(resource_router::<
-            db::entities::model_profiles::Entity,
-            AppState,
-        >())
-        .merge(resource_router::<db::entities::agents::Entity, AppState>())
+        .merge(resources_router())
+        .merge(miryad_core::rest::me::me_router::<AppState>())
         .merge(swagger_ui_router::<AppState>(openapi_spec()))
         .merge(mcp_config_router())
         .merge(mcp_domain::mcp_domain_router())
@@ -229,23 +241,33 @@ async fn main() {
         )
         .with_state(state)
         .fallback_service(
-            ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html"))),
-        );
-
-    let listener = tokio::net::TcpListener::bind(listen_addr)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("VNL-NET-001: failed to bind {}: {}", listen_addr, e);
-            std::process::exit(1);
-        });
-    tracing::info!("listening on {}", listen_addr);
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        tracing::error!("VNL-NET-002: server error: {}", e);
-        std::process::exit(1);
-    });
+            ServeDir::new(static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html"))),
+        )
 }
 
-/// `POST /mcp` : CRUD de la configuration (les six ressources du `resource_router`) par le
+/// Les ressources CRUD `resource_router` de miryad-core, montées en chemins complets
+/// `/api/v1/{resource}` (`main.sdd`, Exposes : ordre de merge).
+fn resources_router() -> Router<AppState> {
+    Router::new()
+        .merge(resource_router::<
+            db::entities::llm_providers::Entity,
+            AppState,
+        >())
+        .merge(resource_router::<db::entities::mcp_servers::Entity, AppState>())
+        .merge(resource_router::<db::entities::skills::Entity, AppState>())
+        .merge(resource_router::<db::entities::toolsets::Entity, AppState>())
+        .merge(resource_router::<
+            db::entities::model_profiles::Entity,
+            AppState,
+        >())
+        .merge(resource_router::<db::entities::agents::Entity, AppState>())
+        .merge(resource_router::<
+            db::entities::app_settings::Entity,
+            AppState,
+        >())
+}
+
+/// `POST /mcp` : CRUD de la configuration (les sept ressources du `resource_router`) par le
 /// serveur MCP générique de miryad-core, avec l'identité de l'appelant (`main.sdd`).
 pub(crate) fn mcp_config_router() -> Router<AppState> {
     use miryad_core::mcp::{McpToolRegistry, OutputFormat, mcp_router};
@@ -256,7 +278,8 @@ pub(crate) fn mcp_config_router() -> Router<AppState> {
         .register::<db::entities::skills::Entity>()
         .register::<db::entities::toolsets::Entity>()
         .register::<db::entities::model_profiles::Entity>()
-        .register::<db::entities::agents::Entity>();
+        .register::<db::entities::agents::Entity>()
+        .register::<db::entities::app_settings::Entity>();
     mcp_router(registry)
 }
 
@@ -275,6 +298,7 @@ fn openapi_spec() -> utoipa::openapi::OpenApi {
     spec.merge(resource_openapi::<db::entities::toolsets::Entity>());
     spec.merge(resource_openapi::<db::entities::skills::Entity>());
     spec.merge(resource_openapi::<db::entities::agents::Entity>());
+    spec.merge(resource_openapi::<db::entities::app_settings::Entity>());
     spec.info = utoipa::openapi::Info::new("vanyline", env!("CARGO_PKG_VERSION"));
     spec
 }
@@ -284,7 +308,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme() {
+    fn openapi_spec_exposes_all_seven_resources_without_duplicate_security_scheme() {
         let spec = openapi_spec();
 
         for resource in [
@@ -294,6 +318,7 @@ mod tests {
             "toolsets",
             "skills",
             "agents",
+            "app-settings",
         ] {
             assert!(
                 spec.paths
@@ -322,5 +347,243 @@ mod tests {
             components.security_schemes.keys().collect::<Vec<_>>()
         );
         assert_eq!(spec.security.expect("global security present").len(), 1);
+    }
+
+    /// `AppState` de test sur la base sqlite mémoire (même forme que `api/llm_providers.rs`).
+    async fn test_state() -> AppState {
+        let db = crate::db::test_support::real_db().await;
+        AppState {
+            config: crate::config::Config {
+                oidc_issuer_url: "https://issuer.example.com".to_string(),
+                oidc_client_id: "client-id".to_string(),
+                oidc_client_secret: "client-secret".to_string(),
+                oidc_redirect_url: "https://app.example.com/callback".to_string(),
+                oidc_scopes: vec![],
+                oidc_ca_cert: None,
+                oidc_connect_timeout: std::time::Duration::from_secs(5),
+                oidc_timeout: std::time::Duration::from_secs(15),
+                cookie_secret: "0".repeat(64),
+                database_url: "sqlite::memory:".to_string(),
+                listen_addr: "0.0.0.0:8080".to_string(),
+                static_dir: "./static".to_string(),
+                k8s_namespace: None,
+                application_name: None,
+                default_home_storage_class: None,
+                default_home_access_mode: None,
+                default_project_storage_class: None,
+                default_project_access_mode: None,
+                restate_admin_url: None,
+                restate_ingress_url: None,
+                workflow_listen: "0.0.0.0:9080".to_string(),
+                workflow_deployment_url: None,
+            },
+            cookie_key: cookie::Key::from(&[0u8; 64]),
+            busy: Arc::new(Mutex::new(HashSet::new())),
+            k8s: Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+            shared_sandbox_state: ws::sandbox_state::SharedState::new(),
+            workflow: None,
+        }
+    }
+
+    /// Crée l'utilisateur `subject` (et l'ajoute au groupe `admin` si demandé) puis rend
+    /// son cookie de session (même clé que `test_state`).
+    async fn session_cookie(state: &AppState, subject: &str, admin: bool) -> String {
+        use miryad_core::users::{resolve_user, sync_group_memberships};
+        let user = resolve_user(&state.auth.db, subject, None)
+            .await
+            .expect("user resolves");
+        if admin {
+            sync_group_memberships(&state.auth.db, user.id, &["admin".to_string()])
+                .await
+                .expect("admin group synced");
+        }
+        let identity = miryad_core::auth::OidcIdentity {
+            id_token: "e30.eyJleHAiOjQxMDI0NDQ4MDB9.signature".to_string(),
+            subject: subject.to_string(),
+            email: None,
+            preferred_username: None,
+        };
+        miryad_core::auth::cookie::build_set_cookie(
+            &identity,
+            &cookie::Key::from(&[0u8; 64]),
+            false,
+        )
+        .split(';')
+        .next()
+        .expect("cookie has a name=value pair")
+        .to_string()
+    }
+
+    /// Scenario: `app_settings_monte_ecriture_admin_seule` — `/api/v1/app-settings` est monté
+    /// par `resources_router` : un utilisateur ordinaire authentifié lit (200) et ne peut pas
+    /// écrire (403) ; un administrateur écrit.
+    #[tokio::test]
+    async fn app_settings_monte_ecriture_admin_seule() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state().await;
+        let user_cookie = session_cookie(&state, "alice", false).await;
+        let admin_cookie = session_cookie(&state, "admin-user", true).await;
+        let body = serde_json::json!({
+            "key": "default_model",
+            "value": {"provider_id": 1, "model": "qwen3.6:35b-a3b"}
+        })
+        .to_string();
+        let app = resources_router().with_state(state);
+
+        let read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/app-settings")
+                    .header("Cookie", user_cookie.as_str())
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router does not fail");
+        assert_eq!(
+            read.status(),
+            StatusCode::OK,
+            "lecture ouverte aux authentifiés"
+        );
+
+        let user_write = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/app-settings")
+                    .header("Cookie", user_cookie.as_str())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router does not fail");
+        assert_eq!(
+            user_write.status(),
+            StatusCode::FORBIDDEN,
+            "écriture réservée aux administrateurs"
+        );
+
+        let admin_write = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/app-settings")
+                    .header("Cookie", admin_cookie.as_str())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router does not fail");
+        assert!(
+            admin_write.status().is_success(),
+            "un administrateur peut écrire, got {}",
+            admin_write.status()
+        );
+    }
+
+    /// Scenario: `routeur_de_production_assemble_sans_panique` — le routeur racine complet
+    /// (`build_router`) s'assemble sans conflit de chemins et sert les routes critiques
+    /// (jamais 404 ; 401 sans authentification).
+    #[tokio::test]
+    async fn routeur_de_production_assemble_sans_panique() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state().await;
+        let app = build_router(state, "./static");
+
+        for (method, uri) in [
+            ("GET", "/api/v1/me"),
+            ("GET", "/api/v1/app-settings"),
+            ("POST", "/mcp"),
+            ("POST", "/mcp/domain"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router does not fail");
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} doit être monté"
+            );
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} sans authentification"
+            );
+        }
+    }
+
+    /// Scenario: `me_v1_monte_et_rend_les_groupes` — `GET /api/v1/me` (miryad-core `me_router`)
+    /// rend les groupes de l'appelant : `admin` pour un administrateur, pas pour un utilisateur
+    /// ordinaire ; sans session, 401.
+    #[tokio::test]
+    async fn me_v1_monte_et_rend_les_groupes() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state().await;
+        let user_cookie = session_cookie(&state, "alice", false).await;
+        let admin_cookie = session_cookie(&state, "admin-user", true).await;
+        let app = build_router(state, "./static");
+
+        for (cookie, expect_admin) in [(user_cookie.as_str(), false), (admin_cookie.as_str(), true)]
+        {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/me")
+                        .header("Cookie", cookie)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router does not fail");
+            assert_eq!(resp.status(), StatusCode::OK, "GET /api/v1/me authentifié");
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body readable");
+            let json: serde_json::Value = serde_json::from_slice(&bytes).expect("corps JSON");
+            let groups = json["groups"].as_array().expect("groups est un tableau");
+            assert_eq!(
+                groups.iter().any(|g| g == "admin"),
+                expect_admin,
+                "groupe admin attendu={expect_admin}, groupes={groups:?}"
+            );
+        }
+
+        let anonyme = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/me")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router does not fail");
+        assert_eq!(
+            anonyme.status(),
+            StatusCode::UNAUTHORIZED,
+            "sans session ⇒ 401"
+        );
     }
 }

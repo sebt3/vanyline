@@ -97,6 +97,11 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/sandboxes/{name}/ws-ticket", post(sandboxes::ws_ticket))
         .route("/sandboxes/{name}/git/{*path}", any(sandboxes::git_proxy))
+        .route("/sandboxes/{name}/code-health", get(sandboxes::code_health))
+        .route(
+            "/sandboxes/{name}/code-health/refresh",
+            post(sandboxes::code_health_refresh),
+        )
         .route(
             "/sandboxes/{sandbox}/runs",
             get(workflows::list_sandbox_runs),

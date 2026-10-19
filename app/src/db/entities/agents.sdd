@@ -367,6 +367,11 @@ Depends on:
     @AgentMode, @SkillSelection de domaine), `docs/features/miryad-core-integration.md`
     (historique Phase 1–3 de la bascule).
 
+Scenario: put_mode_invalide_rejete_ligne_intacte
+  Given une ligne valide existante
+  When un PUT porte `mode` = "bogus"
+  Then la mise à jour est rejetée avec `VNL-AGENT-001` et la ligne en base est INCHANGÉE ; un PUT à valeur valide réussit
+
 Tasks:
   [!] Cartographie des tests internes (seule entité avec tests DB réels) :
       `@mod tests` — `agent_record_resource_contract` (Scenario « Contrat ressource des
@@ -387,14 +392,19 @@ Tasks:
       ligne complète ») est DÉSORMAIS COUVERT par @serialisation_expose_la_forme_ligne_complete
       (11 clés depuis les champs système S8) ; les hooks AGENTS SYSTÈME ont leurs tests
       homonymes (`before_create_refuse_*`, `before_update_*`, `before_delete_*`).
-  [!] `mode` non gardé en UPDATE : @before_create ne couvre que la création ; si
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : valider `mode` dans `before_update`, mêmes valeurs que `before_create` (`primary`, `subagent`, `all`), rejet `VNL-AGENT-001`, ligne intacte ; Scenario `put_mode_invalide_rejete_ligne_intacte`) — état avant décision : `mode` non gardé en UPDATE : @before_create ne couvre que la création ; si — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       `resource_router` de miryad-core expose un PUT/PATCH, un `mode` invalide peut être
       écrit en modification, puis faire ÉCHECHER DURABLEMENT tout `list_agents` de
       l'owner (`@agent_mode_from_str` de `../config_store.rs` est en erreur dure, et
       `list_agents` est un `collect::<Result<_>>` — une ligne poison = toute la liste
       en @CfgStoreError::Config). Ajout d'un CHECK SQL, d'un hook de update, ou
       assumption ? À trancher avec Sébastien.
-  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : résolutions d'agent SANS
+    MISE À JOUR 2026-10-18 : l'affirmation « pas de `before_update` » est PÉRIMÉE — miryad-core 0.1.5 expose
+    `before_update(active, existing, principal)` (déjà utilisé pour les secrets de cette entité / des agents système).
+    Recommandation (Claude, 2026-10-18) : valider `mode` dans `before_update` (même liste de valeurs que `before_create`, rejet 422 avec le
+    même identifiant `VNL-*`), avec un Scenario de PUT invalide qui laisse la ligne intacte.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
+  [x] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : résolutions d'agent SANS — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       filtre owner sur deux chemins — `../ws/chat.rs` @handle_message
       (@find_by_id(agent_id) seul) et `../api/conversations.rs` @to_output
       (@find_by_id(id) seul). Ajouter `owner_id = user_id` aux deux résolutions, sur le

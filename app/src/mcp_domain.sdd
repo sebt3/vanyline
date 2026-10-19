@@ -65,7 +65,8 @@ Handles:
   sinon. Les sorties sont du texte ou du JSON BORNÉ (au plus 8 KiB) : une liste longue est tronquée
   avec un marqueur, jamais rendue entière. Les outils destructifs portent la mention
   « destructif » dans leur description, à titre d'information : aucune confirmation n'est exigée
-  (mode « yolo », ./system_agents.sdd). Une erreur d'outil rend un résultat
+  côté outil (le comportement de l'agent face à une action destructive relève de son prompt,
+  ./system_agents.sdd). Une erreur d'outil rend un résultat
   `isError: true` avec un message, jamais un code JSON-RPC (même convention que la
   sandbox — clarification validation M1 : la clause porte sur l'EXÉCUTION d'un outil
   nommé ; l'enveloppe garde ses codes protocolaires, exactement la convention sandbox :

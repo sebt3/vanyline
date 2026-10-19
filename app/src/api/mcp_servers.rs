@@ -265,4 +265,251 @@ mod tests {
         let json = serde_json::to_value(&result).expect("serialize McpTestResult");
         assert_eq!(json, serde_json::json!({"tools": ["fs.read", "fs.write"]}));
     }
+
+    /// Sécurité (2026-09-27) : `headers` est écriture seule en REST, mais `build_domain_server`
+    /// doit continuer à recopier `Authorization` depuis la ligne relue en base (chemin Rust
+    /// natif, sans sérialisation JSON).
+    #[tokio::test]
+    async fn build_domain_server_uses_headers_stored_in_db() {
+        use crate::db::entities::mcp_servers::ActiveModel;
+        use sea_orm::ActiveValue::{NotSet, Set};
+
+        let db = crate::db::test_support::real_db().await;
+        let id = McpServerEntity::insert(ActiveModel {
+            id: NotSet,
+            name: Set("authed".to_string()),
+            server_type: Set("http-streamable".to_string()),
+            url: Set("http://localhost:3000/mcp".to_string()),
+            headers: Set(serde_json::json!({"Authorization": "Bearer stored-token"})),
+            available_tools: Set(serde_json::json!([])),
+        })
+        .exec(&db)
+        .await
+        .expect("insert")
+        .last_insert_id;
+
+        let row = McpServerEntity::find_by_id(id)
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("row exists");
+        let domain = build_domain_server(&row).expect("maps");
+        assert_eq!(
+            domain.headers.get("Authorization").map(String::as_str),
+            Some("Bearer stored-token")
+        );
+    }
+
+    /// `AppState` admin (groupe `admin`) sur la base sqlite de test.
+    async fn admin_state() -> AppState {
+        let state = AppState {
+            config: crate::config::Config {
+                oidc_issuer_url: "https://issuer.example.com".to_string(),
+                oidc_client_id: "client-id".to_string(),
+                oidc_client_secret: "client-secret".to_string(),
+                oidc_redirect_url: "https://app.example.com/callback".to_string(),
+                oidc_scopes: vec![],
+                oidc_ca_cert: None,
+                oidc_connect_timeout: std::time::Duration::from_secs(5),
+                oidc_timeout: std::time::Duration::from_secs(15),
+                cookie_secret: "0".repeat(64),
+                database_url: "postgres://localhost/test".to_string(),
+                listen_addr: "0.0.0.0:8080".to_string(),
+                static_dir: "./static".to_string(),
+                k8s_namespace: None,
+                application_name: None,
+                default_home_storage_class: None,
+                default_home_access_mode: None,
+                default_project_storage_class: None,
+                default_project_access_mode: None,
+                restate_admin_url: None,
+                restate_ingress_url: None,
+                workflow_listen: "0.0.0.0:9080".to_string(),
+                workflow_deployment_url: None,
+            },
+            cookie_key: test_key(),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(
+                crate::db::test_support::real_db().await,
+            ),
+            shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+            workflow: None,
+        };
+        let db = &state.auth.db;
+        let admin = miryad_core::users::resolve_user(db, "admin-user", None)
+            .await
+            .expect("admin resolves");
+        miryad_core::users::sync_group_memberships(db, admin.id, &["admin".to_string()])
+            .await
+            .expect("sync admin group");
+        state
+    }
+
+    /// Cookie de session admin (même clé que `admin_state`).
+    fn admin_cookie() -> String {
+        let identity = miryad_core::auth::OidcIdentity {
+            id_token: "e30.eyJleHAiOjQxMDI0NDQ4MDB9.signature".to_string(),
+            subject: "admin-user".to_string(),
+            email: None,
+            preferred_username: None,
+        };
+        miryad_core::auth::cookie::build_set_cookie(&identity, &test_key(), false)
+            .split(';')
+            .next()
+            .expect("cookie has a name=value pair")
+            .to_string()
+    }
+
+    async fn seed_server(state: &AppState, headers: serde_json::Value) -> i32 {
+        use crate::db::entities::mcp_servers::ActiveModel;
+        use sea_orm::ActiveValue::{NotSet, Set};
+        McpServerEntity::insert(ActiveModel {
+            id: NotSet,
+            name: Set("seeded".to_string()),
+            server_type: Set("http-streamable".to_string()),
+            url: Set("http://localhost:3000/mcp".to_string()),
+            headers: Set(headers),
+            available_tools: Set(serde_json::json!([])),
+        })
+        .exec(&state.auth.db)
+        .await
+        .expect("server inserts")
+        .last_insert_id
+    }
+
+    /// `PUT /api/v1/mcp-servers/{id}` via le `resource_router` réel de miryad-core ; rend le
+    /// statut et le corps sans rien asserter.
+    async fn put_server_raw(
+        state: &AppState,
+        id: i32,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, String) {
+        let app = axum::Router::new()
+            .merge(miryad_core::rest::resource_router::<
+                McpServerEntity,
+                AppState,
+            >())
+            .with_state(state.clone());
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/mcp-servers/{id}"))
+            .header("Cookie", admin_cookie())
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .expect("valid request");
+        let resp = tower::ServiceExt::oneshot(app, req)
+            .await
+            .expect("router does not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    /// `PUT` qui doit réussir.
+    async fn put_server(state: &AppState, id: i32, body: serde_json::Value) {
+        let (status, text) = put_server_raw(state, id, body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "PUT must succeed: {text}"
+        );
+    }
+
+    async fn stored_server_type(state: &AppState, id: i32) -> String {
+        McpServerEntity::find_by_id(id)
+            .one(&state.auth.db)
+            .await
+            .expect("query")
+            .expect("row exists")
+            .server_type
+    }
+
+    async fn stored_headers(state: &AppState, id: i32) -> serde_json::Value {
+        McpServerEntity::find_by_id(id)
+            .one(&state.auth.db)
+            .await
+            .expect("query")
+            .expect("row exists")
+            .headers
+    }
+
+    /// Décision 2026-10-18 (`mcp_servers.sdd`, Tasks « MISE À JOUR DES SECRETS ») : un PUT sans
+    /// `headers` conserve les en-têtes existants (bout en bout, `resource_router`).
+    #[tokio::test]
+    async fn rest_put_sans_headers_conserve_les_headers() {
+        let state = admin_state().await;
+        let id = seed_server(&state, serde_json::json!({"Authorization": "Bearer keep"})).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "server_type": "http-streamable",
+            "url": "http://localhost:3000/mcp"
+        });
+        put_server(&state, id, body).await;
+        assert_eq!(
+            stored_headers(&state, id).await,
+            serde_json::json!({"Authorization": "Bearer keep"})
+        );
+    }
+
+    /// Objet non vide remplace les en-têtes existants.
+    #[tokio::test]
+    async fn rest_put_headers_non_vide_remplace() {
+        let state = admin_state().await;
+        let id = seed_server(&state, serde_json::json!({"Authorization": "Bearer old"})).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "server_type": "http-streamable",
+            "url": "http://localhost:3000/mcp",
+            "headers": {"Authorization": "Bearer new"}
+        });
+        put_server(&state, id, body).await;
+        assert_eq!(
+            stored_headers(&state, id).await,
+            serde_json::json!({"Authorization": "Bearer new"})
+        );
+    }
+
+    /// `headers: null` explicite efface les en-têtes (`{}` en base).
+    #[tokio::test]
+    async fn rest_put_headers_null_efface() {
+        let state = admin_state().await;
+        let id = seed_server(&state, serde_json::json!({"Authorization": "Bearer old"})).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "server_type": "http-streamable",
+            "url": "http://localhost:3000/mcp",
+            "headers": null
+        });
+        put_server(&state, id, body).await;
+        assert_eq!(stored_headers(&state, id).await, serde_json::json!({}));
+    }
+
+    /// Scenario `put_server_type_invalide_rejete_ligne_intacte` (`mcp_servers.sdd`) : un PUT au
+    /// `server_type` inconnu est rejeté avec `VNL-MCP-003` ; la ligne (type ET en-têtes)
+    /// reste intacte.
+    #[tokio::test]
+    async fn rest_put_server_type_invalide_rejete_ligne_intacte() {
+        let state = admin_state().await;
+        let id = seed_server(&state, serde_json::json!({"Authorization": "Bearer keep"})).await;
+        let body = serde_json::json!({
+            "name": "seeded",
+            "server_type": "bogus",
+            "url": "http://localhost:3000/mcp"
+        });
+        let (status, text) = put_server_raw(&state, id, body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{text}"
+        );
+        assert!(text.contains("VNL-MCP-003"), "code rendu : {text}");
+        assert_eq!(stored_server_type(&state, id).await, "http-streamable");
+        assert_eq!(
+            stored_headers(&state, id).await,
+            serde_json::json!({"Authorization": "Bearer keep"})
+        );
+    }
 }

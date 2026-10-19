@@ -63,7 +63,10 @@ async fn to_output(state: &AppState, conv: ConversationModel) -> Result<Conversa
     let agent_name = match conv.agent_id {
         Some(id) => {
             use crate::db::entities::agents::Entity as AgentEntity;
+            // Filtre owner (conversations.sdd `Tasks`) : un agent d'un autre owner est
+            // traité comme absent, `agent_name` reste `null`.
             AgentEntity::find_by_id(id)
+                .filter(crate::db::entities::agents::Column::OwnerId.eq(conv.owner_id))
                 .one(db)
                 .await
                 .map_err(AppError::from)?
@@ -262,7 +265,9 @@ pub async fn get_conversation(
 
     // RBAC : owner check à la main
     if conv.owner_id != principal_user.id {
-        return Err(AppError::ConversationAccessDenied);
+        // Oracle d'existence fermé (`conversations.sdd`, DÉCIDÉ 2026-10-18) : l'id d'autrui
+        // rend exactement la réponse de l'id inexistant.
+        return Err(AppError::ConversationNotFound);
     }
 
     let out = to_output(&state, conv).await?;
@@ -286,7 +291,9 @@ pub async fn delete_conversation(
         .ok_or(AppError::ConversationNotFound)?;
 
     if conv.owner_id != principal_user.id {
-        return Err(AppError::ConversationAccessDenied);
+        // Oracle d'existence fermé (`conversations.sdd`, DÉCIDÉ 2026-10-18) : l'id d'autrui
+        // rend exactement la réponse de l'id inexistant.
+        return Err(AppError::ConversationNotFound);
     }
 
     let count = ConversationEntity::delete_many()
@@ -320,7 +327,9 @@ pub async fn get_messages(
         .ok_or(AppError::ConversationNotFound)?;
 
     if conv.owner_id != principal_user.id {
-        return Err(AppError::ConversationAccessDenied);
+        // Oracle d'existence fermé (`conversations.sdd`, DÉCIDÉ 2026-10-18) : l'id d'autrui
+        // rend exactement la réponse de l'id inexistant.
+        return Err(AppError::ConversationNotFound);
     }
 
     let messages = MessageEntity::find()
@@ -971,6 +980,50 @@ mod tests {
         );
     }
 
+    /// IDOR (conversations.sdd `Tasks`, « BUG DE SÉCURITÉ CONFIRMÉ ») : une conversation
+    /// d'alice dont `agent_id` pointe l'agent de bob ne doit PAS faire fuiter le nom de
+    /// cet agent : `agent_name` est `null`, sans erreur.
+    #[tokio::test]
+    async fn get_conversation_n_expose_pas_le_nom_dun_agent_dun_autre_owner() {
+        let db = real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        let bob = seed_user(&db, "bob").await;
+        let profile_bob = seed_profile(&db, bob).await;
+        seed_agent(&db, bob, "agent-de-bob", profile_bob).await;
+        let agent_bob = agents::Entity::find()
+            .filter(agents::Column::Name.eq("agent-de-bob"))
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("agent de bob seeded")
+            .id;
+        let context = seed_context(&db, "sb-alice").await;
+        let conv = conversations::Entity::insert(conversations::ActiveModel {
+            id: NotSet,
+            owner_id: Set(alice),
+            agent_id: Set(Some(agent_bob)),
+            context_id: Set(context),
+            title: Set(None),
+            todo: Set(None),
+            created_at: Set(ts(1)),
+            updated_at: Set(ts(1)),
+        })
+        .exec(&db)
+        .await
+        .expect("conversation inserts")
+        .last_insert_id;
+
+        let Json(out) = get_conversation(State(state_with(db.clone())), alice_user(), Path(conv))
+            .await
+            .expect("la conversation d'alice reste lisible");
+        assert_eq!(out.id, conv);
+        assert!(
+            out.agent_name.is_none(),
+            "le nom de l'agent de bob ne doit pas fuir : {:?}",
+            out.agent_name
+        );
+    }
+
     /// Scenario : `liste_d_un_owner_sans_conversation_retourne_tableau_vide`.
     #[tokio::test]
     async fn liste_d_un_owner_sans_conversation_retourne_tableau_vide() {
@@ -1048,6 +1101,191 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!([]));
+    }
+
+    // ---------------------------------------------------------------------
+    // Oracle d'existence fermé (`conversations.sdd`, DÉCIDÉ 2026-10-18) : une conversation
+    // d'autrui est INDISCERNABLE d'une conversation inexistante (même statut, même corps).
+    // ---------------------------------------------------------------------
+
+    /// Requête brute (statut + corps octets) sur le routeur des routes à `{id}`.
+    async fn requete_brute(
+        state: &AppState,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        let app = Router::new()
+            .route(
+                "/conversations/{id}",
+                get(get_conversation).delete(delete_conversation),
+            )
+            .route("/conversations/{id}/messages", get(get_messages))
+            .with_state(state.clone());
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Cookie", cookie)
+            .body(Body::empty())
+            .expect("valid request");
+        let resp = app.oneshot(req).await.expect("router does not fail");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        (status, bytes.to_vec())
+    }
+
+    /// Alice (session), bob avec une conversation (et un message), alice avec la sienne.
+    async fn deux_owners(db: &DatabaseConnection) -> (i32, i32, i32, i32) {
+        use sea_orm::PaginatorTrait;
+        let alice = seed_user(db, "alice").await;
+        let bob = seed_user(db, "bob").await;
+        let ctx_bob = seed_context(db, "bob-sandbox").await;
+        let ctx_alice = seed_context(db, "alice-sandbox").await;
+        let conv_bob = seed_conversation(db, bob, ctx_bob, ts(3)).await;
+        let conv_alice = seed_conversation(db, alice, ctx_alice, ts(4)).await;
+        messages::Entity::insert(messages::ActiveModel {
+            id: NotSet,
+            owner_id: Set(bob),
+            conversation_id: Set(conv_bob),
+            role: Set("user".to_string()),
+            payload: Set(serde_json::json!({"text": "secret de bob"})),
+            created_at: Set(ts(3)),
+        })
+        .exec(db)
+        .await
+        .expect("message inserts");
+        assert_eq!(messages::Entity::find().count(db).await.expect("count"), 1);
+        (alice, bob, conv_bob, conv_alice)
+    }
+
+    /// Scenario `lecture_unitaire_retourne_404_pour_inexistante_et_pour_autrui_ou_200`.
+    #[tokio::test]
+    async fn lecture_unitaire_retourne_404_pour_inexistante_et_pour_autrui_ou_200() {
+        let db = real_db().await;
+        let (_alice, _bob, conv_bob, conv_alice) = deux_owners(&db).await;
+        let state = state_with(db);
+        let cookie = session_cookie("alice");
+        let absent = conv_bob + 1_000;
+
+        let (s_absent, b_absent) =
+            requete_brute(&state, "GET", &format!("/conversations/{absent}"), &cookie).await;
+        let (s_autrui, b_autrui) = requete_brute(
+            &state,
+            "GET",
+            &format!("/conversations/{conv_bob}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s_absent, StatusCode::NOT_FOUND);
+        assert_eq!(s_autrui, StatusCode::NOT_FOUND);
+        assert_eq!(
+            b_autrui, b_absent,
+            "le corps d'une conversation d'autrui doit être identique à celui d'une absente"
+        );
+        assert!(String::from_utf8_lossy(&b_absent).contains("VNL-CNV-001"));
+        assert!(
+            !String::from_utf8_lossy(&b_autrui).contains("secret de bob"),
+            "aucune donnée d'autrui ne doit fuiter"
+        );
+
+        let (s_own, b_own) = requete_brute(
+            &state,
+            "GET",
+            &format!("/conversations/{conv_alice}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s_own, StatusCode::OK);
+        let own: serde_json::Value = serde_json::from_slice(&b_own).expect("JSON");
+        assert_eq!(own["id"], conv_alice);
+    }
+
+    /// Scenario `suppression_retourne_204_supprime_en_cascade_les_messages_et_le_404_suivant`
+    /// (portée oracle) : suppression d'autrui = 404 identique à l'absent, conversation de bob
+    /// intacte ; sa propre conversation part en 204 puis 404.
+    #[tokio::test]
+    async fn suppression_d_autrui_repond_comme_une_absente() {
+        let db = real_db().await;
+        let (_alice, bob, conv_bob, conv_alice) = deux_owners(&db).await;
+        let state = state_with(db.clone());
+        let cookie = session_cookie("alice");
+        let absent = conv_bob + 1_000;
+
+        let (s_absent, b_absent) = requete_brute(
+            &state,
+            "DELETE",
+            &format!("/conversations/{absent}"),
+            &cookie,
+        )
+        .await;
+        let (s_autrui, b_autrui) = requete_brute(
+            &state,
+            "DELETE",
+            &format!("/conversations/{conv_bob}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s_absent, StatusCode::NOT_FOUND);
+        assert_eq!(s_autrui, StatusCode::NOT_FOUND);
+        assert_eq!(b_autrui, b_absent);
+        let still_there = conversations::Entity::find_by_id(conv_bob)
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("conversation de bob intacte");
+        assert_eq!(still_there.owner_id, bob);
+
+        let (s_own, _) = requete_brute(
+            &state,
+            "DELETE",
+            &format!("/conversations/{conv_alice}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s_own, StatusCode::NO_CONTENT);
+        let (s_again, b_again) = requete_brute(
+            &state,
+            "DELETE",
+            &format!("/conversations/{conv_alice}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s_again, StatusCode::NOT_FOUND);
+        assert!(String::from_utf8_lossy(&b_again).contains("VNL-CNV-001"));
+    }
+
+    /// Scenario `messages_d_autrui_retourne_404_avant_toute_requête`.
+    #[tokio::test]
+    async fn messages_d_autrui_retourne_404_comme_une_absente() {
+        let db = real_db().await;
+        let (_alice, _bob, conv_bob, _conv_alice) = deux_owners(&db).await;
+        let state = state_with(db);
+        let cookie = session_cookie("alice");
+        let absent = conv_bob + 1_000;
+
+        let (s_absent, b_absent) = requete_brute(
+            &state,
+            "GET",
+            &format!("/conversations/{absent}/messages"),
+            &cookie,
+        )
+        .await;
+        let (s_autrui, b_autrui) = requete_brute(
+            &state,
+            "GET",
+            &format!("/conversations/{conv_bob}/messages"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(s_autrui, StatusCode::NOT_FOUND);
+        assert_eq!(s_absent, StatusCode::NOT_FOUND);
+        assert_eq!(b_autrui, b_absent);
+        assert!(
+            !String::from_utf8_lossy(&b_autrui).contains("secret de bob"),
+            "les messages d'autrui ne doivent pas fuiter"
+        );
     }
 }
 

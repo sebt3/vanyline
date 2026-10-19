@@ -60,6 +60,14 @@ Exposes:
     @AppError>`. Route `DELETE /sandboxes/{name}`.
   - @set_sandbox_suspended — `pub async fn(State, AuthUser, Path, @Json<@SuspendBody>) ->
     @Result<@Json<@Sandbox>, @AppError>`. Route `POST /sandboxes/{name}/suspend`.
+  - @code_health — `pub async fn(State, AuthUser, Path) -> @Result<@Response, @AppError>`. Route
+    `GET /sandboxes/{name}/code-health` : relais de `GET /code-health` de la sandbox (patron de
+    @git_proxy : même scoping, jeton du SA de l'Owner, statut + JSON de la sandbox TELS QUELS).
+  - @code_health_refresh — `pub async fn(State, AuthUser, Path, @Bytes) -> @Result<@Response,
+    @AppError>` (corps BRUT, éventuellement vide : sans corps ni content-type, rien n'est transmis ;
+    la sandbox traite l'absence de corps comme `{}`). Route `POST /sandboxes/{name}/code-health/refresh` : relais de
+    `POST /code-health/refresh` (corps `{ "base"?, "languages"? }` transmis tel quel, 202/400/500 de
+    la sandbox transmis tels quels).
   - @WsTicketOut — `pub struct` Serialize `#[serde(rename_all = "camelCase")]`, champs
     `ticket: @String`, `ws_host: @String` → clés JSON `ticket` et `wsHost`.
   - @ws_ticket — `pub async fn(State, AuthUser, Path) -> @Result<@Json<@WsTicketOut>,
@@ -696,6 +704,48 @@ Done when:
   Le contrat « jamais le jeton ni le JWT au navigateur » est vérifié par test (absence de
     l'`id_token` et du jeton d'Owner dans tout corps de @ws_ticket/@git_proxy) conformément à
     `../../../vanyline.sdd`.
+
+Scenario: code_health_relaye_get_avec_jeton_owner_et_passthrough
+  Given la sandbox `s1` d'alice répondant `200` + `{"phase":"fresh","report":null}` sur `/code-health`
+  When `GET /sandboxes/s1/code-health` parvient à @code_health
+  Then la sandbox a reçu `GET /code-health` avec @AUTHORIZATION `Bearer {jeton du SA owner-alice}`
+    (jamais l'`id_token` du navigateur) et le navigateur reçoit le statut @200 et le JSON inchangé
+
+Scenario: code_health_refresh_relaye_post_avec_corps_et_statut_202
+  Given la sandbox `s1` d'alice répondant `202` sur `/code-health/refresh`
+  When `POST /sandboxes/s1/code-health/refresh` avec le corps `{"base":"main"}` parvient à
+    @code_health_refresh
+  Then la sandbox a reçu `POST /code-health/refresh` avec le même corps et le bearer du SA ; le
+    navigateur reçoit @202
+
+Scenario: code_health_statut_derreur_de_la_sandbox_transmis
+  Given la sandbox répondant `400` + `{"error":"…VNL-SBX-CH-001…"}` à un refresh
+  When @code_health_refresh relaie la réponse
+  Then le navigateur reçoit @400 et le JSON d'origine (pas d'@error_for_status)
+
+Scenario: code_health_non_owner_n_appelle_jamais_la_sandbox
+  Given la sandbox `s1` d'alice et l'utilisateur bob authentifié
+  When bob appelle `GET` et `POST …/refresh` sur `/sandboxes/s1/code-health`
+  Then la réponse est @403 comme pour @get_sandbox, aucun jeton d'Owner n'est demandé et la
+    sandbox n'est pas contactée
+
+Scenario: code_health_sans_session_retourne_401
+  Given aucune session
+  When `GET /sandboxes/s1/code-health` et `POST /sandboxes/s1/code-health/refresh`
+  Then @401 pour les deux
+
+Scenario: code_health_panne_de_relais_sans_fuite_d_url
+  Given une sandbox injoignable
+  When @code_health relaie
+  Then @502 avec le corps `{"error":"VNL-SBX-017: sandbox unavailable"}` — jamais l'URL interne
+
+Scenario: panne_de_lecture_du_corps_sans_fuite_d_url
+  # Revue du validateur 2026-10-18 : `resp.bytes().await?` de @proxy_git_request laissait passer un
+  # @reqwest::Error dont le Display peut porter l'URL interne.
+  Given une sandbox qui coupe la connexion APRÈS l'envoi des en-têtes, pendant la lecture du corps
+  When @git_proxy, @code_health ou @code_health_refresh relaie la réponse
+  Then le navigateur reçoit @502 et le corps exact `{"error":"VNL-SBX-017: sandbox unavailable"}` — jamais
+    l'URL interne, jamais le message reqwest d'origine
 
 Scenario: id_token_utilisateur_jamais_transmis_a_la_sandbox
   Given alice authentifiée avec un `id_token` connu et la sandbox `s1` qui capture ses en-têtes

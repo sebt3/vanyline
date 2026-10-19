@@ -83,7 +83,7 @@ Exposes:
       @AppError::UnprocessableReference(@vanyline_lib::VnyError) — `"{0}"` : rend
         directement le @Display du @VnyError embarqué, sans préfixe `VNL-*` propre à l'app
       @AppError::ConversationNotFound — `"VNL-CNV-001: Conversation not found"`
-      @AppError::ConversationAccessDenied — `"VNL-CNV-002: Access denied to conversation"`
+      @AppError::ConversationAccessDenied — `"VNL-CNV-002: Access denied to conversation"` (variante RÉSERVÉE, plus émise depuis 2026-10-18 : l'oracle d'existence est fermé, ./api/conversations.sdd ; conservée pour le compteur et les tests exhaustifs)
       @AppError::RequestError(@reqwest::Error) — `"VNL-REQ-001: Request error: {0}"` ; champ
         `#[from]` → @From<@reqwest::Error> généré + @std::error::Error::source() `Some`
       @AppError::InternalError(String) — `"VNL-INT-001: Internal error: {0}"` (identique à

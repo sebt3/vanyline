@@ -369,8 +369,13 @@ Depends on:
     `../../../../frontend/src/api/httpConfigRepo.ts`,
     `../../../../cfgstore/src/domain.sdd` (contrat du @Provider de domaine).
 
+Scenario: put_provider_type_invalide_rejete_ligne_intacte
+  Given une ligne valide existante
+  When un PUT porte `provider_type` = "bogus"
+  Then la mise à jour est rejetée avec `VNL-LLM-005` et la ligne en base est INCHANGÉE ; un PUT à valeur valide réussit
+
 Tasks:
-  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : `api_key` est exposée en clair
+  [x] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : `api_key` est exposée en clair — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       en lecture Public (@Serialize de @Model ne la filtre jamais, @read_policy est
       @AccessPolicy::Public). DÉCISION : `api_key` devient écriture seule — jamais
       sérialisée dans une réponse REST (`#[serde(skip_serializing)]` ou équivalent),
@@ -378,12 +383,26 @@ Tasks:
       `../../../../cfgstore/src/domain.sdd` (voie fs_store) et dans
       `../../api/llm_providers.sdd` (cohérence @discover_models). Impact frontend
       (`httpConfigRepo.ts`) hors périmètre de cette spec, à signaler séparément.
-  [!] Aucune protection du chemin mise à jour : le trait @MiryadResource n'a pas de
+  [x] MISE À JOUR DES SECRETS (décision 2026-10-18, suite de la décision ci-dessus ; le trait — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
+      @MiryadResource de miryad-core 0.1.5 EXPOSE `before_update(active, existing, principal)` —
+      les mentions « pas de before_update » de ce fichier sont périmées) : comme `api_key` n'est
+      plus jamais relue par un client, un `PUT` qui ne la porte pas ne doit PAS l'effacer.
+      Implémenter `before_update` : `api_key` absente ou `null` (indiscernables, @None) ⇒ la valeur
+      de `existing` est CONSERVÉE ; chaîne VIDE `""` ⇒ la clé est EFFACÉE (@None en base) ; chaîne
+      non vide ⇒ remplacée. Scenario à écrire : `put_sans_api_key_conserve_la_cle`,
+      `put_api_key_vide_efface_la_cle`, `put_api_key_non_vide_remplace_la_cle`. Ne PAS profiter du
+      hook pour valider `provider_type` : cet arbitrage (`[!]` ci-dessous) reste ouvert.
+  [x] DÉCIDÉ 2026-10-18 (recommandation validée : valider `provider_type` dans `before_update`, mêmes valeurs que `before_create` (`ollama`, `openai-compatible`), rejet `VNL-LLM-005`, ligne intacte ; Scenario `put_provider_type_invalide_rejete_ligne_intacte`) — état avant décision : Aucune protection du chemin mise à jour : le trait @MiryadResource n'a pas de — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
       `before_update` et le schéma ne porte aucun CHECK sur `provider_type` — un
       `PUT /api/v1/llm-providers/{id}` avec `provider_type: "bogus"` contourne
       aussi efficacement le hook de création que le chemin programmatique. Le
       commentaire du hook affirme que le CHECK existait avant la bascule miryad-core :
       le rétablir dans la migration, un trigger, ou assumer (réservé aux admins) ?
+    MISE À JOUR 2026-10-18 : l'affirmation « pas de `before_update` » est PÉRIMÉE — miryad-core 0.1.5 expose
+    `before_update(active, existing, principal)` (déjà utilisé pour les secrets de cette entité / des agents système).
+    Recommandation (Claude, 2026-10-18) : valider `provider_type` dans `before_update` (même liste de valeurs que `before_create`, rejet 422 avec le
+    même identifiant `VNL-*`), avec un Scenario de PUT invalide qui laisse la ligne intacte.
+    Réponse du développeur : défaut (recommandation validée le 2026-10-18)
   [?] Sémantique concrète de @AccessPolicy::Public et @AccessPolicy::AdminOnly chez
       miryad-core (crate externe, source non lisible depuis le dépôt) : Public exige-t-il
       au minimum une authentification (Bearer) ou ouvre-t-il l'anonyme ? AdminOnly

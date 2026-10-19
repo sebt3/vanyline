@@ -73,11 +73,11 @@ Handles:
   `default_model` pointant un FOURNISSEUR SUPPRIMÉ rend le même `NoModelProfile` (décidé
   2026-10-14 : l'utilisateur doit reconfigurer — pas d'erreur dédiée, pas de silence).
   Politique commune des prompts (contrat de comportement, texte dans le code) : agir au nom de
-  l'utilisateur dans ses seuls droits ; AGIR DIRECTEMENT, sans demander de confirmation, y
-  compris pour des suppressions ou des écrasements (vanyline est en mode « yolo » assumé : les
-  modèles utilisés sont réputés fiables, le code est dans git donc révertable, la configuration
-  est en base sauvegardée — décision du 2026-10-04) ; ne jamais afficher de secret (clés d'API,
-  jetons) ; expliquer ce qui a été fait.
+  l'utilisateur dans ses seuls droits ; ne jamais afficher de secret (clés d'API, jetons) ;
+  expliquer ce qui a été fait. Le prompt ne contient AUCUNE consigne de « yolo » : ne pas pousser
+  l'agent à agir sans confirmation, y compris pour des suppressions (décision 2026-10-18 : le
+  « yolo » est une maxime du tooling de développement, pas une consigne donnée aux agents). Les prompts
+  restent minimaux ; ils évolueront à l'usage (`SYSTEM_VERSION` incrémenté à chaque changement).
 
 Must:
   Faire de `model_profile_id` le SEUL champ qu'un utilisateur puisse changer sur un agent système.
@@ -126,12 +126,15 @@ Tasks:
   [-] TRANCHÉ (2026-10-04) : modèle par défaut global = réglage `default_model`, configurable par
     l'API avec un jeton d'administrateur et par l'interface pour les utilisateurs qui en ont les
     droits (../db/entities/app_settings.sdd).
-  [-] TRANCHÉ (2026-10-04) : aucune confirmation des actions destructrices (mode « yolo »).
+  [-] TRANCHÉ (2026-10-04) : aucune confirmation des actions destructrices (mode « yolo »). — REMPLACÉ le
+    2026-10-18 : la consigne « yolo » est retirée des prompts (voir Handles) ; les outils, eux, n'exigent toujours
+    aucune confirmation.
   [-] TRANCHÉ (2026-10-04) : dans les vues d'accueil, de projet et de sandbox, l'utilisateur peut
     utiliser SES agents ordinaires (comme dans l'IDE aujourd'hui), l'agent système du contexte
     étant le défaut ; seul le contexte des paramètres impose l'agent système `config`.
-  [ ] Rédiger les quatre prompts système (texte versionné dans le code, relu avec le
-    développeur principal).
+  [x] Rédiger les quatre prompts système (texte versionné dans le code, relu avec le
+    développeur principal). — RELUS 2026-10-18 par le développeur principal : minimaux, OK pour l'instant,
+    à faire évoluer à l'usage ; consigne « yolo » retirée, `SYSTEM_VERSION` = 2.
 
 Scenario: creation_des_quatre_agents
   Given un utilisateur avec un profil de modèle

@@ -15,7 +15,7 @@ use crate::error::AppError;
 
 /// Version du jeu de prompts système embarqué — à incrémenter à chaque changement de
 /// prompt ou de politique d'outils (`system_agents.sdd` `Exposes`).
-pub const SYSTEM_VERSION: i32 = 1;
+pub const SYSTEM_VERSION: i32 = 2;
 
 /// Les quatre clés stables d'agents système, avec leur contexte de conversation associé.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +68,8 @@ impl SystemAgentKey {
 
     /// Prompt système embarqué, versionné par `SYSTEM_VERSION` — politique commune
     /// (`system_agents.sdd` `Handles`) : agir au nom de l'utilisateur dans ses seuls
-    /// droits, AGIR DIRECTEMENT sans confirmation (« yolo » assumé 2026-10-04), ne jamais
-    /// afficher de secret, expliquer ce qui a été fait.
+    /// droits, ne jamais afficher de secret, expliquer ce qui a été fait. Aucune consigne
+    /// de « yolo » (maxime du tooling, pas des agents — décision 2026-10-18).
     pub fn prompt(self) -> String {
         let intro = match self {
             Self::Config => concat!(
@@ -125,10 +125,7 @@ impl SystemAgentKey {
 const COMMON_POLICY: &str = concat!(
     "Politique d'action : tu agis au nom de l'utilisateur connecté, strictement dans ses ",
     "droits — tes outils portent son identité et ne peuvent rien faire qu'il ne pourrait pas ",
-    "faire lui-même. AGIS DIRECTEMENT : exécute la demande jusqu'au bout sans demander de ",
-    "confirmation, y compris pour des suppressions ou des écrasements ; vanyline fonctionne ",
-    "en mode « yolo » assumé (le code est dans git et révertable, la configuration est en ",
-    "base sauvegardée). Ne jamais afficher un secret : ni clé d'API, ni jeton, ni valeur ",
+    "faire lui-même. Ne jamais afficher un secret : ni clé d'API, ni jeton, ni valeur ",
     "sensible ; si un outil en renvoie, passe sous silence. Termine en expliquant, en quelques ",
     "phrases, ce qui a été fait et pourquoi. Réponds dans la langue de l'utilisateur.",
 );
@@ -547,6 +544,27 @@ async fn resolve_sandbox_server(
 
 #[cfg(test)]
 mod tests {
+    /// Scenario: `prompts_sans_consigne_yolo` — le « yolo » est une maxime du tooling, jamais
+    /// une consigne donnée aux agents (décision 2026-10-18).
+    #[test]
+    fn prompts_sans_consigne_yolo() {
+        for key in SystemAgentKey::all() {
+            let prompt = key.prompt().to_lowercase();
+            for banni in ["yolo", "agis directement", "sans demander de confirmation"] {
+                assert!(
+                    !prompt.contains(banni),
+                    "le prompt de {key:?} contient la consigne bannie {banni:?}"
+                );
+            }
+            // la politique de fond reste présente
+            assert!(prompt.contains("strictement dans ses droits"));
+            assert!(prompt.contains("secret"));
+        }
+        assert_eq!(
+            SYSTEM_VERSION, 2,
+            "prompt modifié ⇒ SYSTEM_VERSION incrémenté"
+        );
+    }
 
     use super::*;
     use sea_orm::{
