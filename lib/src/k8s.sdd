@@ -72,9 +72,15 @@ Must:
     (`app::api::sandboxes::raw_git_tail`).
   Émettre @VnlK8sClient::watch_sandboxes comme stream boxé `Pin<Box<dyn Stream<Item = @WatchEvent<@Sandbox>> + Send>>`
     (type nommé préféré à un `impl Stream` opaque, stocké derrière un champ du hub WS de
-    l'`app`), avec @kube_runtime::watcher::Config portant un timeout de `300` secondes
-    (un reconnect trop court re-liste toutes les sandboxes et provoque une salve de
-    refetch côté WS).
+    l'`app`), avec @kube_runtime::watcher::Config portant un timeout de `290` secondes (@WATCH_TIMEOUT_SECS,
+    `pub(crate) const`, STRICTEMENT inférieur à 295 : `kube` 4 REFUSE tout timeout >= 295 s
+    à la construction de la requête — vu en cluster 2026-10-19 avec 300 : le watch échouait à
+    chaque tentative, en boucle toutes les 2 s, et le hub temps réel de l'app ne démarrait jamais ;
+    un reconnect trop court re-liste toutes les sandboxes et provoque une salve de refetch côté WS).
+  Émettre @VnlK8sClient::watch_projects (2026-10-19) : même contrat que @VnlK8sClient::watch_sandboxes
+    (stream boxé `Send` de @WatchEvent<@Project>, même mapping des événements, même @WATCH_TIMEOUT_SECS,
+    mêmes règles d'erreur) sur les @Project du namespace de l'Owner passé en paramètre
+    (`watch_projects(owner: &str)`), pour pousser le statut `cloned` vers l'interface.
   Mapper les événements du watcher exactement ainsi : `InitApply` -> @WatchEvent::Added,
     `Apply` -> @WatchEvent::Modified, `Delete` -> @WatchEvent::Deleted, `Init` et
     `InitDone` -> aucun item (le replay initial des objets existants passe par les
@@ -523,3 +529,9 @@ Scenario: owner_token_debug_masque_le_jeton
   Given un @OwnerToken portant la valeur `secret-jwt`
   When il est formaté en @Debug
   Then la chaîne ne contient pas `secret-jwt`
+
+Scenario: watch_timeout_accepte_par_kube
+  Given la constante @WATCH_TIMEOUT_SECS
+  When elle est comparée à la limite de `kube` 4 (295 s)
+  Then elle est strictement inférieure à 295 et la configuration du watcher la porte
+    (test unitaire sans cluster ; la valeur 300 est le défaut interdit)

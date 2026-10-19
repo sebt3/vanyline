@@ -1208,6 +1208,7 @@ pub fn build_sandbox_netpol(
     sandbox: &Sandbox,
     owner_name: &str,
     application: Option<&Application>,
+    app_namespace: &str,
     ops_allowed_namespaces: &[String],
 ) -> NetworkPolicy {
     let mut pod_selector_labels = BTreeMap::new();
@@ -1231,7 +1232,18 @@ pub fn build_sandbox_netpol(
             }),
             ..Default::default()
         },
+        // Peer app : le pod `app` vit dans le namespace d'application, pas dans
+        // celui de l'Owner — le namespaceSelector est sur le MÊME objet peer
+        // (sinon AND implicite impossible : le peer ne viserait que le namespace
+        // de l'Owner). Cf. sandbox.sdd, Scenario netpol_ingress_cible_owner_app_et_port_mcp.
         NetworkPolicyPeer {
+            namespace_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".to_string(),
+                    app_namespace.to_string(),
+                )])),
+                ..Default::default()
+            }),
             pod_selector: Some(LabelSelector {
                 match_labels: None,
                 match_expressions: Some(vec![LabelSelectorRequirement {
@@ -1546,10 +1558,12 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         .await?;
 
     let netpols: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
+    let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
     let netpol = build_sandbox_netpol(
         sandbox,
         &project.spec.owner,
         app_opt.as_ref(),
+        &app_ns,
         &ctx.ops_allowed_namespaces,
     );
     netpols
@@ -2915,11 +2929,59 @@ mod tests {
 
     // ===== build_sandbox_netpol =====
 
+    // Scenario: netpol_ingress_cible_owner_app_et_port_mcp
+    #[test]
+    fn netpol_ingress_cible_owner_app_et_port_mcp() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", None, "vanyline-app", &[]);
+        let spec = netpol.spec.as_ref().expect("spec");
+        assert_eq!(spec.policy_types, Some(vec!["Ingress".to_string()]));
+        let rules = spec.ingress.as_ref().expect("ingress");
+
+        // Règle MCP unique, au port MCP/TCP.
+        let mcp_ports = rules[0].ports.as_ref().expect("ports MCP");
+        assert_eq!(mcp_ports.len(), 1);
+        assert_eq!(mcp_ports[0].port, Some(IntOrString::Int(MCP_PORT)));
+        assert_eq!(mcp_ports[0].protocol.as_deref(), Some("TCP"));
+
+        let from = rules[0].from.as_ref().expect("from");
+        assert_eq!(from.len(), 2);
+
+        // Peer owner : pas de namespaceSelector.
+        assert!(from[0].namespace_selector.is_none());
+        let owner_labels = from[0]
+            .pod_selector
+            .as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+            .expect("owner match_labels");
+        assert_eq!(
+            owner_labels.get("vanyline.solidite.fr/owner"),
+            Some(&"alice".to_string())
+        );
+
+        // Peer app : Exists sur APP_LABEL ET namespaceSelector app-ns, sur le même objet.
+        let app_pod = from[1].pod_selector.as_ref().expect("app pod_selector");
+        let exprs = app_pod.match_expressions.as_ref().expect("app exprs");
+        assert_eq!(exprs.len(), 1);
+        assert_eq!(exprs[0].key, APP_LABEL);
+        assert_eq!(exprs[0].operator, "Exists");
+        let app_ns_labels = from[1]
+            .namespace_selector
+            .as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+            .expect("app namespace_selector");
+        assert_eq!(app_ns_labels.len(), 1);
+        assert_eq!(
+            app_ns_labels.get("kubernetes.io/metadata.name"),
+            Some(&"vanyline-app".to_string())
+        );
+    }
+
     #[test]
     fn build_sandbox_netpol_shape() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let app: Option<Application> = None;
-        let netpol = build_sandbox_netpol(&sandbox, "alice", app.as_ref(), &[]);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", app.as_ref(), "vanyline-app", &[]);
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let pod_sel = spec
@@ -2979,7 +3041,15 @@ mod tests {
         assert_eq!(match_exprs[0].key, APP_LABEL);
         assert_eq!(match_exprs[0].operator, "Exists");
         assert!(match_exprs[0].values.is_none());
-        assert!(from[1].namespace_selector.is_none());
+        assert_eq!(
+            from[1]
+                .namespace_selector
+                .as_ref()
+                .and_then(|s| s.match_labels.as_ref())
+                .and_then(|l| l.get("kubernetes.io/metadata.name"))
+                .map(String::as_str),
+            Some("vanyline-app")
+        );
 
         let ports = ingress[0].ports.as_ref().expect("should have ports");
         assert_eq!(ports.len(), 1);
@@ -3002,7 +3072,7 @@ mod tests {
                 ),
             ]),
         });
-        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app), &[]);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app), "vanyline-app", &[]);
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let ingress = spec.ingress.as_ref().expect("should have ingress");
@@ -3154,7 +3224,7 @@ mod tests {
     #[test]
     fn netpol_port_ops_ouvert_au_cluster_par_defaut() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let netpol = build_sandbox_netpol(&sandbox, "alice", None, &[]);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", None, "vanyline-app", &[]);
         let rules = netpol
             .spec
             .as_ref()
@@ -3178,7 +3248,7 @@ mod tests {
     fn netpol_port_ops_restreinte_par_env() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let allowed = vec!["monitoring".to_string(), "kydah-core".to_string()];
-        let netpol = build_sandbox_netpol(&sandbox, "alice", None, &allowed);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", None, "vanyline-app", &allowed);
         let rules = netpol
             .spec
             .as_ref()
@@ -3214,7 +3284,7 @@ mod tests {
         let app = make_application("main");
         let service = build_sandbox_service(&sandbox);
         let ingress = build_sandbox_ingress(&sandbox, &app);
-        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app), &[]);
+        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app), "vanyline-app", &[]);
 
         // Service : chaque port (numéro et cible) est MCP_PORT, jamais OPS_PORT.
         let svc_ports = service.spec.as_ref().unwrap().ports.clone().unwrap();

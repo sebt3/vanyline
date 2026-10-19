@@ -52,7 +52,14 @@ Must:
     (`spec.restate.storage_size`, défaut `5Gi`, `storage_class` optionnelle), et un Service
     `<application>-restate` exposant l'ingress (8080), l'admin (9070) et le port de nœud (5122) ;
     l'env du Deployment `app` reçoit `VNL_RESTATE_ADMIN_URL` et `VNL_RESTATE_INGRESS_URL`
-    (URL internes du Service). Sans `spec.restate`, aucune de ces ressources n'existe et l'app
+    (URL internes du Service). Endpoint de services (2026-10-19, vu en cluster : Restate ne joignait pas l'app) :
+    quand `spec.restate` est présent, le Service `application-<nom>` expose AUSSI un port
+    nommé `workflow` (@WORKFLOW_PORT = 9080, `targetPort` identique), le conteneur `app` déclare
+    un `containerPort` 9080 nommé `workflow`, et l'env du Deployment reçoit
+    `VNL_WORKFLOW_DEPLOYMENT_URL` = `http://application-<nom>.<ns>.svc:9080` (le nom du Service
+    d'application, PAS le nom nu de l'Application). Le port `http` (8080) reste en tête et
+    inchangé. Sans `spec.restate`, aucun de ces ajouts n'existe.
+    Sans `spec.restate`, aucune de ces ressources n'existe et l'app
     démarre sans moteur de workflow. Le Service Restate n'est jamais exposé par un Ingress.
     Table d'env du conteneur `"restate"` (nom du conteneur contracté au Scenario
     @build_restate_statefulset_shape) — contractée 2026-10-14 (elle conditionne tout
@@ -830,3 +837,16 @@ Scenario: retrait_spec_restate_supprime_le_moteur
     toute erreur d'API
   When `spec.restate` est remis en place
   Then le StatefulSet remonte avec les mêmes noms dérivés et revenduit le PVC conservé
+
+Scenario: workflow_port_et_url_poses_avec_restate
+  Given une Application `demo` dans le namespace `ns` avec `spec.restate` présent
+  When @build_application_service et @build_application_deployment construisent
+  Then le Service a deux ports (`http` 8080 en tête puis `workflow` 9080), le conteneur déclare
+    le containerPort 9080 `workflow`, et l'env contient `VNL_WORKFLOW_DEPLOYMENT_URL` =
+    `http://application-demo.ns.svc:9080`
+
+Scenario: workflow_port_et_url_absents_sans_restate
+  Given la même Application sans `spec.restate`
+  When les mêmes builders construisent
+  Then le Service n'a que le port `http`, aucun containerPort 9080 et aucune variable
+    `VNL_WORKFLOW_DEPLOYMENT_URL`

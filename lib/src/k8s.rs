@@ -29,6 +29,23 @@ const OWNER_TOKEN_EXPIRATION_SECS: i64 = 900;
 /// jeton rendu a donc une vie restante ≥ 600 s côté apiserver.
 const OWNER_TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
 
+/// Timeout serveur des watchs, en secondes (spec `k8s.sdd`, `WATCH_TIMEOUT_SECS`).
+/// STRICTEMENT inférieur à 295 : `kube` 4 refuse tout timeout >= 295 s (watch
+/// en échec en boucle en cluster, vu 2026-10-19 avec 300). Un reconnect trop
+/// court re-liste toutes les ressources : 290 s est le compromis.
+pub(crate) const WATCH_TIMEOUT_SECS: u32 = 290;
+
+// Garde à la compilation : une valeur >= 295 ferait échouer tous les watchs en cluster.
+const _: () = assert!(
+    WATCH_TIMEOUT_SECS < 295,
+    "kube 4 refuse un timeout >= 295 s"
+);
+
+/// Configuration du watcher kube-runtime : timeout borné par `WATCH_TIMEOUT_SECS`.
+fn watcher_config() -> WatcherConfig {
+    WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS)
+}
+
 /// Event de watch kube-runtime pour un Sandbox — normalisé pour la diffusion WS.
 #[derive(Clone, Debug)]
 pub enum WatchEvent<T> {
@@ -125,6 +142,19 @@ fn token_expires_at(
 /// valide d'au plus 63 caractères.
 fn owner_namespace_in(app_namespace: &str, owner: &str) -> Result<String, VnyError> {
     vanyline_crds::owner_namespace_name(app_namespace, owner).map_err(VnyError::K8sApiError)
+}
+
+/// Stream d'un watch dont le nom d'Owner est invalide : un unique
+/// `WatchEvent::Error` (le watch ne lève jamais), sans appel cluster.
+fn owner_error_stream<K>(
+    err: VnyError,
+) -> std::pin::Pin<Box<dyn Stream<Item = WatchEvent<K>> + Send>>
+where
+    K: Send + 'static,
+{
+    Box::pin(futures::stream::once(async move {
+        WatchEvent::Error(err.to_string())
+    }))
 }
 
 /// Client K8s typé pour les CRDs Owner/Project/Sandbox/Application — UN OWNER
@@ -445,25 +475,47 @@ impl VnlK8sClient {
         &self,
         owner: &str,
     ) -> std::pin::Pin<Box<dyn Stream<Item = WatchEvent<Sandbox>> + Send>> {
+        self.watch_owner_objects::<Sandbox>(owner)
+    }
+
+    /// Retourne un stream de watch sur les CRD Project du namespace de
+    /// l'Owner `owner` (même contrat que `watch_sandboxes` : un flux par
+    /// Owner, mapping identique, nom d'Owner invalide → unique `Error`).
+    /// Sert à pousser le statut `cloned` des Projects vers l'interface.
+    pub fn watch_projects(
+        &self,
+        owner: &str,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = WatchEvent<Project>> + Send>> {
+        self.watch_owner_objects::<Project>(owner)
+    }
+
+    /// Watch générique des objets namespacés `K` du namespace de l'Owner
+    /// `owner` (factorisation de `watch_sandboxes`/`watch_projects`).
+    fn watch_owner_objects<K>(
+        &self,
+        owner: &str,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = WatchEvent<K>> + Send>>
+    where
+        K: kube::Resource<Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + 'static,
+        K::DynamicType: Default,
+    {
         let ns = match self.owner_namespace(owner) {
             Ok(ns) => ns,
-            Err(e) => {
-                return Box::pin(futures::stream::once(async move {
-                    WatchEvent::Error(e.to_string())
-                }));
-            }
+            Err(e) => return owner_error_stream::<K>(e),
         };
-        let api: kube::Api<Sandbox> = kube::Api::namespaced(self.client.clone(), &ns);
-        // timeout serveur 5 min : un reconnect trop court re-liste toutes les
-        // sandboxes à chaque tour (bookmark perdu) → salve de refetch côté WS.
-        let cfg = WatcherConfig::default().timeout(300);
-        let stream = watcher::watcher(api, cfg).filter_map(|result| async move {
+        let api: kube::Api<K> = kube::Api::namespaced(self.client.clone(), &ns);
+        let stream = watcher::watcher(api, watcher_config()).filter_map(|result| async move {
             match result {
                 Ok(Event::Apply(obj)) => Some(WatchEvent::Modified(obj)),
                 Ok(Event::Delete(obj)) => Some(WatchEvent::Deleted(obj)),
                 Ok(Event::InitApply(obj)) => Some(WatchEvent::Added(obj)),
                 // Init/InitDone : pas d'objet — ignorés (le replay initial se fait
-                // via les InitApply ci-dessus, un par sandbox existante).
+                // via les InitApply ci-dessus, un par objet existant).
                 Ok(Event::Init | Event::InitDone) => None,
                 Err(e) => Some(WatchEvent::Error(e.to_string())),
             }
@@ -772,6 +824,28 @@ mod tests {
             k1,
             owner_token_cache_key("alice", "uid-1"),
             "composition déterministe"
+        );
+    }
+
+    // ── watch : timeout serveur + watch_projects (2026-10-19) ──
+
+    /// Scenario: `watch_timeout_accepte_par_kube` (test unitaire sans cluster).
+    #[test]
+    fn watch_timeout_accepte_par_kube() {
+        // La borne (< 295) est gardée à la compilation, cf. `WATCH_TIMEOUT_SECS`.
+        assert_eq!(watcher_config().timeout, Some(WATCH_TIMEOUT_SECS));
+    }
+
+    /// Owner au nom invalide : le watch rend un unique `WatchEvent::Error`
+    /// (VNL-K8S-002) sans toucher le cluster (helper `owner_error_stream`).
+    #[tokio::test]
+    async fn watch_owner_invalide_rend_une_erreur_unique() {
+        let err = owner_namespace_in("vanyline-app", "Alice").unwrap_err();
+        let items: Vec<WatchEvent<Project>> = owner_error_stream(err).collect().await;
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], WatchEvent::Error(m) if m.contains("VNL-K8S-002")),
+            "attendu un Error VNL-K8S-002, obtenu {items:?}"
         );
     }
 }

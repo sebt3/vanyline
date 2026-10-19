@@ -191,7 +191,10 @@ Must:
     unique au pod), port nommé `mcp` (`SERVICE_PORT_NAME`), `port` = @MCP_PORT,
     `targetPort` = @MCP_PORT ; `type` non posé (l'apiserver applique ClusterIP) ;
     ownerReference Sandbox.
-  Construire la NetworkPolicy ingress (@build_sandbox_netpol), TOUJOURS produite : nom
+  Construire la NetworkPolicy ingress (@build_sandbox_netpol), TOUJOURS produite (signature
+    amendée 2026-10-19 : un paramètre `app_namespace: &str` — le namespace d'application,
+    obligatoire car il ne se déduit pas de `application: Option<&Application>` quand celui-ci
+    est absent) : nom
     @netpol_name (`sandbox-<n>`), `podSelector` = label sandbox, `policyTypes`
     `[Ingress]`, une règle ingress restreinte au port @MCP_PORT/TCP, `from` =
     (1) tout pod du MÊME namespace (le namespace de l'Owner : code-server, autres sandboxes de
@@ -1092,8 +1095,11 @@ Scenario: netpol_ingress_cible_owner_app_et_port_mcp
   When @build_sandbox_netpol construit
   Then `podSelector` = label sandbox, `policyTypes` `[Ingress]`, règle unique au port
     @MCP_PORT/TCP, `from` = [peer matchLabels owner `alice` (sans namespaceSelector),
-    peer matchExpressions `Exists` sur @APP_LABEL (valeur libre)] (test existant
-    `build_sandbox_netpol_shape`)
+    peer matchExpressions `Exists` sur @APP_LABEL COMBINÉ à un `namespaceSelector`
+    `kubernetes.io/metadata.name: <app-ns>` sur le même objet] — sans le namespaceSelector le
+    peer ne vise que le namespace de l'Owner et l'`app` (qui vit dans le namespace
+    d'application) est bloquée : 502 sur tout relais, vu en cluster 2026-10-19 (test existant
+    `build_sandbox_netpol_shape`, à amender)
 
 Scenario: netpol_ingress_ajoute_peer_controleur_ingress
   Given une Application dont `ingress_controller` = {namespace `kydah-core`, podLabels

@@ -39,6 +39,11 @@ use vanyline_crds::{Application, ApplicationStatus};
 /// `app/src/config.rs` (`0.0.0.0:8080`).
 pub const APP_PORT: i32 = 8080;
 
+/// Port du endpoint de services workflow (Restate appelle l'app ici) — posé
+/// seulement quand `spec.restate` est présent (`application.sdd`, « Endpoint de
+/// services »). Nommé `workflow` côté Service et conteneur.
+pub const WORKFLOW_PORT: i32 = 9080;
+
 /// Label unique porté par le Deployment `app` et utilisé comme sélecteur du
 /// Service — même patron que `build_sandbox_service`.
 pub const APP_LABEL: &str = "vanyline.solidite.fr/application";
@@ -336,6 +341,31 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
             value: Some(restate_ingress_url(&app.name_any(), &ns_for_url)),
             ..Default::default()
         });
+        // Endpoint de services : URL que Restate utilise pour appeler l'app
+        // (Service `application-<nom>`, port `workflow`).
+        env.push(EnvVar {
+            name: "VNL_WORKFLOW_DEPLOYMENT_URL".to_string(),
+            value: Some(format!(
+                "http://{}.{}.svc:{WORKFLOW_PORT}",
+                application_name(&app.name_any()),
+                ns_for_url
+            )),
+            ..Default::default()
+        });
+    }
+
+    // Port `http` en tête (inchangé) ; port `workflow` seulement avec `spec.restate`.
+    let mut container_ports = vec![ContainerPort {
+        container_port: APP_PORT,
+        name: Some("http".to_string()),
+        ..Default::default()
+    }];
+    if app.spec.restate.is_some() {
+        container_ports.push(ContainerPort {
+            container_port: WORKFLOW_PORT,
+            name: Some("workflow".to_string()),
+            ..Default::default()
+        });
     }
 
     let probe = Probe {
@@ -383,11 +413,7 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
                                 .clone()
                                 .unwrap_or_else(|| default_image.to_string()),
                         ),
-                        ports: Some(vec![ContainerPort {
-                            container_port: APP_PORT,
-                            name: Some("http".to_string()),
-                            ..Default::default()
-                        }]),
+                        ports: Some(container_ports),
                         env: Some(env),
                         readiness_probe: Some(probe.clone()),
                         liveness_probe: Some(probe),
@@ -410,6 +436,22 @@ pub fn build_application_service(app: &Application) -> Service {
     let mut selector = BTreeMap::new();
     selector.insert(APP_LABEL.to_string(), app.name_any());
 
+    // Port `http` en tête (inchangé) ; port `workflow` seulement avec `spec.restate`.
+    let mut ports = vec![ServicePort {
+        name: Some("http".to_string()),
+        port: APP_PORT,
+        target_port: Some(IntOrString::Int(APP_PORT)),
+        ..Default::default()
+    }];
+    if app.spec.restate.is_some() {
+        ports.push(ServicePort {
+            name: Some("workflow".to_string()),
+            port: WORKFLOW_PORT,
+            target_port: Some(IntOrString::Int(WORKFLOW_PORT)),
+            ..Default::default()
+        });
+    }
+
     Service {
         metadata: ObjectMeta {
             name: Some(application_name(&app.name_any())),
@@ -419,12 +461,7 @@ pub fn build_application_service(app: &Application) -> Service {
         },
         spec: Some(ServiceSpec {
             selector: Some(selector),
-            ports: Some(vec![ServicePort {
-                name: Some("http".to_string()),
-                port: APP_PORT,
-                target_port: Some(IntOrString::Int(APP_PORT)),
-                ..Default::default()
-            }]),
+            ports: Some(ports),
             ..Default::default()
         }),
         status: None,
@@ -1411,7 +1448,8 @@ mod tests {
                 .clone()
         };
 
-        // restate Some ⇒ 12 variables, les deux URL en valeurs littérales.
+        // restate Some ⇒ 13 variables : 10 de base + 2 URL restate + l'URL de
+        // déploiement workflow (workflow_port_et_url_poses_avec_restate).
         let mut app = make_application("demo");
         app.spec.restate = Some(vanyline_crds::RestateSpec {
             image: None,
@@ -1421,8 +1459,8 @@ mod tests {
         let env = container_env(&app);
         assert_eq!(
             env.len(),
-            12,
-            "10 variables de base + 2 URL restate, got {}",
+            13,
+            "10 variables de base + 2 URL restate + 1 URL workflow, got {}",
             env.len()
         );
         let find = |name: &str| env.iter().find(|e| e.name == name);
@@ -1448,6 +1486,105 @@ mod tests {
                 .iter()
                 .any(|e| e.name == "VNL_RESTATE_INGRESS_URL" || e.name == "VNL_RESTATE_ADMIN_URL"),
             "aucune URL restate sans spec.restate"
+        );
+    }
+
+    // Scenario: workflow_port_et_url_poses_avec_restate
+    #[test]
+    fn workflow_port_et_url_poses_avec_restate() {
+        let mut app = make_application("demo");
+        app.spec.restate = Some(vanyline_crds::RestateSpec {
+            image: None,
+            storage_size: None,
+            storage_class: None,
+        });
+
+        let service = build_application_service(&app);
+        let ports = service
+            .spec
+            .as_ref()
+            .unwrap()
+            .ports
+            .as_ref()
+            .expect("should have ports");
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].name, Some("http".to_string()));
+        assert_eq!(ports[0].port, APP_PORT);
+        assert_eq!(ports[1].name, Some("workflow".to_string()));
+        assert_eq!(ports[1].port, WORKFLOW_PORT);
+        assert_eq!(ports[1].target_port, Some(IntOrString::Int(WORKFLOW_PORT)));
+
+        let deployment = build_application_deployment(&app, TEST_APP_IMAGE);
+        let container = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .first()
+            .expect("should have 1 container");
+        let container_ports = container.ports.as_ref().expect("container ports");
+        assert!(
+            container_ports.iter().any(|p| p.container_port == WORKFLOW_PORT
+                && p.name.as_deref() == Some("workflow")),
+            "containerPort 9080 nommé workflow attendu"
+        );
+        let env = container.env.as_ref().expect("should have env");
+        let url = env
+            .iter()
+            .find(|e| e.name == "VNL_WORKFLOW_DEPLOYMENT_URL")
+            .expect("should have VNL_WORKFLOW_DEPLOYMENT_URL");
+        assert_eq!(
+            url.value,
+            Some("http://application-demo.ns.svc:9080".to_string())
+        );
+    }
+
+    // Scenario: workflow_port_et_url_absents_sans_restate
+    #[test]
+    fn workflow_port_et_url_absents_sans_restate() {
+        let app = make_application("demo");
+
+        let service = build_application_service(&app);
+        let ports = service
+            .spec
+            .as_ref()
+            .unwrap()
+            .ports
+            .as_ref()
+            .expect("should have ports");
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].name, Some("http".to_string()));
+
+        let deployment = build_application_deployment(&app, TEST_APP_IMAGE);
+        let container = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .first()
+            .expect("should have 1 container");
+        let has_workflow_port = container
+            .ports
+            .iter()
+            .flatten()
+            .any(|p| p.container_port == WORKFLOW_PORT);
+        assert!(!has_workflow_port, "aucun containerPort 9080 sans restate");
+        let has_workflow_url = container
+            .env
+            .iter()
+            .flatten()
+            .any(|e| e.name == "VNL_WORKFLOW_DEPLOYMENT_URL");
+        assert!(
+            !has_workflow_url,
+            "aucune VNL_WORKFLOW_DEPLOYMENT_URL sans restate"
         );
     }
 
