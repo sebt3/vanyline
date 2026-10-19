@@ -379,6 +379,15 @@ Handles:
     accumule les événements en mémoire sans limite (backlog non borné, `Tasks` `[?]`).
 
 Must:
+  Tour d'agent borné et journalisé (2026-10-19, vu en cluster : un serveur d'inférence muet laissait
+    l'utilisateur sans réponse ni trace, et l'app n'écrivait rien dans ses logs). (1) Le tour
+    (`run_agent_turn`) est enveloppé par `tokio::time::timeout` de @TURN_TIMEOUT_SECS (`const`,
+    900 s — la valeur n'est pas configurable à ce jour, `[?]`) ; à l'échéance le tour est abandonné
+    et l'erreur `AppError::LlmError("VNL-LLM-010: aucune réponse du modèle après 900 s")` suit le
+    chemin habituel d'un échec de tour (jeton jetable révoqué AVANT la propagation, événement
+    `ChatEvent::Error` envoyé au client). (2) Tout échec de @handle_message est journalisé par
+    `tracing::warn!` avec l'identifiant de conversation et le message d'erreur, AVANT l'envoi de
+    l'événement d'erreur au client (jamais le contenu du message de l'utilisateur ni un jeton).
   Outils des agents système (2026-10-04, ../system_agents.sdd) : pour une conversation d'un contexte
     `settings`, `home`, `project` ou `sandbox` — quel que soit l'agent, système ou ordinaire —
     résoudre `extra_mcp` par `context_tools` (serveurs MCP de l'app elle-même avec un jeton d'API
@@ -840,3 +849,14 @@ Done when:
   Sébastien a tranché les `[!]` et `[?]` de `Tasks` ; la batterie workspace (check,
     test, build, clippy `--all-targets -D warnings`, fmt) est verte ; aucun `[?]`
     résolu n'est resté en suspens dans une spec voisine.
+
+Scenario: un_tour_sans_reponse_du_modele_expire_avec_vnl_llm_010
+  Given un tour dont le modèle ne répond jamais et un délai de tour réduit pour le test
+    (fonction interne paramétrée par la durée, `start_paused`)
+  When le délai est écoulé
+  Then le tour rend `AppError::LlmError` dont le texte contient `VNL-LLM-010` et la durée, sans attendre 900 s réelles
+
+Scenario: un_tour_rapide_n_est_pas_affecte_par_le_delai
+  Given un tour qui se termine avant l'échéance
+  When il est enveloppé par le délai
+  Then son résultat est rendu inchangé

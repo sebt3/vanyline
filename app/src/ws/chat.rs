@@ -189,6 +189,11 @@ async fn run_socket(
             )
             .await;
             if let Err(e) = result {
+                tracing::warn!(
+                    conversation_id,
+                    error = %e,
+                    "ws chat: échec du tour de message"
+                );
                 send_error(&spawn_tx, "VNL-LLM-001", &e.to_string());
             }
         });
@@ -264,6 +269,25 @@ async fn resolve_extra_mcp(
     crate::system_agents::context_tools(state, user, &context.kind, &context, agent_name).await
 }
 
+/// Borne d'un tour d'agent (ws/chat.sdd, « Tour d'agent borné et journalisé »).
+const TURN_TIMEOUT_SECS: u64 = 900;
+
+/// Enveloppe `fut` (le tour) d'un délai de `secs` secondes. À l'échéance, rend
+/// `AppError::LlmError` avec le marqueur `VNL-LLM-010` ; sinon rend le résultat
+/// du tour inchangé. Paramétrée par la durée pour être testable sans attendre.
+async fn bounded_turn<T, E, F>(secs: u64, fut: F) -> Result<T, AppError>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    AppError: From<E>,
+{
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(res) => res.map_err(AppError::from),
+        Err(_) => Err(AppError::LlmError(format!(
+            "VNL-LLM-010: aucune réponse du modèle après {secs} s"
+        ))),
+    }
+}
+
 /// Persistance (R9) : le message user est enregistré AVANT l'appel à
 /// `run_agent_turn` (il a bien été envoyé, qu'importe l'issue du tour) ;
 /// le message assistant seulement APRÈS un tour réussi (le `?` sur
@@ -319,8 +343,11 @@ async fn handle_message(
         todo_state: Arc::new(std::sync::Mutex::new(todo_initial.clone())),
     };
 
-    let turn =
-        vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None).await;
+    let turn = bounded_turn(
+        TURN_TIMEOUT_SECS,
+        vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None),
+    )
+    .await;
     // Jeton jetable du tour : révoqué QUE LE TOUR RÉUSSISSE OU ÉCHEUE (system_agents.sdd
     // `Must`), avant toute propagation d'erreur ; l'échec de révocation est loggé, le
     // jeton meurt de toute façon à 1 h.
@@ -1123,5 +1150,27 @@ mod tests {
             .expect("la conversation d'alice passe la garde");
         assert_eq!(id_garde, alice);
         assert_eq!(conv_garde.id, alice_conv);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn un_tour_sans_reponse_du_modele_expire_avec_vnl_llm_010() {
+        let res: Result<(), AppError> =
+            bounded_turn(5, std::future::pending::<Result<(), AppError>>()).await;
+        let err = res.expect_err("un tour muet doit expirer");
+        assert!(
+            matches!(&err, AppError::LlmError(m) if m.contains("VNL-LLM-010") && m.contains("5 s")),
+            "code rendu : {err}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn un_tour_rapide_n_est_pas_affecte_par_le_delai() {
+        let ok = bounded_turn(900, async { Ok::<u32, AppError>(42) }).await;
+        assert_eq!(ok.ok(), Some(42));
+        let inner = bounded_turn(900, async {
+            Err::<u32, AppError>(AppError::LlmError("boom".into()))
+        })
+        .await;
+        assert!(matches!(inner, Err(AppError::LlmError(m)) if m == "boom"));
     }
 }
