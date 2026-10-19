@@ -78,6 +78,15 @@ onMounted(async () => {
 
 const input = ref('');
 
+/**
+ * Densité du champ de saisie (chat.sdd, champ_de_saisie_compact) : paddings réduits par
+ * les emplacements `ui` de UChatPrompt (root = coquille, base = zone de texte).
+ */
+const promptUi = {
+  root: 'px-1.5 py-1 gap-1',
+  base: 'px-2 py-1 text-sm/5',
+};
+
 function onSubmit(e: Event) {
   e.preventDefault();
   const text = input.value.trim();
@@ -119,8 +128,15 @@ function onSubmit(e: Event) {
       </UChatMessages>
     </Suspense>
     <div v-if="error" class="chat-error">⚠️ {{ error.message }}</div>
-    <UChatPrompt v-model="input" class="chat-prompt" @submit="onSubmit">
-      <UChatPromptSubmit :status="status" />
+    <UChatPrompt
+      v-model="input"
+      class="chat-prompt"
+      :rows="1"
+      :maxrows="6"
+      :ui="promptUi"
+      @submit="onSubmit"
+    >
+      <UChatPromptSubmit :status="status" size="sm" />
     </UChatPrompt>
   </div>
 </template>

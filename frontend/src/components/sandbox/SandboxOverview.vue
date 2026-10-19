@@ -516,8 +516,10 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 16px;
   padding: 16px;
+  height: 100%;
   max-width: 100%;
   overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .grid {
@@ -575,7 +577,7 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
+  min-height: var(--ctl-h);
   min-width: 44px;
   padding: 0 14px;
   border: 1px solid rgba(127, 127, 127, 0.5);
@@ -663,7 +665,7 @@ h2 {
 }
 
 .issues summary {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   display: flex;
   align-items: center;
   cursor: pointer;
@@ -701,13 +703,14 @@ h2 {
     inset: 0;
     z-index: 50;
     display: none;
-    overflow-y: auto;
+    overflow: hidden;
     border-radius: 0;
     background: var(--color-background, #fff);
   }
 
   .chat--open {
-    display: block;
+    display: flex;
+    flex-direction: column;
   }
 
   .chat-toggle {
@@ -717,7 +720,10 @@ h2 {
 
 @media (min-width: 768px) {
   .chat {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    height: 70vh;
+    min-height: 0;
   }
 }
 </style>

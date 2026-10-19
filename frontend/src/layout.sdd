@@ -1,0 +1,85 @@
+Spec: Mise en page et densité — défilement et taille des contrôles
+
+Platform: TypeScript/Vue 3/CSS
+
+Purpose:
+  Règles transverses de mise en page des écrans hors IDE (accueil, projet, sandbox responsive,
+  réglages), issues du premier test en cluster (2026-10-19) : (1) la page entière défilait au lieu de
+  la région de contenu et du chat, la saisie du chat sortait de l'écran ; (2) les barres de contrôle
+  étaient démesurées sur ordinateur (cibles de 44 px pensées pour le tactile appliquées partout, et
+  champ de saisie du chat de Nuxt UI trop haut). Amende, sur ces deux points, la règle de
+  responsivité de ./frontend.sdd (écrans responsives) : la structure reste responsive, mais la TAILLE
+  des contrôles suit le type de pointeur. Le terme « densité bureau » désigne l'esthétique des
+  éditeurs de code (barres de 22 à 34 px, contrôles de 24 à 32 px).
+
+Owns:
+  ./style.css
+  ./App.vue
+  ./layout.guard.spec.ts
+
+Can modify:
+  ./components/SettingsView.vue
+  ./components/ContextChat.vue
+  ./components/dashboards/HomeDashboard.vue
+  ./components/dashboards/ProjectDashboard.vue
+  ./components/sandbox/SandboxOverview.vue
+  ./components/settings/GlobalSettingsScreen.vue
+  ./components/workflows/WorkflowList.vue
+  ./components/workflows/WorkflowEditor.vue
+  ./components/workflows/LaunchDialog.vue
+  ./components/workflows/RunDetail.vue
+  ./components/workflows/RunList.vue
+
+Can read:
+  ./frontend.sdd
+  ./components/SettingsView.sdd
+  ./components/ContextChat.sdd
+  ./components/dashboards/dashboards.sdd
+  ../../packages/ui/src/chat/chat.sdd
+
+Must:
+  Défilement : sur tout écran hors IDE, la PAGE ne défile jamais (`html`, `body`, `#app` et la
+    coquille tiennent dans la fenêtre, `overflow: hidden` au niveau de la coquille). Chaque écran
+    possède une région de contenu qui défile EN INTERNE (`overflow: auto`, `min-height: 0`). Un
+    conteneur flex qui porte une barre fixe puis un enfant en pleine hauteur donne à cet enfant
+    `flex: 1; min-height: 0` (jamais `height: 100%`, qui déborde de la hauteur de la barre).
+  Chat contextuel (`ContextChat`) : la liste des messages défile en interne, la zone de saisie
+    reste ancrée en bas de la colonne, l'en-tête (modèle/agent, session) reste visible. Cela vaut
+    pour la colonne d'assistant des réglages comme pour les chats des autres écrans.
+  Densité : une variable CSS `--ctl-h` définie dans ./style.css vaut 28px par défaut (bureau) et
+    44px quand le pointeur est grossier ou la fenêtre étroite
+    (`@media (pointer: coarse), (max-width: 767px)`). Toute hauteur minimale de contrôle (bouton,
+    sélecteur, onglet, champ) s'écrit `var(--ctl-h)`, jamais `44px` en dur : les quinze `44px` des
+    fichiers listés en `Can modify` sont remplacés ; la taille tactile est conservée sur mobile
+    par la variable, pas par la valeur en dur.
+  Les barres (en-tête du chat, barre de session, barre de statut) restent des barres de bureau :
+    sélecteurs et boutons de 24 à 32 px de haut, marges de 4 à 8 px.
+
+Must not:
+  Écrire `min-height: 44px` / `height: 44px` hors de ./style.css (qui porte la valeur tactile).
+  Utiliser `height: 100%` pour un enfant d'un conteneur flex qui porte une autre barre.
+
+Scenario: aucune_hauteur_tactile_en_dur
+  Given les fichiers `.vue` et `.css` de ../frontend/src et ../packages/ui/src
+  When le test de garde ./layout.guard.spec.ts les scanne
+  Then aucune déclaration `min-height: 44px` ou `height: 44px` n'existe hors de ./style.css, et
+    ./style.css définit `--ctl-h` à 28px par défaut et à 44px sous `(pointer: coarse)`
+
+Scenario: la_page_des_reglages_ne_defile_pas
+  Given le test de garde lisant ./components/SettingsView.vue
+  When il inspecte les déclarations de `.settings-view`, `.settings-main` et `.settings-assistant`
+  Then `.settings-view` est à `height: 100%` avec `overflow: hidden`, `.settings-main` et la région
+    de messages défilent en interne (`overflow` auto), et `.settings-assistant` a `min-height: 0`
+
+Scenario: le_chat_contextuel_occupe_le_reste_de_la_colonne
+  Given le test de garde lisant ./components/ContextChat.vue
+  When il inspecte `.context-chat`
+  Then la racine est `flex: 1` avec `min-height: 0` (et non `height: 100%`)
+
+Tasks:
+  [x] Appliquer ces règles aux écrans listés (réglages, chat contextuel, dashboards, sandbox,
+    run) et écrire le test de garde `./layout.guard.spec.ts` (Vitest, lecture des sources) : vert.
+    Le test ne vérifie que les Scenarios de déclarations CSS, pas le rendu.
+  [ ] Vérification navigateur à faire (non réalisée : pas de navigateur dans la session) : aucune
+    page ne défile, la saisie du chat reste visible en bas, contrôles de taille bureau (étape « pas
+    de défilement de page » à ajouter au runbook, en plus de l'étape 5 « console propre »).

@@ -32,6 +32,7 @@ const workspace = computed(() =>
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: #10192c;
 }
 .topbar {
@@ -49,5 +50,6 @@ const workspace = computed(() =>
 .dock {
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 </style>

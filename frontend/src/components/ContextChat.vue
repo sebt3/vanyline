@@ -183,12 +183,14 @@ watch(
 </template>
 
 <style scoped>
+/* Occupe le reste de la colonne parente (sous la barre d'en-tête) : jamais height 100%. */
 .context-chat {
   display: flex;
   flex-direction: column;
+  flex: 1;
   width: 100%;
-  height: 100%;
   min-width: 0;
+  min-height: 0;
   overflow-x: hidden;
 }
 
@@ -219,7 +221,7 @@ watch(
 }
 
 .context-chat__field select {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   max-width: 100%;
   min-width: 0;
 }

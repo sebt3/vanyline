@@ -196,6 +196,9 @@ async function deleteProject(name: string) {
 
 <style scoped>
 .dashboard {
+  box-sizing: border-box;
+  height: 100%;
+  overflow: auto;
   background: #0c1420;
   color: #e6e9f0;
   padding: 48px 56px;
@@ -279,6 +282,7 @@ h1 {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   height: 70vh;
   border: 1px solid #2b2b4a;
   border-radius: 8px;

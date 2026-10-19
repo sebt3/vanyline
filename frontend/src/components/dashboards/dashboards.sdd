@@ -40,6 +40,9 @@ Exposes:
     (dashboards, assistants, paramètres) ; ne contient aucune autre logique.
 
 Must:
+  Mise en page (2026-10-19) : ce fichier suit les règles de défilement et de densité de
+    `../../layout.sdd` (la page ne défile jamais, le chat défile en interne et sa saisie reste ancrée,
+    contrôles à `var(--ctl-h)` et non à 44px en dur).
   Étapes pilotées par événements (2026-10-19) : ProjectDashboard et HomeDashboard
     s'enregistrent par `registerProjectRefresh` (../../composables/useSandboxState.sdd) et relisent
     le Project (resp. la liste des projets) sur chaque événement `project` — plus jamais de lecture

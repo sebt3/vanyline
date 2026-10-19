@@ -820,7 +820,7 @@ function onSave(): void {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 44px;
+  min-height: var(--ctl-h);
 }
 
 input,
@@ -835,7 +835,7 @@ input,
 select,
 textarea {
   width: 100%;
-  min-height: 44px;
+  min-height: var(--ctl-h);
   padding: 8px 10px;
   background: #0b1220;
   border: 1px solid #1c1c2a;
@@ -848,7 +848,7 @@ textarea {
 }
 
 button {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   padding: 8px 14px;
   background: #1c2433;
   border: 1px solid #2a3346;

@@ -39,6 +39,9 @@ Exposes:
     conversation (comportement de `ChatWindow`).
 
 Must:
+  Mise en page (2026-10-19) : ce fichier suit les règles de défilement et de densité de
+    `../layout.sdd` (la page ne défile jamais, le chat défile en interne et sa saisie reste ancrée,
+    contrôles à `var(--ctl-h)` et non à 44px en dur).
   Ne jamais permettre de modifier prompt, outils ou nom d'un agent système ; seul `model_profile_id`.
   Ne jamais afficher ni stocker un secret ; ne rien journaliser du contenu des messages.
   Réutiliser la conversation existante du même contexte plutôt qu'en créer une à chaque ouverture.

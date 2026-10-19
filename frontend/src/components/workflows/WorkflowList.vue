@@ -236,7 +236,7 @@ h2 {
 }
 
 .btn {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   padding: 0 14px;
   border-radius: 6px;
   border: 1px solid #2b2b4a;

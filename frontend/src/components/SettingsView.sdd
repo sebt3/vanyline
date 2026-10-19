@@ -40,6 +40,9 @@ Exposes:
     configuration affichés (les listes sont rechargées à la fin du tour).
 
 Must:
+  Mise en page (2026-10-19) : ce fichier suit les règles de défilement et de densité de
+    `../layout.sdd` (la page ne défile jamais, le chat défile en interne et sa saisie reste ancrée,
+    contrôles à `var(--ctl-h)` et non à 44px en dur).
   Ne jamais afficher de secret (clé d'API de fournisseur) dans le chat ni dans les écrans : les
     champs secrets restent masqués ; l'agent ne les restitue pas.
   Ne permettre de changer, pour l'agent de configuration, que le profil de modèle.

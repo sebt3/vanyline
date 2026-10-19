@@ -3,6 +3,18 @@
 @import "element-plus/theme-chalk/el-tree.css";
 
 * { box-sizing: border-box; }
+
+/* Hauteur des contrôles (boutons, sélecteurs, onglets, champs) : densité bureau par
+   défaut, cibles tactiles sur pointeur grossier ou fenêtre étroite (cf. layout.sdd). */
+:root {
+  --ctl-h: 28px;
+}
+@media (pointer: coarse), (max-width: 767px) {
+  :root {
+    --ctl-h: 44px;
+  }
+}
+
 html, body, #app {
   height: 100%;
   margin: 0;

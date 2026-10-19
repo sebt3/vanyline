@@ -139,7 +139,7 @@ async function launch() {
 }
 
 .field-input {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   width: 100%;
   padding: 0 10px;
   border-radius: 6px;
@@ -149,7 +149,7 @@ async function launch() {
 }
 
 .btn {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   padding: 0 14px;
   border-radius: 6px;
   border: 1px solid #2b2b4a;

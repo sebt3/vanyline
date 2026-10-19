@@ -204,15 +204,21 @@ const mobileTab = ref<'config' | 'assistant'>('config');
 </template>
 
 <style scoped>
+/* La page ne défile pas : seule la région de configuration (.settings-main) et la
+   liste de messages de l'assistant défilent (cf. layout.sdd). */
 .settings-view {
   display: flex;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   width: 100%;
+  overflow: hidden;
 }
 
 .settings-main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 
 .settings-assistant {
@@ -221,6 +227,8 @@ const mobileTab = ref<'config' | 'assistant'>('config');
   width: 380px;
   flex-shrink: 0;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid #2b2b4a;
 }
 
@@ -239,7 +247,7 @@ const mobileTab = ref<'config' | 'assistant'>('config');
   position: fixed;
   right: 16px;
   bottom: 16px;
-  min-height: 44px;
+  min-height: var(--ctl-h);
   padding: 0 16px;
 }
 
@@ -252,14 +260,24 @@ const mobileTab = ref<'config' | 'assistant'>('config');
 
 .settings-tab {
   flex: 1;
-  min-height: 44px;
+  min-height: var(--ctl-h);
 }
 
 .settings-tab[aria-selected='true'] {
   font-weight: 600;
 }
 
-/* Sous md : l'onglet « Assistant » occupe tout l'écran. */
+/* Sous md : onglets en haut, puis une seule région (configuration ou assistant) qui
+   occupe le reste de l'écran et défile en interne. */
+.settings-view--narrow {
+  flex-direction: column;
+}
+
+.settings-view--narrow .settings-main,
+.settings-view--narrow .settings-assistant {
+  flex: 1;
+}
+
 .settings-view--narrow .settings-assistant {
   width: 100%;
   border-left: 0;

@@ -1,0 +1,37 @@
+Spec: Fenêtre de chat — barre de session et champ de saisie compacts
+
+Platform: TypeScript/Vue 3/@nuxt/ui
+
+Purpose:
+  Composants de chat de `@vanyline/ui` (`ChatWindow`, `ChatSession`). Cette spec ne couvre, à ce
+  jour, que la densité (2026-10-19, vu au premier test en cluster : depuis le passage aux composants
+  gratuits de Nuxt UI, le champ de saisie `UChatPrompt` et son bouton d'envoi étaient démesurés) ; le
+  reste du comportement est celui du code et des tests existants (spec à compléter au fil de l'eau).
+
+Owns:
+  ./ChatWindow.vue
+  ./ChatSession.vue
+
+Can read:
+  ../../../../frontend/src/layout.sdd
+
+Must:
+  Champ de saisie compact : `UChatPrompt` d'une seule ligne au repos (hauteur totale de la zone de
+    saisie au plus 44 px au repos, hors contenu multiligne qui grandit jusqu'à 6 lignes puis défile),
+    paddings réduits par les emplacements `ui` du composant et non par du CSS global ; le bouton
+    d'envoi (`UChatPromptSubmit`) est un petit bouton carré (taille `xs` ou `sm`, pas de `lg`).
+  La zone de saisie reste `flex: none` en bas de la session et la liste de messages seule défile
+    (`flex: 1; min-height: 0; overflow-y: auto`, déjà en place).
+  La barre de session (sélecteur, « + », « × ») garde sa hauteur de 34 px et ses contrôles de
+    22 px : elle est déjà aux normes bureau.
+  Ne dépend d'aucune fonctionnalité payante de Nuxt UI (Pro).
+
+Scenario: champ_de_saisie_compact
+  Given `ChatSession` monté
+  When le champ de saisie est rendu
+  Then `UChatPrompt` reçoit des paddings réduits (emplacement `ui`), `UChatPromptSubmit` une
+    taille `xs` ou `sm`, et aucun style global ne force une hauteur supérieure à 44 px
+
+Tasks:
+  [x] Compacter le champ de saisie et le bouton d'envoi ; test des props/`ui` passées (vert). La
+    hauteur réelle au repos (≤ 44 px) n'est pas mesurée par ce test : à confirmer au navigateur.

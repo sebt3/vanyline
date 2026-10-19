@@ -153,12 +153,12 @@ onMounted(load);
 .global-settings__field input,
 .global-settings__field select,
 .global-settings__field textarea {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   max-width: 100%;
 }
 
 .global-settings__save {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   align-self: flex-start;
   padding: 0 16px;
 }

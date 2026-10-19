@@ -131,7 +131,11 @@ async function confirmCancel() {
 </template>
 
 <style scoped>
+/* Région de contenu de l'écran : elle défile elle-même (la coquille ne défile pas). */
 .run-detail {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
   color: #e6e9f0;
   max-width: 960px;
 }
@@ -225,7 +229,7 @@ h3 {
 }
 
 .btn {
-  min-height: 44px;
+  min-height: var(--ctl-h);
   padding: 0 14px;
   border-radius: 6px;
   border: 1px solid #2b2b4a;

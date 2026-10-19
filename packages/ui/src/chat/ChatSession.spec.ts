@@ -108,3 +108,51 @@ describe('ChatSession — FS_MUTATING_TOOLS → notify-fs-change', () => {
     wrapper.unmount();
   });
 });
+
+// Scenario `champ_de_saisie_compact` (chat.sdd) : champ d'une ligne au repos, paddings
+// réduits par l'emplacement `ui`, bouton d'envoi petit (xs/sm). Les composants Nuxt UI sont
+// auto-importés : on inspecte les vrais composants (pas de stub, qui ne s'applique pas ici).
+describe('ChatSession — champ de saisie compact (champ_de_saisie_compact)', () => {
+  function mountSessionReal() {
+    return mount(ChatSession, {
+      props: { conversationId: 'conv-1' },
+      global: {
+        provide: {
+          'vanyline.chatBackend': {
+            listConversations: vi.fn(async () => []),
+            loadMessages: vi.fn(async () => []),
+            createConversation: vi.fn(async () => 'conv-1'),
+          },
+          'vanyline.chatTransport': {
+            sendMessages: vi.fn(),
+            reconnectToStream: vi.fn(async () => null),
+          },
+          'notify-fs-change': vi.fn(),
+        },
+        stubs: { UChatMessages: true, UChatReasoning: true, UChatTool: true, Markdown: true },
+      },
+    });
+  }
+
+  it('UChatPrompt : une ligne au repos, paddings réduits via `ui`, croissance plafonnée à 6 lignes', () => {
+    const wrapper = mountSessionReal();
+    const prompt = wrapper.findComponent({ name: 'ChatPrompt' });
+    expect(prompt.exists()).toBe(true);
+    expect(prompt.props('rows')).toBe(1);
+    expect(prompt.props('maxrows')).toBe(6);
+    const ui = prompt.props('ui') as Record<string, string> | undefined;
+    expect(ui).toBeDefined();
+    expect(ui?.root).toMatch(/(?:^|\s)py-1(?:\s|$)/);
+    expect(ui?.root).not.toMatch(/(?:^|\s)py-2(?:\s|$)/);
+    expect(ui?.base).toMatch(/(?:^|\s)py-1(?:\s|$)/);
+    wrapper.unmount();
+  });
+
+  it('UChatPromptSubmit : bouton petit (xs ou sm), jamais lg', () => {
+    const wrapper = mountSessionReal();
+    const submit = wrapper.findComponent({ name: 'ChatPromptSubmit' });
+    expect(submit.exists()).toBe(true);
+    expect(['xs', 'sm']).toContain(submit.props('size'));
+    wrapper.unmount();
+  });
+});
