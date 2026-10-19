@@ -213,3 +213,26 @@ describe('ModelProfilesScreen', () => {
     expect((dialog.querySelector('[aria-label="Option 1 valeur"]') as HTMLInputElement).value).toBe('40');
   });
 });
+
+describe('ModelProfilesScreen — champs vidés à l\'édition', () => {
+  it('vider_la_temperature_d_un_modele', async () => {
+    const repo = repoWith({
+      profiles: [{ name: 'chat', provider: 'ollama', model: 'qwen2.5', temperature: 0.7, max_tokens: 100 }],
+      providers: [ollama],
+    });
+    const w = mountWith(repo);
+    await flushPromises();
+    await w.find('.btn-edit').trigger('click');
+    await flushPromises();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    inputValue(dialog, 'Température', '');
+    inputValue(dialog, 'Max tokens', '');
+    await (dialog.querySelector('.btn-success') as HTMLElement).click();
+    await flushPromises();
+    expect(repo.update).toHaveBeenCalledWith(
+      'profiles',
+      'chat',
+      expect.objectContaining({ temperature: null, max_tokens: null }),
+    );
+  });
+});

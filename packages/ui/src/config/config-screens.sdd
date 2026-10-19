@@ -1,0 +1,68 @@
+Spec: Écrans de configuration — édition et champs vidés
+
+Platform: TypeScript/Vue 3/@nuxt/ui
+
+Purpose:
+  Écrans CRUD de la configuration LLM de `@vanyline/ui` (fournisseurs, modèles, serveurs MCP,
+  outils, agents, skills), agnostiques du backend (port `ConfigRepo` injecté). Cette spec ne couvre,
+  à ce jour, que la règle d'édition des champs optionnels ; le reste du comportement est celui du
+  code et des tests existants (spec à compléter au fil de l'eau).
+
+Owns:
+  ./AgentsScreen.vue
+  ./ToolsetsScreen.vue
+  ./ModelProfilesScreen.vue
+
+Can read:
+  ./LlmProvidersScreen.vue
+  ./McpServersScreen.vue
+  ./SkillsScreen.vue
+  ../../../../frontend/src/api/httpConfigRepo.sdd
+
+Must:
+  Un champ optionnel vidé à l'édition est ENVOYÉ explicitement vidé, jamais omis (2026-10-19, vu en
+  cluster : depuis que la mise à jour fusionne la ligne courante — `httpConfigRepo.sdd` —, un champ
+  omis du patch conserve son ancienne valeur, donc un champ vidé ne se vidait plus). Valeur de
+  « vide » par type de colonne : colonne texte NULLABLE => `null` ; liste => `[]` ; objet
+  d'options => `{}` ; nombre optionnel => `null` ; chaîne non nulle => `""`. Au détail :
+  - Agents : `description` => `null`, `toolsets` => `[]`, `system_prompt` => `""` ; `model` reste
+    obligatoire (jamais vidable : s'il est vide, il est omis comme aujourd'hui).
+  - Outils : `description` => `null`, `prompt` => `null`, `local_tools` => `[]`, `mcp` => `[]`.
+  - Modèles : `temperature` => `null`, `max_tokens` => `null`, `options` => `{}` quand aucune option
+    n'est renseignée ; `provider` et `model` restent obligatoires (omis s'ils sont vides).
+  La CRÉATION garde la règle actuelle (champ vide omis : le serveur applique ses défauts).
+  Exception assumée : la clé API d'un fournisseur reste omise quand le champ est vide (le serveur
+  conserve alors l'ancienne clé) ; effacer une clé n'a pas de commande dédiée à ce jour (`[?]`).
+
+Must not:
+  Envoyer `undefined` à la place d'un champ vidé (il disparaît à la sérialisation JSON).
+
+Scenario: vider_la_description_d_un_agent
+  Given l'édition d'un agent dont la description vaut « abc »
+  When l'utilisateur vide le champ et enregistre
+  Then le patch porte `description: null` (et non l'absence de la clé)
+
+Scenario: vider_les_outils_d_un_agent
+  Given un agent avec deux outils sélectionnés
+  When l'utilisateur les décoche tous et enregistre
+  Then le patch porte `toolsets: []` ; vider le prompt système donne `system_prompt: ""`
+
+Scenario: vider_un_outil_composite
+  Given un jeu d'outils avec description, prompt, `local_tools` et `mcp` renseignés
+  When l'utilisateur vide chacun de ces champs et enregistre
+  Then le patch porte `description: null`, `prompt: null`, `local_tools: []`, `mcp: []`
+
+Scenario: vider_la_temperature_d_un_modele
+  Given un profil de modèle avec température 0.7 et `max_tokens` 100
+  When l'utilisateur vide ces deux champs et enregistre
+  Then le patch porte `temperature: null` et `max_tokens: null`
+
+Scenario: la_creation_omet_toujours_les_champs_vides
+  Given le formulaire de création d'un agent avec description vide
+  When l'utilisateur crée l'agent
+  Then le corps de création ne contient pas la clé `description`
+
+Tasks:
+  [x] Envoyer explicitement les champs vidés à l'édition (agents, outils, modèles) et couvrir les
+    cinq Scenarios ci-dessus par des tests Vitest ; autoriser `null` dans les types des patchs si
+    nécessaire.

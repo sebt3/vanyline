@@ -149,3 +149,79 @@ describe('AgentsScreen', () => {
     expect(w.text()).toContain('options KO');
   });
 });
+
+describe('AgentsScreen — champs vidés à l\'édition', () => {
+  const coder: Agent = {
+    name: 'coder',
+    description: 'abc',
+    mode: 'primary',
+    model: 'qwen',
+    toolsets: ['dev', 'ops'],
+    skills: 'auto',
+    system_prompt: 'p',
+  };
+
+  it('vider_la_description_d_un_agent', async () => {
+    const repo = repoWith({ agents: [coder], profiles: [qwen] });
+    const w = mountWith(repo);
+    await flushPromises();
+    await w.find('.btn-edit').trigger('click');
+    await flushPromises();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const desc = dialog.querySelector('textarea[aria-label="Description"]') as HTMLTextAreaElement;
+    desc.value = '';
+    desc.dispatchEvent(new Event('input', { bubbles: true }));
+    await (dialog.querySelector('.btn-success') as HTMLElement).click();
+    await flushPromises();
+    expect(repo.update).toHaveBeenCalledWith('agents', 'coder', expect.objectContaining({ description: null }));
+  });
+
+  it('vider_les_outils_d_un_agent', async () => {
+    const repo = repoWith({ agents: [coder], profiles: [qwen], toolsets: ['dev', 'ops'] });
+    const w = mountWith(repo);
+    await flushPromises();
+    await w.find('.btn-edit').trigger('click');
+    await flushPromises();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    for (const label of ['dev', 'ops']) {
+      const input = [...dialog.querySelectorAll('.checkbox-item')]
+        .find((el) => el.textContent?.trim() === label)!
+        .querySelector('input') as HTMLInputElement;
+      expect(input.checked).toBe(true);
+      input.checked = false;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      // Un clic réel laisse le rendu se faire entre deux décoches (CheckboxList lit props.modelValue).
+      await flushPromises();
+    }
+    const sp = dialog.querySelector('textarea[aria-label="System prompt"]') as HTMLTextAreaElement;
+    sp.value = '';
+    sp.dispatchEvent(new Event('input', { bubbles: true }));
+    await (dialog.querySelector('.btn-success') as HTMLElement).click();
+    await flushPromises();
+    expect(repo.update).toHaveBeenCalledWith(
+      'agents',
+      'coder',
+      expect.objectContaining({ toolsets: [], system_prompt: '' }),
+    );
+  });
+
+  it('la_creation_omet_toujours_les_champs_vides', async () => {
+    const repo = repoWith({ profiles: [qwen], toolsets: ['dev'], skills: [] });
+    const w = mountWith(repo);
+    await flushPromises();
+    await w.find('.btn-create').trigger('click');
+    await flushPromises();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const name = dialog.querySelector('input[aria-label="Nom de l\'agent"]') as HTMLInputElement;
+    name.value = 'a2';
+    name.dispatchEvent(new Event('input', { bubbles: true }));
+    const modelSel = dialog.querySelector('select[aria-label="Profil de modèle"]') as HTMLSelectElement;
+    modelSel.value = 'qwen';
+    modelSel.dispatchEvent(new Event('change', { bubbles: true }));
+    await (dialog.querySelector('.btn-create') as HTMLElement).click();
+    await flushPromises();
+    const body = (repo.create as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![1] as Record<string, unknown>;
+    expect(body.name).toBe('a2');
+    expect(Object.keys(body)).not.toContain('description');
+  });
+});

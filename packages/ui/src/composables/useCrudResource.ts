@@ -1,5 +1,5 @@
 import { ref, type Ref } from 'vue';
-import type { ConfigDomain, ConfigItem, ConfigListItem, ConfigRepo } from '../ports';
+import type { ConfigDomain, ConfigItem, ConfigListItem, ConfigPatch, ConfigRepo } from '../ports';
 
 /**
  * Fetch / loading / error + CRUD sur un domaine de `ConfigRepo`, factorisant le
@@ -19,7 +19,7 @@ export interface CrudResource<D extends ConfigDomain> {
   error: Ref<string | null>;
   fetch: () => Promise<void>;
   create: (item: ConfigItem<D>) => Promise<ConfigItem<D>>;
-  update: (name: string, patch: Partial<ConfigItem<D>>) => Promise<ConfigItem<D>>;
+  update: (name: string, patch: ConfigPatch<ConfigItem<D>>) => Promise<ConfigItem<D>>;
   remove: (name: string) => Promise<void>;
 }
 
@@ -51,7 +51,7 @@ export function useCrudResource<D extends ConfigDomain>(
     return created;
   }
 
-  async function update(name: string, patch: Partial<ConfigItem<D>>): Promise<ConfigItem<D>> {
+  async function update(name: string, patch: ConfigPatch<ConfigItem<D>>): Promise<ConfigItem<D>> {
     const updated = await repo.update(domain, name, patch);
     await fetchAll();
     return updated;

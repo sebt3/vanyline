@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import type { McpSelection, McpServer, Toolset } from '../ports';
+import type { ConfigPatch, McpSelection, McpServer, Toolset } from '../ports';
 import { useConfigRepo } from './useConfigRepo';
 import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
@@ -134,11 +134,13 @@ function cancelEdit() {
 
 async function saveEdit(name: string) {
   editError.value = null;
-  const patch: Partial<Toolset> = {};
-  if (editDescription.value) patch.description = editDescription.value;
-  if (editPrompt.value) patch.prompt = editPrompt.value;
-  if (editLocalTools.value.length > 0) patch.local_tools = editLocalTools.value;
-  if (editMcp.value.length > 0) patch.mcp = editMcp.value as McpSelection[];
+  // Un champ vidé est envoyé vidé (null / []), jamais omis (config-screens.sdd).
+  const patch: ConfigPatch<Toolset> = {
+    description: editDescription.value || null,
+    prompt: editPrompt.value || null,
+    local_tools: editLocalTools.value,
+    mcp: editMcp.value as McpSelection[],
+  };
   try {
     await resource.update(name, patch);
     cancelEdit();

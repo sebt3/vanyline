@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import type { Agent, AgentMode, ModelProfile, SkillSelection } from '../ports';
+import type { Agent, AgentMode, ConfigPatch, ModelProfile, SkillSelection } from '../ports';
 import { useConfigRepo } from './useConfigRepo';
 import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
@@ -139,13 +139,16 @@ function cancelEdit() {
 
 async function saveEdit(name: string) {
   editError.value = null;
-  const patch: Partial<Agent> = {};
-  if (editDescription.value) patch.description = editDescription.value;
-  patch.mode = editMode.value;
+  // Un champ vidé est envoyé vidé (null / [] / ""), jamais omis (config-screens.sdd).
+  // `model` reste obligatoire : vide => omis.
+  const patch: ConfigPatch<Agent> = {
+    description: editDescription.value || null,
+    mode: editMode.value,
+    toolsets: editToolsets.value,
+    skills: editingSkillsIsList.value ? editSkillList.value : editSkills.value,
+    system_prompt: editSystemPrompt.value,
+  };
   if (editModel.value) patch.model = editModel.value;
-  if (editToolsets.value.length > 0) patch.toolsets = editToolsets.value;
-  patch.skills = editingSkillsIsList.value ? editSkillList.value : editSkills.value;
-  if (editSystemPrompt.value) patch.system_prompt = editSystemPrompt.value;
   try {
     await resource.update(name, patch);
     cancelEdit();

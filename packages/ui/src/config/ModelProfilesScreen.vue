@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue';
 import { DialogClose } from 'reka-ui';
-import type { ModelProfile, Provider } from '../ports';
+import type { ConfigPatch, ModelProfile, Provider } from '../ports';
 import { useConfigRepo } from './useConfigRepo';
 import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
@@ -176,14 +176,17 @@ function cancelEdit() {
 async function saveEdit(name: string) {
   editError.value = null;
   const options = optionsFromRows(editOptions.value);
+  // Un champ vidé est envoyé vidé (null / {}), jamais omis (config-screens.sdd).
+  // `provider` et `model` restent obligatoires : vides => omis.
+  const patch: ConfigPatch<ModelProfile> = {
+    temperature: editTemperature.value ? Number(editTemperature.value) : null,
+    max_tokens: editMaxTokens.value ? Number(editMaxTokens.value) : null,
+    options: options ?? {},
+  };
+  if (editProvider.value) patch.provider = editProvider.value;
+  if (editModel.value) patch.model = editModel.value;
   try {
-    await resource.update(name, {
-      ...(editProvider.value ? { provider: editProvider.value } : {}),
-      ...(editModel.value ? { model: editModel.value } : {}),
-      ...(editTemperature.value ? { temperature: Number(editTemperature.value) } : {}),
-      ...(editMaxTokens.value ? { max_tokens: Number(editMaxTokens.value) } : {}),
-      ...(options ? { options } : {}),
-    });
+    await resource.update(name, patch);
     cancelEdit();
   } catch (e) {
     editError.value = message(e);

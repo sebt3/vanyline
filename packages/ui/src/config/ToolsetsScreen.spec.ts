@@ -198,3 +198,47 @@ describe('ToolsetsScreen', () => {
     expect(w.text()).toContain('options KO');
   });
 });
+
+describe('ToolsetsScreen — champs vidés à l\'édition', () => {
+  it('vider_un_outil_composite', async () => {
+    const repo = repoWith({
+      toolsets: [
+        {
+          name: 'dev',
+          description: 'd',
+          prompt: 'p',
+          local_tools: ['bash'],
+          mcp: [{ server: 'fs', tools: [] }],
+        },
+      ],
+      localTools: ['bash'],
+      mcpServers: [{ name: 'fs', type: 'http-streamable', url: 'http://x', available_tools: [] }],
+    });
+    const w = mountWith(repo);
+    await flushPromises();
+    await w.find('.btn-edit').trigger('click');
+    await flushPromises();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const desc = dialog.querySelector('textarea[aria-label="Description"]') as HTMLTextAreaElement;
+    desc.value = '';
+    desc.dispatchEvent(new Event('input', { bubbles: true }));
+    const prompt = dialog.querySelector('textarea[aria-label="Prompt"]') as HTMLTextAreaElement;
+    prompt.value = '';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    const bash = [...dialog.querySelectorAll('.checkbox-item')]
+      .find((el) => el.textContent?.trim() === 'bash')!
+      .querySelector('input') as HTMLInputElement;
+    bash.checked = false;
+    bash.dispatchEvent(new Event('change', { bubbles: true }));
+    const retirer = [...dialog.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retirer')!;
+    retirer.click();
+    await flushPromises();
+    await (dialog.querySelector('.btn-success') as HTMLElement).click();
+    await flushPromises();
+    expect(repo.update).toHaveBeenCalledWith(
+      'toolsets',
+      'dev',
+      expect.objectContaining({ description: null, prompt: null, local_tools: [], mcp: [] }),
+    );
+  });
+});

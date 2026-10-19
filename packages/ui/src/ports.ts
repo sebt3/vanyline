@@ -44,12 +44,17 @@ export interface ConfigItemByDomain extends ConfigListItemByDomain {
 export type ConfigListItem<D extends ConfigDomain = ConfigDomain> = ConfigListItemByDomain[D];
 export type ConfigItem<D extends ConfigDomain = ConfigDomain> = ConfigItemByDomain[D];
 
+/** Patch d'édition : un champ vidé est transmis explicitement (`null` pour un texte ou un nombre
+ *  optionnel, `[]`, `{}` ou `""` selon le type), jamais omis — la mise à jour fusionne la ligne
+ *  courante (cf. `config-screens.sdd`). */
+export type ConfigPatch<T> = { [K in keyof T]?: T[K] | null };
+
 export interface ConfigRepo {
   list<D extends ConfigDomain>(domain: D): Promise<ConfigListItem<D>[]>;
   get<D extends ConfigDomain>(domain: D, name: string): Promise<ConfigItem<D>>;
   create<D extends ConfigDomain>(domain: D, item: ConfigItem<D>): Promise<ConfigItem<D>>;
   update<D extends ConfigDomain>(
-    domain: D, name: string, patch: Partial<ConfigItem<D>>,
+    domain: D, name: string, patch: ConfigPatch<ConfigItem<D>>,
   ): Promise<ConfigItem<D>>;
   remove(domain: ConfigDomain, name: string): Promise<void>;
   /** `is_default` provider = concept web-only. Impl RPC (F4) → rejet « non supporté ». */
