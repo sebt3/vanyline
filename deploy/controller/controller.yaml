@@ -129,13 +129,13 @@ spec:
       serviceAccountName: vanyline-controller
       containers:
         - name: controller
-          image: ghcr.io/sebt3/vanyline-controller:v0.0.11-alpha.8
+          image: ghcr.io/sebt3/vanyline-controller:v0.0.11-alpha.9
           imagePullPolicy: Always
           env:
             - name: SANDBOX_IMAGE_TAG
-              value: "v0.0.11-alpha.8"
+              value: "v0.0.11-alpha.9"
             - name: APP_IMAGE_TAG
-              value: "v0.0.11-alpha.8"
+              value: "v0.0.11-alpha.9"
             # Optionnels (specs du 2026-10-04), à activer à l'implémentation correspondante :
             # - SA_ISSUER : surcharge de l'`iss` des jetons de SA ; par défaut le controller le
             #   découvre via /.well-known/openid-configuration de l'apiserver.
