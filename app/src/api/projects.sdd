@@ -547,3 +547,17 @@ Scenario: doublon de nom dans le namespace ressort en 500 actuel
   Then la réponse est @500 avec `VNL-K8S-002` (message kube `already exists`) et non
     @409 — et le projet `alpha` de `bob` reste intact avec son `repoUrl` d'origine :
     l'app ne vérifie pas l'existence ni l'appartenance du nom avant création
+
+Scenario: owner_pret_demande_namespace_et_condition_ready
+  Given un Owner dont le status porte `namespace` ET une condition `Ready` à `True`
+  When @owner_is_ready l'évalue (fonction pure sur @Owner)
+  Then `true` ; `false` si le namespace est absent, si la condition Ready est absente ou
+    différente de `True`, ou si le status est absent
+
+Scenario: attente_de_l_owner_avant_la_creation_du_project
+  Given @create_project après @ensure_owner (Owner fraîchement créé, namespace et RoleBinding
+    pas encore posés par le controller — cause du 403 du premier Project en cluster 2026-10-19)
+  When @wait_owner_ready scrute l'Owner (période 500 ms, borne @OWNER_READY_TIMEOUT_SECS = 30)
+  Then la création du Project n'est tentée qu'une fois @owner_is_ready vrai ; à l'échéance de
+    la borne la création est tentée quand même (l'éventuelle erreur Kubernetes remonte telle
+    quelle, aucune variante d'erreur nouvelle)

@@ -107,7 +107,15 @@ Structure:
   Err) parce que le chemin reste idempotent POUR LE MÊME utilisateur.
   Règle historique (abrogée, tracée) : `raw` = `principal.email` entier si son local-part
   était non vide, sinon `subject` — remplacée par la règle ci-dessus.
-  Ordre des effets dans @ensure_owner : (1) early-return si lien déjà résolu ; (2) calcul
+  Lien périmé (2026-10-19, vu en cluster après un ménage manuel des Owners) : un lien résolu ne
+  suffit plus à conclure — l'Owner peut avoir été supprimé de Kubernetes. Fonction pure
+  @plan_owner(link: Option<String>, computed: String, exists: bool) -> OwnerPlan : lien présent
+  ET Owner existant => `Reuse(lien)` ; lien présent mais Owner absent => `Create(lien)` (le nom
+  du lien est conservé, jamais recalculé) ; pas de lien => `Create(computed)`. Un lien est donc
+  vérifié par @VnlK8sClient::get_owner à CHAQUE appel (un appel API par création de Project,
+  coût accepté : create_project est rare).
+  Ordre des effets dans @ensure_owner : (1) résolution du lien (plus d'early-return sans appel
+  k8s : voir « Lien périmé ») ; (2) calcul
   du nom ; (3) @crate::k8s::client ; (4) @VnlK8sClient::get_owner — création @OwnerSpec
   seulement si get_owner est en `Err` (TOUTE erreur, y compris non-404, traitée comme
   « absent » — cf. Tasks `[!]`) ; (5) upsert INSERT…ON CONFLICT (user_id) DO UPDATE SET
@@ -152,7 +160,7 @@ Returns:
     lecture interprètent `None` comme « aucun Owner » (le statut HTTP rendu est le contrat
     de chaque appelant, pas de CE fichier).
   - @ensure_owner : `@Ok(@String)` = nom d'Owner — soit celui du lien existant
-    (early-return, sans aucun appel k8s ni écriture), soit le nom fraichement calculé ;
+    (Owner vérifié présent dans Kubernetes, recréé sinon ; voir « Lien périmé »), soit le nom fraichement calculé ;
     dans les deux cas une ligne `vanyline_owner_links (user_id, k8s_owner_name = Some(nom))`
     existe et est seule pour ce `user_id` après réussite.
 
@@ -442,15 +450,15 @@ Scenario: lien au nom NULL est traité comme un lien absent
   Then le résultat est `Ok(@None)` — `and_then` confond absence de ligne et colonne NULL
     (état licite `[?]`, contrat du comportement actuel)
 
-Scenario: ensure_owner renvoie le nom existant sans toucher Kubernetes
+Scenario: ensure_owner avec un lien vérifie l'Owner dans Kubernetes
   Given la même base réelle avec un lien `(user_id = 1, k8s_owner_name = 'alice')` et un
     @AppState dont l'environnement garantit qu'AUCUNE découverte k8s ne réussirait (cache
     `None`, ni cluster ni kubeconfig)
-  When @ensure_owner est appelé avec ce `user_id` et un @AuthUser quelconque (email
-    différent, y compris absent)
-  Then le résultat est `@Ok("alice")` — le nom du lien stocké, pas un nouveau nom calqué
-    sur le principal — et aucune erreur K8s n'est produite (la branche early-return ne
-    consulte jamais `../k8s.rs`) ; la ligne est inchangée
+  When @ensure_owner est appelé avec ce `user_id` et un @AuthUser quelconque
+  Then le résultat est un @Err de variante @AppError::K8sConfigError (`"VNL-K8S-001"`) : un lien
+    ne dispense plus de consulter Kubernetes (amendement 2026-10-19 « Lien périmé » — l'ancien
+    comportement, early-return sans appel k8s, laissait un lien périmé après la suppression
+    manuelle de l'Owner) ; la ligne du lien reste inchangée
 
 Scenario: ensure_owner hors-ligne n'écrit rien en base
   Given la même base réelle SANS lien pour `user_id = 5` et le même @AppState hors-ligne
@@ -542,3 +550,18 @@ Scenario: appels simultanés pour un même utilisateur ne laissent qu'un lien
     erreur de contrainte unique remontée en 500 `VNL-DB-006`
   And à la fin il n'existe AU PLUS UNE ligne `vanyline_owner_links` pour `user_id = 10`,
     au nom `"erin"` — l'upsert ON CONFLICT (user_id) remplace la fenêtre find-then-insert
+
+Scenario: plan_owner_reutilise_un_lien_dont_l_owner_existe
+  Given un lien `alice`, un nom calculé `bob`, l'Owner `alice` existant
+  When @plan_owner décide
+  Then `Reuse("alice")`
+
+Scenario: plan_owner_recree_un_owner_disparu_sous_le_nom_du_lien
+  Given un lien `alice`, un nom calculé `bob`, l'Owner `alice` absent de Kubernetes
+  When @plan_owner décide
+  Then `Create("alice")` — le nom du lien prime sur le nom calculé
+
+Scenario: plan_owner_sans_lien_cree_sous_le_nom_calcule
+  Given aucun lien, un nom calculé `bob`
+  When @plan_owner décide
+  Then `Create("bob")`

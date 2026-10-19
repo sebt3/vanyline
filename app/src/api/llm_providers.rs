@@ -93,59 +93,78 @@ pub async fn test_provider(
     Ok(Json(TestResult { models }))
 }
 
+/// URL de découverte des modèles selon le type (`llm_providers.sdd`, 2026-10-19) : `endpoint` est
+/// la RACINE du serveur ; la concaténation suit un `/` final retiré, sans validation de schéma.
+pub fn models_url(provider_type: &str, endpoint: &str) -> Result<String, AppError> {
+    let root = endpoint.trim_end_matches('/');
+    match provider_type {
+        "ollama" => Ok(format!("{root}/api/tags")),
+        "openai-compatible" => Ok(format!("{root}/v1/models")),
+        other => Err(AppError::LlmError(format!(
+            "VNL-LLM-005: unknown provider type: {other}"
+        ))),
+    }
+}
+
+/// Indice rendu avec le diagnostic HTTP quand `endpoint` se termine par `/v1` (le chemin `/v1`
+/// est ajouté par la lib). Texte sans le séparateur ` — `, ajouté par l'appelant.
+pub fn endpoint_hint(endpoint: &str) -> Option<String> {
+    endpoint.trim_end_matches('/').ends_with("/v1").then(|| {
+        "l'endpoint ne doit pas se terminer par /v1 : le chemin /v1 est ajouté automatiquement"
+            .to_string()
+    })
+}
+
 async fn discover_models(provider: &LlmProviderModel) -> Result<Vec<String>, AppError> {
+    let url = models_url(&provider.provider_type, &provider.endpoint)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| AppError::LlmError(format!("VNL-LLM-003: {e}")))?;
 
-    match provider.provider_type.as_str() {
-        "ollama" => {
-            let url = format!("{}/api/tags", provider.endpoint.trim_end_matches('/'));
-            let resp: serde_json::Value = client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| AppError::LlmError(format!("VNL-LLM-004: {e}")))?
-                .json()
-                .await
-                .map_err(|e| AppError::LlmError(format!("VNL-LLM-004: {e}")))?;
-
-            let models = resp["models"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|m| m["name"].as_str().map(std::string::ToString::to_string))
-                .collect();
-            Ok(models)
-        }
-        "openai-compatible" => {
-            let url = format!("{}/v1/models", provider.endpoint.trim_end_matches('/'));
-            let mut req = client.get(&url);
-            if let Some(ref key) = provider.api_key {
-                req = req.header("Authorization", format!("Bearer {key}"));
-            }
-            let resp: serde_json::Value = req
-                .send()
-                .await
-                .map_err(|e| AppError::LlmError(format!("VNL-LLM-004: {e}")))?
-                .json()
-                .await
-                .map_err(|e| AppError::LlmError(format!("VNL-LLM-004: {e}")))?;
-
-            let models = resp["data"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|m| m["id"].as_str().map(std::string::ToString::to_string))
-                .collect();
-            Ok(models)
-        }
-        _ => Err(AppError::LlmError(format!(
-            "VNL-LLM-005: unknown provider type: {}",
-            provider.provider_type
-        ))),
+    let mut req = client.get(&url);
+    // La clé stockée part en `Authorization: Bearer` pour tous les types (ollama inclus).
+    if let Some(ref key) = provider.api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| AppError::LlmError(format!("VNL-LLM-004: {e}")))?;
+
+    // Réponse non 2xx refusée AVANT tout décodage (diagnostic lisible, pas « error decoding »).
+    let status = resp.status();
+    if !status.is_success() {
+        let hint = endpoint_hint(&provider.endpoint)
+            .map(|h| format!(" — {h}"))
+            .unwrap_or_default();
+        return Err(AppError::LlmError(format!(
+            "VNL-LLM-009: HTTP {} sur {url}{hint}",
+            status.as_u16()
+        )));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AppError::LlmError(format!("VNL-LLM-004: {e}")))?;
+
+    let models = if provider.provider_type == "ollama" {
+        body["models"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|m| m["name"].as_str().map(std::string::ToString::to_string))
+            .collect()
+    } else {
+        body["data"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|m| m["id"].as_str().map(std::string::ToString::to_string))
+            .collect()
+    };
+    Ok(models)
 }
 
 #[cfg(test)]
@@ -495,5 +514,128 @@ mod tests {
             .expect("row exists");
         assert_eq!(row.provider_type, "openai-compatible");
         assert_eq!(row.api_key.as_deref(), Some("sk-secret-123"));
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn provider(provider_type: &str, endpoint: &str, api_key: Option<&str>) -> LlmProviderModel {
+        LlmProviderModel {
+            id: 1,
+            name: "p".to_string(),
+            provider_type: provider_type.to_string(),
+            endpoint: endpoint.to_string(),
+            api_key: api_key.map(str::to_string),
+            available_models: serde_json::json!([]),
+            is_default: false,
+        }
+    }
+
+    /// Serveur HTTP loopback jetable : accepte une connexion, capture la requête (en-têtes
+    /// inclus) et répond `status_line` + `body`. Rend le port et la requête capturée.
+    async fn serve_once(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accepts");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut chunk).await.expect("reads");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(chunk.get(..n).unwrap_or_default());
+            }
+            let resp = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.expect("writes");
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        (port, handle)
+    }
+
+    // Scenario: models_url_construit_la_requete_selon_le_type
+    #[test]
+    fn models_url_construit_la_requete_selon_le_type() {
+        assert_eq!(
+            models_url("ollama", "http://h:11434/").expect("ollama"),
+            "http://h:11434/api/tags"
+        );
+        assert_eq!(
+            models_url("openai-compatible", "http://h:11434/").expect("openai"),
+            "http://h:11434/v1/models"
+        );
+        let err = models_url("inconnu", "http://h:11434/").expect_err("type inconnu");
+        assert!(
+            err.to_string().contains("VNL-LLM-005"),
+            "code rendu : {err}"
+        );
+    }
+
+    // Scenario: endpoint_hint_signale_un_suffixe_v1
+    #[test]
+    fn endpoint_hint_signale_un_suffixe_v1() {
+        assert!(endpoint_hint("http://h:11434/v1").is_some());
+        assert!(endpoint_hint("http://h:11434/v1/").is_some());
+        assert!(endpoint_hint("http://h:11434").is_none());
+    }
+
+    // Scenario: reponse_non_2xx_donne_un_diagnostic_lisible
+    #[tokio::test]
+    async fn reponse_non_2xx_donne_un_diagnostic_lisible() {
+        let (port, server) = serve_once("404 Not Found", "").await;
+        let p = provider(
+            "openai-compatible",
+            &format!("http://127.0.0.1:{port}/v1"),
+            None,
+        );
+        let err = discover_models(&p)
+            .await
+            .expect_err("un 404 doit échouer avant décodage");
+        server.await.expect("server task joins");
+        let msg = err.to_string();
+        assert!(msg.contains("VNL-LLM-009"), "code rendu : {msg}");
+        assert!(msg.contains("404"), "statut absent : {msg}");
+        assert!(
+            msg.contains(&format!("http://127.0.0.1:{port}/v1/v1/models")),
+            "URL absente : {msg}"
+        );
+        assert!(
+            msg.contains("ne doit pas se terminer par /v1"),
+            "indice /v1 absent : {msg}"
+        );
+        assert!(!msg.contains("error decoding response body"), "{msg}");
+    }
+
+    // Scenario: la_cle_api_est_envoyee_aux_deux_types
+    #[tokio::test]
+    async fn la_cle_api_est_envoyee_aux_deux_types() {
+        let (port, server) = serve_once("200 OK", r#"{"models":[{"name":"m1"}]}"#).await;
+        let p = provider(
+            "ollama",
+            &format!("http://127.0.0.1:{port}"),
+            Some("sk-ollama"),
+        );
+        let models = discover_models(&p).await.expect("découverte réussie");
+        let request = server.await.expect("server task joins");
+        assert_eq!(models, vec!["m1".to_string()]);
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-ollama"),
+            "en-tête Bearer absent : {request}"
+        );
     }
 }

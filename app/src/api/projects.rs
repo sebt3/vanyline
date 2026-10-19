@@ -4,7 +4,10 @@ use axum::{
     http::StatusCode,
 };
 use serde::Deserialize;
-use vanyline_crds::{EgressRule, Project, ProjectSpec};
+use std::time::Duration;
+
+use vanyline_crds::{EgressRule, Owner, Project, ProjectSpec};
+use vanyline_lib::k8s::VnlK8sClient;
 
 use miryad_core::auth::{AuthPrincipal, AuthUser};
 use miryad_core::users::resolve_user;
@@ -98,6 +101,7 @@ pub async fn create_project(
         egress: body.egress,
     };
     let client = k8s::client(&state).await?;
+    wait_owner_ready(&client, &owner).await;
     let project = client.create_project(&owner, &body.name, spec).await?;
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -120,6 +124,56 @@ pub async fn delete_project(
     }
     client.delete_project(&owner, &name).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Délai maximal d'attente que l'Owner soit prêt (namespace + `Ready=True`) avant la
+/// création du Project (projects.sdd, 2026-10-19 : 403 du premier Project sur un Owner neuf).
+const OWNER_READY_TIMEOUT_SECS: u64 = 30;
+/// Période de scrutation de l'Owner pendant l'attente.
+const OWNER_READY_POLL_MILLIS: u64 = 500;
+
+/// Vrai quand l'Owner a son `status.namespace` posé ET une condition `Ready` à `True`.
+#[must_use]
+pub fn owner_is_ready(owner: &Owner) -> bool {
+    owner.status.as_ref().is_some_and(|status| {
+        status.namespace.is_some()
+            && status
+                .conditions
+                .iter()
+                .any(|c| c.type_ == "Ready" && c.status == "True")
+    })
+}
+
+/// Scrute `read` toutes les `interval` jusqu'à ce que l'Owner lu soit prêt, bornée à `budget`.
+/// Une erreur de lecture vaut « pas prêt ». À l'échéance, rend la main sans erreur (la création
+/// du Project est alors tentée quand même).
+async fn wait_owner_ready_with<F, Fut, E>(mut read: F, budget: Duration, interval: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Owner, E>>,
+{
+    let waited = tokio::time::timeout(budget, async {
+        loop {
+            if matches!(read().await, Ok(ref owner) if owner_is_ready(owner)) {
+                return;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    })
+    .await;
+    if waited.is_err() {
+        tracing::warn!("owner pas prêt après {budget:?} : création du project tentée quand même");
+    }
+}
+
+/// Attend l'Owner `owner` via le client K8s (cf. [`wait_owner_ready_with`]).
+async fn wait_owner_ready(client: &VnlK8sClient, owner: &str) {
+    wait_owner_ready_with(
+        || client.get_owner(owner),
+        Duration::from_secs(OWNER_READY_TIMEOUT_SECS),
+        Duration::from_millis(OWNER_READY_POLL_MILLIS),
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -224,5 +278,166 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(del_req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod owner_ready_tests {
+    use super::*;
+    use serde_json::json;
+    use std::cell::Cell;
+    use vanyline_crds::{OwnerSpec, OwnerStatus};
+
+    /// Owner de test : `namespace` et `conditions` posés dans le status (`None` => status absent
+    /// quand `namespace` est `None` ET `conditions` est `Value::Null`).
+    fn owner_with(namespace: Option<&str>, conditions: serde_json::Value) -> Owner {
+        let mut owner = Owner::new(
+            "alice",
+            OwnerSpec {
+                home_size: None,
+                home_storage_class: None,
+                home_access_mode: None,
+                project_defaults: None,
+                application_ref: None,
+                egress: Vec::new(),
+            },
+        );
+        owner.status = Some(OwnerStatus {
+            namespace: namespace.map(str::to_string),
+            conditions: serde_json::from_value(conditions).expect("conditions valides"),
+            ..OwnerStatus::default()
+        });
+        owner
+    }
+
+    fn ready_cond(status: &str) -> serde_json::Value {
+        json!([{
+            "type": "Ready",
+            "status": status,
+            "lastTransitionTime": "2026-10-19T00:00:00Z",
+            "message": "",
+            "reason": "Reconciled"
+        }])
+    }
+
+    fn owner_ready() -> Owner {
+        owner_with(Some("app-alice"), ready_cond("True"))
+    }
+
+    fn owner_not_ready() -> Owner {
+        owner_with(None, json!([]))
+    }
+
+    // Scenario: owner_pret_demande_namespace_et_condition_ready
+    #[test]
+    fn owner_is_ready_vrai_avec_namespace_et_ready_true() {
+        assert!(owner_is_ready(&owner_ready()));
+    }
+
+    #[test]
+    fn owner_is_ready_faux_sans_namespace() {
+        assert!(!owner_is_ready(&owner_with(None, ready_cond("True"))));
+    }
+
+    #[test]
+    fn owner_is_ready_faux_sans_condition_ready() {
+        let autre = json!([{
+            "type": "Other", "status": "True", "lastTransitionTime": "2026-10-19T00:00:00Z",
+            "message": "", "reason": ""
+        }]);
+        assert!(!owner_is_ready(&owner_with(Some("app-alice"), autre)));
+    }
+
+    #[test]
+    fn owner_is_ready_faux_si_ready_false() {
+        assert!(!owner_is_ready(&owner_with(
+            Some("app-alice"),
+            ready_cond("False")
+        )));
+    }
+
+    #[test]
+    fn owner_is_ready_faux_sans_status() {
+        let mut owner = owner_ready();
+        owner.status = None;
+        assert!(!owner_is_ready(&owner));
+    }
+
+    // Scenario: attente_de_l_owner_avant_la_creation_du_project
+    #[tokio::test(start_paused = true)]
+    async fn wait_owner_ready_une_seule_lecture_si_deja_pret() {
+        let calls = Cell::new(0u32);
+        wait_owner_ready_with(
+            || {
+                calls.set(calls.get() + 1);
+                let owner = owner_ready();
+                async move { Ok::<Owner, String>(owner) }
+            },
+            Duration::from_secs(OWNER_READY_TIMEOUT_SECS),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_owner_ready_rend_la_main_a_la_troisieme_lecture() {
+        let calls = Cell::new(0u32);
+        wait_owner_ready_with(
+            || {
+                calls.set(calls.get() + 1);
+                let owner = if calls.get() >= 3 {
+                    owner_ready()
+                } else {
+                    owner_not_ready()
+                };
+                async move { Ok::<Owner, String>(owner) }
+            },
+            Duration::from_secs(OWNER_READY_TIMEOUT_SECS),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_owner_ready_erreur_de_lecture_vaut_non_pret() {
+        let calls = Cell::new(0u32);
+        wait_owner_ready_with(
+            || {
+                calls.set(calls.get() + 1);
+                let res = if calls.get() >= 2 {
+                    Ok(owner_ready())
+                } else {
+                    Err("404 Not Found".to_string())
+                };
+                async move { res }
+            },
+            Duration::from_secs(OWNER_READY_TIMEOUT_SECS),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_owner_ready_jamais_pret_rend_la_main_apres_la_borne() {
+        let calls = Cell::new(0u32);
+        let start = tokio::time::Instant::now();
+        wait_owner_ready_with(
+            || {
+                calls.set(calls.get() + 1);
+                let owner = owner_not_ready();
+                async move { Ok::<Owner, String>(owner) }
+            },
+            Duration::from_secs(OWNER_READY_TIMEOUT_SECS),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(
+            start.elapsed() >= Duration::from_secs(OWNER_READY_TIMEOUT_SECS),
+            "la borne doit être atteinte avant de rendre la main"
+        );
+        assert!(calls.get() > 1, "scrutation répétée : {}", calls.get());
     }
 }

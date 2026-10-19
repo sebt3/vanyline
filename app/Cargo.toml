@@ -70,6 +70,9 @@ vanyline-health = { path = "../health" }
 # appliquées, cf. `db::test_support::real_db` — même pattern que les tests internes de
 # miryad-core) : jamais utilisé en production (Postgres/CNPG uniquement, cf. AGENTS.md).
 [dev-dependencies]
+# `test-util` : horloge pausable (`#[tokio::test(start_paused = true)]`) pour tester la borne
+# de `wait_owner_ready` sans attendre 30 s réelles (api/projects.rs). Feature seule, aucune crate ajoutée.
+tokio = { version = "1", features = ["full", "test-util"] }
 sea-orm = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros", "mock"] }
 sea-orm-migration = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
 [lints]

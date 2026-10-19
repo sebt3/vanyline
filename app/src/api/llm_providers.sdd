@@ -142,7 +142,10 @@ Raises:
     - `VNL-LLM-005: unknown provider type: {provider_type}` — `provider_type` hors des
       deux valeurs ; même code que le hook @before_create de `../db/entities/llm_providers.rs`
       mais message différent et rendu HTTP propre ici (@502) là où le hook rend un statut
-      miryad-core inconnu.
+      miryad-core inconnu ;
+    - `VNL-LLM-009: HTTP {statut} sur {url}{indice}` — réponse non 2xx refusée avant décodage
+      (paragraphe « Test de fournisseur lisible », 2026-10-19) ; `{indice}` = ` — ` + texte de
+      @endpoint_hint quand l'endpoint se termine par `/v1`, sinon rien.
   - @AppError::InternalError → @500 `VNL-DB-006: …` : erreur DB sur @find_by_id, sur l'un
     des deux @update_many de @set_default_provider, ou sur l'@Entity::update de
     @test_provider.
@@ -191,6 +194,19 @@ Handles:
     @AuthUser construit à la main (subject `"admin-user"`).
 
 Must:
+  Test de fournisseur lisible (2026-10-19, vu en cluster : « VNL-LLM-004: error decoding response
+    body » opaque, la cause réelle étant un endpoint se terminant par `/v1` donc une requête vers
+    `…/v1/api/tags` en 404 sans corps). La convention du projet est que `endpoint` est la RACINE du
+    serveur, sans `/v1` (la lib suffixe elle-même `/v1` pour `openai-compatible`). La découverte de
+    modèles (@discover_models) : (1) construit l'URL par la fonction pure @models_url(provider_type,
+    endpoint) (`ollama` => `<racine>/api/tags`, `openai-compatible` => `<racine>/v1/models`, racine
+    sans `/` final, type inconnu => `VNL-LLM-005` inchangé) ; (2) envoie la clé API en
+    `Authorization: Bearer` pour LES DEUX types quand elle existe (jusqu'ici ollama l'ignorait) ;
+    (3) refuse une réponse non 2xx AVANT de la décoder, par l'erreur `VNL-LLM-009: HTTP <statut>
+    sur <url>` suivie de l'indice rendu par la fonction pure @endpoint_hint(endpoint) quand
+    l'endpoint, débarrassé de ses `/` finaux, se termine par `/v1` (texte :
+    « l'endpoint ne doit pas se terminer par /v1 : le chemin /v1 est ajouté automatiquement »).
+    `VNL-LLM-004` ne subsiste que pour un échec de transport ou un corps 2xx non JSON.
   - Garder pour les deux handlers l'ordre exact : @AuthUser → @resolve_user →
     @find_by_id (404 @LlmProviderNotFound sur @None) → @can_write (403 @Forbidden sur
     @false) → effet. Aucun effet DB ni réseau avant la fin de la chaîne d'autorisation.
@@ -428,3 +444,24 @@ Tasks:
   [?] Réponse de @set_default_provider construite depuis le fetch d'AVANT les UPDATE
       (colonnes potentiellement périmées, cf. Returns) : acceptable (coût d'un re-fetch)
       ou alignement sur la base relue ?
+
+Scenario: models_url_construit_la_requete_selon_le_type
+  Given l'endpoint `http://h:11434/` (slash final)
+  When @models_url est appelé pour `ollama`, `openai-compatible` puis `inconnu`
+  Then `http://h:11434/api/tags`, `http://h:11434/v1/models`, et l'erreur `VNL-LLM-005`
+
+Scenario: endpoint_hint_signale_un_suffixe_v1
+  Given les endpoints `http://h:11434/v1`, `http://h:11434/v1/` et `http://h:11434`
+  When @endpoint_hint les évalue
+  Then un indice pour les deux premiers, aucun pour le dernier
+
+Scenario: reponse_non_2xx_donne_un_diagnostic_lisible
+  Given un serveur local qui répond 404 sans corps (ou 401 JSON) à la découverte de modèles
+  When @discover_models l'interroge
+  Then l'erreur porte `VNL-LLM-009`, le statut HTTP et l'URL appelée (jamais « error decoding
+    response body »), plus l'indice `/v1` quand l'endpoint s'y termine
+
+Scenario: la_cle_api_est_envoyee_aux_deux_types
+  Given un fournisseur `ollama` avec une clé API et un serveur local qui exige `Authorization: Bearer <clé>`
+  When @discover_models l'interroge
+  Then l'en-tête est présent et la liste de modèles est rendue

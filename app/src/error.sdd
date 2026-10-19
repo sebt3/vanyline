@@ -284,7 +284,7 @@ Handles:
     les variantes payload : `"VNL-DB-007: context not found"` (./api/conversations.rs ×2,
     ./ws/chat.rs — rendu 500 alors qu'une absence de contexte ressemble à un 404, déjà `[?]`
     dans ./db/entities/chat_contexts.sdd), `"VNL-DB-008: created conversation not found"`
-    (./api/conversations.rs), `"VNL-LLM-003"`/`"VNL-LLM-004"`/`"VNL-LLM-005"` dans
+    (./api/conversations.rs), `"VNL-LLM-003"`/`"VNL-LLM-004"`/`"VNL-LLM-005"`/`"VNL-LLM-009"` dans
     @AppError::LlmError (./api/llm_providers.rs::discover_models — `VNL-LLM-005` est aussi
     le code du hook @before_create de ./db/entities/llm_providers.rs),
     `"VNL-MCP-002"`/`"VNL-MCP-003"` dans @AppError::McpError (./api/mcp_servers.rs),

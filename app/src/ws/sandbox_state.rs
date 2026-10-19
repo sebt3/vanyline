@@ -20,7 +20,7 @@ use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::mpsc;
-use vanyline_crds::Sandbox;
+use vanyline_crds::{Project, Sandbox};
 
 use vanyline_lib::k8s::{VnlK8sClient, WatchEvent};
 
@@ -29,13 +29,30 @@ use miryad_core::users::resolve_user;
 
 use crate::{AppState, api::owners, error::AppError, k8s};
 
-/// Event pushé sur le WebSocket quand le `status.phase` d'une sandbox change.
-/// `phase` vaut `None` en suppression (ou avant la première phase connue).
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Type de ressource d'un event (sérialisé en minuscules : `"sandbox"` / `"project"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StateKind {
+    Sandbox,
+    Project,
+}
+
+/// Event pushé sur le WebSocket quand le `status.phase` d'une sandbox ou l'état d'un
+/// project change (`ws/sandbox_state.sdd`, AMENDEMENT 2026-10-19). `name` = nom de la
+/// ressource ; `phase` vaut `None` en suppression (ou avant la première phase connue).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SandboxStateEvent {
-    pub sandbox: String,
+    pub kind: StateKind,
+    pub name: String,
     pub phase: Option<String>,
+}
+
+/// Phase d'un Project dérivée de `status.cloned` : `"Cloned"` si `true`, sinon `"Cloning"`
+/// (absence de status comprise).
+#[must_use]
+pub fn project_phase(project: &Project) -> String {
+    let cloned = project.status.as_ref().is_some_and(|st| st.cloned);
+    if cloned { "Cloned" } else { "Cloning" }.to_string()
 }
 
 /// Subscriber : sender (Arc pour comparaison par `ptr_eq`) + owner cible.
@@ -136,18 +153,39 @@ async fn dispatch_sandbox(
         return;
     };
     let event = SandboxStateEvent {
-        sandbox: name.to_string(),
+        kind: StateKind::Sandbox,
+        name: name.to_string(),
         phase,
     };
     let subs = shared.subscribers.lock();
     dispatch(&owner, &event, &subs);
 }
 
-/// Tâche tokio : lance un watch kube-runtime sur les Sandbox du namespace de
-/// l'Owner `owner`, résout l'owner de chaque sandbox (cache `(owner, project)`
-/// → `owner`) et diffuse les events de phase aux subscribers de cet owner. La
-/// boucle se réinitialise quand le stream se termine (timeout serveur, erreur
-/// kube, etc.).
+/// Diffuse un event de Project aux abonnés de l'Owner `owner` de la boucle (le watch est déjà
+/// dans son namespace : pas de résolution d'owner). `phase` vaut `None` en suppression.
+fn dispatch_project(shared: &SharedState, owner: &str, p: &Project, phase: Option<String>) {
+    let Some(name) = p.metadata.name.as_deref() else {
+        return;
+    };
+    let event = SandboxStateEvent {
+        kind: StateKind::Project,
+        name: name.to_string(),
+        phase,
+    };
+    let subs = shared.subscribers.lock();
+    dispatch(owner, &event, &subs);
+}
+
+/// Un changement venu de l'un des deux flux fusionnés d'un `watch_loop`.
+enum Change {
+    Sandbox(WatchEvent<Sandbox>),
+    Project(WatchEvent<Project>),
+}
+
+/// Tâche tokio : lance un watch kube-runtime sur les Sandbox ET les Project du namespace de
+/// l'Owner `owner` (flux fusionnés), résout l'owner de chaque sandbox (cache `(owner, project)`
+/// → `owner`) et diffuse les events de phase aux subscribers de cet owner. La boucle se
+/// réinitialise quand le stream se termine (timeout serveur, erreur kube, etc.).
 async fn watch_loop(client: VnlK8sClient, shared: SharedState, owner: String) {
     loop {
         // Ne pas tenir de watch quand aucun subscriber n'est connecté.
@@ -163,20 +201,29 @@ async fn watch_loop(client: VnlK8sClient, shared: SharedState, owner: String) {
         }
 
         tracing::info!("sandbox-state watch démarré");
-        let stream = client.watch_sandboxes(&owner);
+        let sandboxes = client.watch_sandboxes(&owner).map(Change::Sandbox);
+        let projects = client.watch_projects(&owner).map(Change::Project);
+        let stream = futures::stream::select(sandboxes, projects);
         futures::pin_mut!(stream);
 
-        while let Some(event) = stream.next().await {
-            match event {
-                WatchEvent::Added(s) | WatchEvent::Modified(s) => {
+        while let Some(change) = stream.next().await {
+            match change {
+                Change::Sandbox(WatchEvent::Added(s) | WatchEvent::Modified(s)) => {
                     let phase = s.status.as_ref().and_then(|st| st.phase.clone());
                     dispatch_sandbox(&shared, &client, &owner, &s, phase).await;
                 }
-                WatchEvent::Deleted(s) => {
+                Change::Sandbox(WatchEvent::Deleted(s)) => {
                     // phase = None → le front retire de la map + refetch.
                     dispatch_sandbox(&shared, &client, &owner, &s, None).await;
                 }
-                WatchEvent::Error(msg) => {
+                Change::Project(WatchEvent::Added(p) | WatchEvent::Modified(p)) => {
+                    dispatch_project(&shared, &owner, &p, Some(project_phase(&p)));
+                }
+                Change::Project(WatchEvent::Deleted(p)) => {
+                    dispatch_project(&shared, &owner, &p, None);
+                }
+                Change::Sandbox(WatchEvent::Error(msg))
+                | Change::Project(WatchEvent::Error(msg)) => {
                     tracing::warn!("sandbox-state watch error: {msg}, redémarrage…");
                     break;
                 }
@@ -287,6 +334,7 @@ async fn run_socket(socket: WebSocket, state: AppState, user: AuthUser) -> Resul
 mod tests {
 
     use super::*;
+    use serde_json::json;
 
     fn sub(owner: &str) -> (Subscriber, mpsc::UnboundedReceiver<SandboxStateEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -299,16 +347,33 @@ mod tests {
         )
     }
 
+    fn project(cloned: Option<bool>) -> Project {
+        let mut value = json!({
+            "apiVersion": "vanyline.solidite.fr/v1alpha1",
+            "kind": "Project",
+            "metadata": { "name": "vynil", "namespace": "app-alice" },
+            "spec": { "owner": "alice", "repoUrl": "https://example.invalid/vynil.git" }
+        });
+        if let Some(c) = cloned {
+            value["status"] = json!({ "cloned": c });
+        }
+        serde_json::from_value(value).expect("Project de test valide")
+    }
+
+    // Scenario: Événement sérialisé en camelCase avec phase nulle (titre amendé 2026-10-19 :
+    // forme `{kind, name, phase}`, phase nulle sérialisée).
     #[test]
     fn event_serializes_camel_case_with_null_phase() {
         let json = serde_json::to_string(&SandboxStateEvent {
-            sandbox: "sbx-1".to_string(),
+            kind: StateKind::Sandbox,
+            name: "sbx-1".to_string(),
             phase: None,
         })
         .unwrap();
-        assert_eq!(json, r#"{"sandbox":"sbx-1","phase":null}"#);
+        assert_eq!(json, r#"{"kind":"sandbox","name":"sbx-1","phase":null}"#);
     }
 
+    // Scenario: Dispatch atteint seulement le owner correspondant
     #[test]
     fn dispatch_only_reaches_matching_owner() {
         let (alice, mut alice_rx) = sub("alice");
@@ -316,15 +381,17 @@ mod tests {
         let subs = vec![alice, bob];
 
         let event = SandboxStateEvent {
-            sandbox: "sbx-1".to_string(),
+            kind: StateKind::Sandbox,
+            name: "sbx-1".to_string(),
             phase: Some("Running".to_string()),
         };
         dispatch("alice", &event, &subs);
 
-        assert_eq!(alice_rx.try_recv().unwrap().sandbox, "sbx-1");
+        assert_eq!(alice_rx.try_recv().unwrap().name, "sbx-1");
         assert!(bob_rx.try_recv().is_err());
     }
 
+    // Scenario: Dispatch fait un fan out vers tous les abonnés du même owner
     #[test]
     fn dispatch_fans_out_to_all_subscribers_of_owner() {
         let (a1, mut a1_rx) = sub("alice");
@@ -334,13 +401,65 @@ mod tests {
         dispatch(
             "alice",
             &SandboxStateEvent {
-                sandbox: "sbx-2".to_string(),
+                kind: StateKind::Sandbox,
+                name: "sbx-2".to_string(),
                 phase: None,
             },
             &subs,
         );
 
-        assert_eq!(a1_rx.try_recv().unwrap().sandbox, "sbx-2");
-        assert_eq!(a2_rx.try_recv().unwrap().sandbox, "sbx-2");
+        assert_eq!(a1_rx.try_recv().unwrap().name, "sbx-2");
+        assert_eq!(a2_rx.try_recv().unwrap().name, "sbx-2");
+    }
+
+    // Scenario: evenement_project_serialise_kind_name_phase
+    #[test]
+    fn evenement_project_serialise_kind_name_phase() {
+        let project_event = SandboxStateEvent {
+            kind: StateKind::Project,
+            name: "vynil".to_string(),
+            phase: Some("Cloning".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&project_event).unwrap(),
+            r#"{"kind":"project","name":"vynil","phase":"Cloning"}"#
+        );
+        let sandbox_event = SandboxStateEvent {
+            kind: StateKind::Sandbox,
+            name: "main".to_string(),
+            phase: Some("Running".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&sandbox_event).unwrap(),
+            r#"{"kind":"sandbox","name":"main","phase":"Running"}"#
+        );
+    }
+
+    // Scenario: phase_de_project_derivee_de_cloned
+    #[test]
+    fn phase_de_project_derivee_de_cloned() {
+        assert_eq!(project_phase(&project(Some(true))), "Cloned");
+        assert_eq!(project_phase(&project(Some(false))), "Cloning");
+        assert_eq!(project_phase(&project(None)), "Cloning");
+    }
+
+    // Scenario: evenement_project_atteint_les_abonnes_de_l_owner_seulement
+    #[test]
+    fn evenement_project_atteint_les_abonnes_de_l_owner_seulement() {
+        let (alice, mut alice_rx) = sub("alice");
+        let (bob, mut bob_rx) = sub("bob");
+        let subs = vec![alice, bob];
+
+        let event = SandboxStateEvent {
+            kind: StateKind::Project,
+            name: "vynil".to_string(),
+            phase: Some("Cloned".to_string()),
+        };
+        dispatch("alice", &event, &subs);
+
+        let received = alice_rx.try_recv().unwrap();
+        assert_eq!(received.kind, StateKind::Project);
+        assert_eq!(received.name, "vynil");
+        assert!(bob_rx.try_recv().is_err());
     }
 }

@@ -63,6 +63,26 @@ fn owner_raw_source(principal: &AuthPrincipal) -> &str {
     }
 }
 
+/// Décision de nommage/création d'un Owner (owners.sdd « Lien périmé », 2026-10-19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerPlan {
+    /// Le lien existe et son Owner est présent : on réutilise son nom.
+    Reuse(String),
+    /// Owner à créer sous ce nom (nom du lien s'il existait, sinon nom calculé).
+    Create(String),
+}
+
+/// Fonction pure : choisit le nom d'Owner à utiliser. Un lien n'est pris en compte que
+/// si son Owner existe ; sinon le nom du lien est conservé (jamais recalculé).
+#[must_use]
+pub fn plan_owner(link: Option<String>, computed: String, exists: bool) -> OwnerPlan {
+    match link {
+        Some(name) if exists => OwnerPlan::Reuse(name),
+        Some(name) => OwnerPlan::Create(name),
+        None => OwnerPlan::Create(computed),
+    }
+}
+
 /// Crée l'Owner si absent et persiste `vanyline_owner_links.k8s_owner_name` pour
 /// `user_id`. Réservé au `POST /api/projects` (décision développeur : lazy
 /// provisioning restreint). Retourne le nom d'Owner.
@@ -74,15 +94,19 @@ pub async fn ensure_owner(
     use crate::db::entities::owner_links::Column;
     use crate::db::entities::owner_links::Entity as OwnerLinkEntity;
 
-    if let Some(name) = resolve_owner_name(state, user_id).await? {
-        return Ok(name);
-    }
-    // Choix du raw (owners.sdd `Must`, 2026-10-07) : preferred_username non vide,
+    // (1) Lien résolu — jamais d'early-return : son Owner est re-vérifié côté k8s.
+    let link = resolve_owner_name(state, user_id).await?;
+    // (2) Nom calculé (owners.sdd `Must`, 2026-10-07) : preferred_username non vide,
     // sinon subject — l'email est retiré de la chaîne de nommage.
-    let name = sanitize_owner_name(owner_raw_source(principal));
+    let computed = sanitize_owner_name(owner_raw_source(principal));
 
+    // (3)-(4) Existence de l'Owner visé (le lien s'il existe, sinon le nom calculé).
+    // Toute erreur de get_owner vaut « absent » (cf. Tasks `[!]` de owners.sdd).
     let k8s = crate::k8s::client(state).await?;
-    if k8s.get_owner(&name).await.is_err() {
+    let probe = link.clone().unwrap_or_else(|| computed.clone());
+    let exists = k8s.get_owner(&probe).await.is_ok();
+    let (OwnerPlan::Reuse(name) | OwnerPlan::Create(name)) = plan_owner(link, computed, exists);
+    if !exists {
         let project_defaults = if state.config.default_project_storage_class.is_some()
             || state.config.default_project_access_mode.is_some()
         {
@@ -133,7 +157,7 @@ pub async fn ensure_owner(
 
 #[cfg(test)]
 mod tests {
-    use super::{owner_raw_source, sanitize_owner_name};
+    use super::{OwnerPlan, owner_raw_source, plan_owner, sanitize_owner_name};
     use miryad_core::auth::{AuthPrincipal, PrincipalSource};
 
     fn principal(email: Option<&str>, preferred: Option<&str>, subject: &str) -> AuthPrincipal {
@@ -265,5 +289,32 @@ mod tests {
     fn chaine_vide_et_tout_tirets_aux_cas_limites() {
         assert_eq!(sanitize_owner_name(""), "owner");
         assert_eq!(sanitize_owner_name("----"), "a");
+    }
+
+    // Scenario: plan_owner_reutilise_un_lien_dont_l_owner_existe
+    #[test]
+    fn plan_owner_reutilise_un_lien_dont_l_owner_existe() {
+        assert_eq!(
+            plan_owner(Some("alice".into()), "bob".into(), true),
+            OwnerPlan::Reuse("alice".into())
+        );
+    }
+
+    // Scenario: plan_owner_recree_un_owner_disparu_sous_le_nom_du_lien
+    #[test]
+    fn plan_owner_recree_un_owner_disparu_sous_le_nom_du_lien() {
+        assert_eq!(
+            plan_owner(Some("alice".into()), "bob".into(), false),
+            OwnerPlan::Create("alice".into())
+        );
+    }
+
+    // Scenario: plan_owner_sans_lien_cree_sous_le_nom_calcule
+    #[test]
+    fn plan_owner_sans_lien_cree_sous_le_nom_calcule() {
+        assert_eq!(
+            plan_owner(None, "bob".into(), false),
+            OwnerPlan::Create("bob".into())
+        );
     }
 }

@@ -234,6 +234,22 @@ Handles:
     aucun état partagé entre eux (@SharedState n'est consommé que par CE fichier).
 
 Must:
+  AMENDEMENT 2026-10-19 (prime sur Exposes/Structure là où ils diffèrent ; le code est déjà
+    par Owner — un @watch_loop et un `watch_handles` par Owner, `watch_sandboxes(owner)` — et le
+    reste du texte ci-dessous, rédigé « sans paramètre », est périmé sur ce point) :
+    Le hub pousse aussi les changements d'état des @Project. @SandboxStateEvent devient
+    `{ kind, name, phase }` : `kind` @enum `Sandbox | Project`, sérialisé en minuscules
+    (`"sandbox"` / `"project"`, @serde(rename_all = "lowercase")), `name` = nom de la ressource
+    (remplace le champ `sandbox`), `phase` inchangé (`null` = suppression ou phase pas encore
+    atteinte). Sérialisation exacte : `{"kind":"project","name":"vynil","phase":"Cloning"}`.
+    Pour un Project, la phase est dérivée de `status.cloned` : `"Cloned"` si `Some(true)`,
+    sinon `"Cloning"` ; suppression => `null`. Aucune résolution d'owner n'est nécessaire (le
+    watch est déjà dans le namespace de l'Owner suivi et `spec.owner` y est par construction
+    l'Owner de la boucle) : l'événement est dispatché aux abonnés de l'Owner de la boucle.
+    Chaque @watch_loop fait tourner les deux flux (`watch_sandboxes(owner)` et
+    `watch_projects(owner)`) de façon fusionnée (@futures::stream::select) ; une erreur de
+    l'un ou l'autre casse la boucle interne et recrée les deux après la pause de 2 s.
+    Le miroir TS (`frontend/src/api/sandboxStateWs.ts`) suit à l'identique.
   UN OWNER = UN NAMESPACE (2026-10-04) : le hub suit les Sandboxes par NAMESPACE D'OWNER — un
     flux de watch par Owner suivi (créé à la première connexion d'un abonné de cet Owner, arrêté
     quand il n'en reste plus), jamais un watch cluster-wide ni du namespace d'application :
@@ -537,3 +553,20 @@ Scenario: Échec de découverte k8s après souscription — la connexion ferme, 
     son canal mort (aucune désinscription sur cette branche d'erreur) — non assertable
     sans crochet de test (champ privé, @WebSocket non constructible) ; l'assertion de test
     se limite au log + fermeture, la fuite étant le `[!]` des Tasks à corriger d'abord
+
+Scenario: evenement_project_serialise_kind_name_phase
+  Given un @SandboxStateEvent de kind Project, name `vynil`, phase `Cloning`
+  When il est sérialisé en JSON
+  Then le texte est exactement `{"kind":"project","name":"vynil","phase":"Cloning"}` ; un
+    événement Sandbox donne `{"kind":"sandbox","name":"main","phase":"Running"}` et une phase
+    `None` est sérialisée `null`
+
+Scenario: phase_de_project_derivee_de_cloned
+  Given un @Project dont `status.cloned` vaut Some(true), puis Some(false), puis None (pas de status)
+  When la phase d'événement est calculée
+  Then `Cloned`, `Cloning`, `Cloning`
+
+Scenario: evenement_project_atteint_les_abonnes_de_l_owner_seulement
+  Given deux abonnés d'Owners différents et un événement Project pour le premier
+  When @dispatch diffuse
+  Then seul l'abonné de cet Owner le reçoit (pas de fuite entre utilisateurs)
