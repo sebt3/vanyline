@@ -3500,13 +3500,13 @@ dependencies = [
 
 [[package]]
 name = "miryad-core"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14f0cd6e6f943e7ec4131db2c916b7e7b6cb8eee72a416c9be46ef50cd5a727f"
+checksum = "9bc500aab35acf108a6646bd1cbf529aaec79995d19d2d0b5c15c01b0b51983d"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "cookie",
@@ -7347,8 +7347,15 @@ dependencies = [
  "serde_json",
  "url",
  "utoipa",
+ "utoipa-swagger-ui-vendored",
  "zip",
 ]
+
+[[package]]
+name = "utoipa-swagger-ui-vendored"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2eebbbfe4093922c2b6734d7c679ebfebd704a0d7e56dfcb0d05818ce28977d"
 
 [[package]]
 name = "uuid"

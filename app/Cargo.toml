@@ -42,14 +42,14 @@ url = "2"
 parking_lot = "0.12"
 bytes = "1"
 percent-encoding = "2"
-miryad-core = { version = "0.1.5", default-features = false, features = [
+miryad-core = { version = "0.2.0", default-features = false, features = [
     "swagger-ui",
     "workflow",
     "mcp",
 ] }
 # W3 `app/src/workflow/runtime.rs` (runtime.sdd, Platform `restate-sdk`) : liaison des services
 # `DagInterpreter`/`StepDispatcher` à l'`Endpoint` et serveur HTTP/2 interne. Version identique à
-# celle déclarée par miryad-core 0.1.5 (`"0.12"`, résolu 0.12.1 dans `Cargo.lock`) et feature
+# celle déclarée par miryad-core 0.2.0 (`"0.12"`, résolu 0.12.1 dans `Cargo.lock`) et feature
 # `http_server` identique. Contrairement à miryad-core (dépendance optionnelle, montée par son
 # feature `workflow`, SANS `default-features = false`), le `default-features = false` ci-dessous
 # est propre à l'app : harnais de l'app (aucune feature par défaut importée sans décision) ;

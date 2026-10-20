@@ -1,6 +1,6 @@
 #[cfg(test)]
 pub(crate) mod test_support {
-    use miryad_core::auth::oidc::OidcLoginResult;
+    use miryad_core::auth::oidc::{OidcIdentity, OidcLoginResult};
     use miryad_core::auth::{AuthError, MiryadAuthState, OidcClientTrait};
     use openidconnect::{CsrfToken, Nonce, PkceCodeVerifier};
 
@@ -32,6 +32,9 @@ pub(crate) mod test_support {
             _pkce_verifier: &PkceCodeVerifier,
         ) -> Result<OidcLoginResult, AuthError> {
             Err(AuthError::Oidc("MRD-TEST-001: mock not used".to_string()))
+        }
+        fn verify_bearer(&self, _jwt: &str) -> Result<OidcIdentity, AuthError> {
+            Err(AuthError::Oidc("MRD-TEST-002: mock not used".to_string()))
         }
     }
 
@@ -185,6 +188,21 @@ mod scenario_tests {
         assert!(
             matches!(&err, AuthError::Oidc(message) if message.contains("MRD-TEST-001")),
             "expected MRD-TEST-001 in: {err}"
+        );
+    }
+
+    /// Scenario: `validation_de_bearer_toujours_refusee`
+    #[test]
+    fn validation_de_bearer_toujours_refusee() {
+        let state = test_auth_state();
+
+        let err = state
+            .oidc_client
+            .verify_bearer("any.jwt.value")
+            .expect_err("the mock never validates a Bearer");
+        assert!(
+            matches!(&err, AuthError::Oidc(message) if message.contains("MRD-TEST-002")),
+            "expected MRD-TEST-002 in: {err}"
         );
     }
 

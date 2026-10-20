@@ -58,16 +58,19 @@ Returns:
     (@miryad_core::auth::issue_token, ex. `bearer_for` de ../db/entities/agents.rs) et
     ceux qui le VALIDENT via l'état partagent le même poivre HMAC (sinon chaque
     émission échoue en empreinte divergente).
-  @authorization_url (mock) — quatuor figé (signature miryad-core 0.1.5, PKCE S256) :
+  @authorization_url (mock) — quatuor figé (signature miryad-core 0.2.0, PKCE S256) :
     URL `https://issuer.example.com/authorize`, @CsrfToken::new(`"csrf"`),
     @Nonce::new(`"nonce"`), @PkceCodeVerifier::new(`"test-pkce-verifier"`).
 
 Raises:
   Aucune erreur propagée par les constructeurs eux-mêmes.
-  @exchange_code (mock, signature miryad-core 0.1.5 : `code`, `expected_nonce`,
+  @exchange_code (mock, signature miryad-core 0.2.0 : `code`, `expected_nonce`,
   @PkceCodeVerifier) — retourne toujours une @Err(@AuthError::Oidc) de message
   `"MRD-TEST-001: mock not used"`, quels que soient les arguments reçus (les trois
   arguments sont ignorés) : le mock n'est jamais censé servir un échange réel.
+  @verify_bearer (mock, ajouté au trait par miryad-core 0.2.0 : `jwt`) — retourne toujours
+  une @Err(@AuthError::Oidc) de message `"MRD-TEST-002: mock not used"`, quel que soit le
+  JWT reçu : le mock ne valide jamais de Bearer.
   Panique `expect("valid test url")` uniquement si la constante d'URL codée en dur
     devient invalide (impossible tant que le littéral ne bouge pas).
 
@@ -87,6 +90,8 @@ Must:
   - @authorization_url doit être déterministe : mêmes valeurs à chaque appel.
   - @exchange_code ne doit jamais retourner de succès ; l'identifiant d'erreur
     `MRD-TEST-001` préfixe le message.
+  - @verify_bearer ne doit jamais retourner de succès ; l'identifiant d'erreur
+    `MRD-TEST-002` préfixe le message.
   - Les exemptions harnais `#![allow(clippy::unwrap_used, clippy::expect_used)]` restent
     confinées à l'attribut interne du module `test_support` (sous `cfg(test)`),
     conformément à `../../../tooling.sdd` (unwrap/expect acceptés uniquement sous
@@ -126,12 +131,18 @@ Scenario: Échange de code toujours refusé
   Then le résultat est `@Err`
     And le message porte l'identifiant `MRD-TEST-001`
 
+Scenario: Validation de Bearer toujours refusée
+  Given un client de test construisant un état via @test_auth_state
+  When @verify_bearer est appelée avec n'importe quel JWT
+  Then le résultat est `@Err`
+    And le message porte l'identifiant `MRD-TEST-002`
+
 Scenario: URL d'autorisation déterministe
   Given le client OIDC simulé d'un état de test
   When @authorization_url est appelée deux fois
   Then les deux appels retournent la même URL `https://issuer.example.com/authorize`,
     le même @CsrfToken `"csrf"`, le même @Nonce `"nonce"` et le même
-    @PkceCodeVerifier `"test-pkce-verifier"` (quatuor miryad-core 0.1.5)
+    @PkceCodeVerifier `"test-pkce-verifier"` (quatuor miryad-core 0.2.0)
 
 Tasks:
   [x] Convertir les 4 Scenario de cette spec en tests taggés (décision Sébastien
