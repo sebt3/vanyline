@@ -377,3 +377,20 @@ attaqué) :
 - ~~Providers LLM~~ — décidé : Ollama/llama.cpp/vllm auto-hébergés dans le cluster ou via un proxy avec API Ollama-compatible. Aucun provider cloud. Endpoint configurable.
 - Format des identifiants d'erreur
 - Logger projet (app et sandbox)
+
+---
+
+## Méthode de travail (2026-10-21)
+
+- **Branches / `main`** : vanyline est un POC sans déploiement productif ; on travaille et on pousse
+  directement sur `main` (pas de branche de feature, pas de PR). Le passage à une gestion saine est
+  marqué par la sortie des **deux packages vynil pour Kydah** ; à ce moment-là le droit de push sur
+  `main` est retiré et les branches/PR deviennent mécaniques.
+- **Refonte UI phase 1** (shell commun, accueil, projet, vue de sandbox mobile, réglages) livrée en
+  `v0.0.11-alpha.11` (4 lots implémentés par Haiku, validés et commités un à un). **Phase 2** : IDE à
+  trois zones fixes sans dockview, spec à réécrire avant code (`frontend/src/components/ide.sdd`).
+  Dette tracée dans les Tasks de `shell.sdd` et `SettingsView.sdd` (vérification navigateur non faite,
+  `AccountScreen.vue` aux couleurs en dur).
+- **CI `Tests` rouge de longue date** : `runner::tests::timeout_tue_le_groupe` (crate `health`) échoue
+  en CI comme en local, ce qui fait tomber « Rust tests », « Coverage » et « ts-rs ». Défaut préexistant
+  du crate, indépendant de la release (le workflow `Release` ne dépend pas de `Tests`).
