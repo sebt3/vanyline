@@ -425,4 +425,52 @@ describe('SandboxOverview', () => {
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.every((c) => c.url.startsWith('/api/'))).toBe(true);
   });
+
+  it('quatre_onglets_sous_md', async () => {
+    mockApi(baseHandler(() => passedHealth()));
+    const w = await mountOverview(390);
+    const tabs = w.findAll('[role="tab"]');
+    expect(tabs.map((t) => t.text())).toEqual(['Santé', 'Workflows', 'Exécutions', 'Assistant']);
+    expect(w.find('[role="tablist"]').exists()).toBe(true);
+    const selected = tabs.filter((t) => t.attributes('aria-selected') === 'true');
+    expect(selected).toHaveLength(1);
+    expect(selected[0].text()).toBe('Santé');
+    expect(w.find('[data-testid="section-health"]').isVisible()).toBe(true);
+    expect(w.find('[data-testid="section-workflows"]').isVisible()).toBe(false);
+
+    await tabs[1].trigger('click');
+    expect(w.find('[data-testid="section-workflows"]').isVisible()).toBe(true);
+    expect(w.find('[data-testid="section-health"]').isVisible()).toBe(false);
+    expect(w.find('[data-testid="section-runs"]').isVisible()).toBe(false);
+  });
+
+  it('cartes_ensemble_a_partir_de_md', async () => {
+    mockApi(baseHandler(() => passedHealth()));
+    const w = await mountOverview(1280);
+    expect(w.find('[role="tablist"]').exists()).toBe(false);
+    expect(w.find('[data-testid="section-health"]').isVisible()).toBe(true);
+    expect(w.find('[data-testid="section-workflows"]').isVisible()).toBe(true);
+    expect(w.find('[data-testid="section-runs"]').isVisible()).toBe(true);
+  });
+
+  it('synthese_de_sante', async () => {
+    const health = passedHealth();
+    health.report.checks[1] = check('clippy', 'lint', 'failed');
+    health.report.issues = ['a.rs', 'b.rs', 'c.rs'].map((p) => ({
+      check_id: 'clippy',
+      path: `src/${p}`,
+      line: 1,
+      column: 1,
+      severity: 'error' as const,
+      code: null,
+      message: 'erreur de lint',
+    }));
+    health.summary.status = 'failed';
+    mockApi(baseHandler(() => health));
+    const w = await mountOverview(390);
+    expect(w.find('[data-testid="health-synthesis"]').text()).toContain('1 vérification à corriger');
+    const tile = w.find('[data-testid="tile-clippy"]');
+    expect(tile.text()).toContain('3');
+    expect(tile.text()).toContain('Échec');
+  });
 });

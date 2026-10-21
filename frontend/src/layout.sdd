@@ -90,6 +90,12 @@ Scenario: coquille_hors_ide
   Then sur `/` la nav « Navigation principale » est rendue ; sur la route IDE elle ne l'est pas et
     la barre de menu de l'IDE l'est
 
+Scenario: vue_de_sandbox_porte_sa_barre
+  Given la route `sandbox-overview`
+  When ./App.vue s'affiche
+  Then la coquille porte la classe `shell-app--own-bar`, qui met `AppNav` en `display: none` (donc
+    hors clavier et hors lecteur d'écran) en dessous de `md` ; sur les autres routes elle est absente
+
 Scenario: fond_via_theme
   Given le test de garde lisant ./style.css et ./App.vue
   When il les inspecte

@@ -20,6 +20,12 @@ describe('App', () => {
           component: { template: '<div>IdeShell</div>' },
           props: true,
         },
+        {
+          path: '/p/:projectName/s/:sandboxName/overview',
+          name: 'sandbox-overview',
+          component: { template: '<div>Overview</div>' },
+          props: true,
+        },
         { path: '/settings', name: 'settings', component: { template: '<div>Settings</div>' } },
       ],
     });
@@ -62,5 +68,13 @@ describe('App', () => {
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
     expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
+  });
+
+  it('vue de sandbox : la barre inférieure du shell est retirée sous md (barre à onglets propre)', async () => {
+    const wrapper = mountApp();
+    await wrapper.vm.$router.push('/p/foo/s/bar/overview');
+    expect(wrapper.find('.shell-app').classes()).toContain('shell-app--own-bar');
+    await wrapper.vm.$router.push('/');
+    expect(wrapper.find('.shell-app').classes()).not.toContain('shell-app--own-bar');
   });
 });

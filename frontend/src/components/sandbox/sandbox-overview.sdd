@@ -140,5 +140,9 @@ Scenario: synthese_de_sante
     avec un état textuel
 
 Tasks:
-  [ ] Refonte UI 2026-10-21 : onglets mobiles, grille ≥ md, synthèse de santé ; tests des Scenario
-    ci-dessus.
+  [x] Refonte UI 2026-10-21 (lot 3, validé : 554 tests frontend, check, build, lint specs verts) :
+    onglets mobiles, grille ≥ md, synthèse de santé. Arbitrages : la vignette Tests montre l'état
+    textuel (le rapport typé ne porte pas de décompte de tests) ; la couverture est neutre (aucun
+    seuil défini) ; Suspendre conservé ; barre du shell retirée sur cette route sous `md`
+    (../../layout.sdd, scénario vue_de_sandbox_porte_sa_barre).
+  [ ] Vérification navigateur (390 px / 1280 px) au smoke test : non faite.

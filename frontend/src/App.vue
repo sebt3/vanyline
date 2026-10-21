@@ -10,6 +10,8 @@ const route = useRoute();
 const isIdeRoute = computed(() => route.name === 'ide');
 // Plus de "media-station" en dur : le workspace vient de la route.
 // Hors route IDE (pas de sandbox) → chaîne vide.
+/** La vue de sandbox porte sa propre barre d'onglets mobile : celle du shell est retirée sous md. */
+const ownsBottomBar = computed(() => route.name === 'sandbox-overview');
 const workspace = computed(() =>
   typeof route.params.sandboxName === 'string' ? route.params.sandboxName : '',
 );
@@ -29,7 +31,7 @@ const workspace = computed(() =>
     </div>
     <!-- Hors IDE : shell commun (cf. components/shell/shell.sdd). La page ne défile jamais ;
          seule la région de contenu défile. -->
-    <div v-else class="shell shell-app">
+    <div v-else class="shell shell-app" :class="{ 'shell-app--own-bar': ownsBottomBar }">
       <AppNav />
       <div class="app-main">
         <div class="ctx-bar">
@@ -104,6 +106,9 @@ const workspace = computed(() =>
 }
 
 @media (max-width: 767px) {
+  .shell-app--own-bar :deep(.app-nav) {
+    display: none;
+  }
   .shell-app {
     /* La nav est en premier dans le DOM : column-reverse la place en bas. */
     flex-direction: column-reverse;

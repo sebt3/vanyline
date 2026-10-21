@@ -9,7 +9,8 @@ import { useSandboxState } from '../../composables/useSandboxState';
 import ContextChat from '../ContextChat.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
-import { LG_MIN_WIDTH } from '../dashboards/viewport';
+import { LG_MIN_WIDTH, MD_MIN_WIDTH, useViewportWidth } from '../dashboards/viewport';
+import AssistantPanel from '../shell/AssistantPanel.vue';
 import LaunchDialog from '../workflows/LaunchDialog.vue';
 import RunList from '../workflows/RunList.vue';
 
@@ -75,9 +76,36 @@ async function toggleSuspend() {
 
 // --- Largeur : lien vers l'IDE --------------------------------------------
 
-const wideEnough = ref(window.innerWidth >= LG_MIN_WIDTH);
-function onResize() {
-  wideEnough.value = window.innerWidth >= LG_MIN_WIDTH;
+const width = useViewportWidth();
+const wideEnough = computed(() => width.value >= LG_MIN_WIDTH);
+/** Sous md : une section à la fois, barre d'onglets en bas (sandbox-overview.sdd, Refonte). */
+const stacked = computed(() => width.value < MD_MIN_WIDTH);
+
+// --- Onglets (sous md) et assistant ------------------------------------------
+
+type Tab = 'health' | 'workflows' | 'runs' | 'assistant';
+const tabs: { id: Tab; label: string }[] = [
+  { id: 'health', label: 'Santé' },
+  { id: 'workflows', label: 'Workflows' },
+  { id: 'runs', label: 'Exécutions' },
+  { id: 'assistant', label: 'Assistant' },
+];
+const activeTab = ref<Tab>('health');
+/** Ouverture de l'assistant à partir de md (bouton de l'en-tête). */
+const assistantOpen = ref(false);
+
+/** Sous md, l'onglet « Assistant » ouvre la feuille ; à partir de md, le bouton de l'en-tête. */
+const panelOpen = computed(() =>
+  stacked.value ? activeTab.value === 'assistant' : assistantOpen.value,
+);
+
+function sectionVisible(tab: Exclude<Tab, 'assistant'>): boolean {
+  return !stacked.value || activeTab.value === tab;
+}
+
+function closeAssistant() {
+  assistantOpen.value = false;
+  if (activeTab.value === 'assistant') activeTab.value = 'health';
 }
 
 // --- Carte SANTÉ ------------------------------------------------------------
@@ -153,6 +181,55 @@ const verdictTone = computed(() => {
 const gapsByPath = computed(
   () => new Map((report.value?.coverage?.files ?? []).map((f) => [f.path, f.uncovered])),
 );
+
+/**
+ * Synthèse de la carte santé : décompte d'affichage des vérifications non passed/skipped
+ * (aucune interprétation du rapport).
+ */
+const toCorrect = computed(
+  () => (report.value?.checks ?? []).filter((c) => c.status !== 'passed' && c.status !== 'skipped').length,
+);
+
+const KIND_LABELS: Record<Check['kind'], string> = {
+  format: 'Format',
+  lint: 'Clippy / lint',
+  tests: 'Tests',
+  coverage: 'Couverture',
+  new_code: 'Code neuf',
+};
+
+interface Tile {
+  id: string;
+  name: string;
+  state: string;
+  tone: string;
+  value: string;
+}
+
+/** Vignettes : une par vérification, valeur issue des compteurs d'issues du rapport. */
+const checkTiles = computed<Tile[]>(() => {
+  const issues = report.value?.issues ?? [];
+  return (report.value?.checks ?? []).map((c): Tile => {
+    const own = issues.filter((i) => i.check_id === c.id);
+    const errors = own.filter((i) => i.severity === 'error').length;
+    const warnings = own.length - errors;
+    const plural = (n: number, word: string) => `${n} ${word}${n > 1 ? 's' : ''}`;
+    let value: string;
+    if (errors > 0) value = plural(errors, 'erreur');
+    else if (warnings > 0) value = plural(warnings, 'avertissement');
+    else if (c.status === 'passed' && c.kind !== 'tests') value = 'propre';
+    else value = checkLabels[c.status];
+    const tone = c.status === 'passed' ? 'ok' : c.status === 'skipped' ? 'muted' : c.status === 'failed' ? 'fail' : 'warn';
+    return { id: c.id, name: `${c.id} (${KIND_LABELS[c.kind]})`, state: checkLabels[c.status], tone, value };
+  });
+});
+
+const coverageTile = computed<Tile>(() => {
+  const coverage = summary.value?.coverage_percent;
+  return coverage == null
+    ? { id: 'coverage', name: 'Couverture', state: 'Non mesurée', tone: 'warn', value: '—' }
+    : { id: 'coverage', name: 'Couverture', state: 'Mesurée', tone: 'muted', value: `${formatPercent(coverage)} %` };
+});
 
 /** Format d'affichage d'un pourcentage déjà calculé par la sandbox. */
 function formatPercent(value: number): string {
@@ -278,40 +355,49 @@ function onTurnFinished() {
   void loadWorkflows();
 }
 
-// --- Chat (feuille plein écran sous md) ------------------------------------
-
-const chatOpen = ref(false);
-
 // --- Cycle de vie -----------------------------------------------------------
 
 onMounted(() => {
   void loadSandbox();
   void loadHealth();
   void loadWorkflows();
-  window.addEventListener('resize', onResize);
   document.addEventListener('visibilitychange', onVisibilityChange);
 });
 
 onBeforeUnmount(() => {
   stopPolling();
-  window.removeEventListener('resize', onResize);
   document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 
 <template>
-  <div class="overview">
+  <div class="screen">
+  <div class="overview" :class="{ 'overview--stacked': stacked }">
     <header class="card header">
-      <div class="header-main">
-        <h1>{{ sandboxName }}</h1>
-        <p class="meta">
-          Projet
-          <RouterLink :to="`/p/${projectName}`">{{ projectName }}</RouterLink>
-          · branche <span data-testid="branch">{{ sandbox?.spec.branch ?? '—' }}</span>
-        </p>
-        <p class="meta">
-          Phase : <strong data-testid="phase">{{ phase ?? '—' }}</strong>
-        </p>
+      <div class="header-row">
+        <RouterLink
+          class="back"
+          :to="`/p/${projectName}`"
+          :aria-label="`Retour au projet ${projectName}`"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M15 6l-6 6 6 6" />
+          </svg>
+        </RouterLink>
+        <div class="header-main">
+          <h1>{{ sandboxName }}</h1>
+          <p class="meta">
+            Projet <span data-testid="project">{{ projectName }}</span>
+            · branche <span data-testid="branch">{{ sandbox?.spec.branch ?? '—' }}</span>
+          </p>
+        </div>
+        <span
+          data-testid="phase"
+          class="phase-pill"
+          :class="`phase--${phase === 'Running' ? 'ok' : 'muted'}`"
+        >
+          {{ phase ?? '—' }}
+        </span>
       </div>
       <div class="header-actions">
         <button
@@ -322,6 +408,16 @@ onBeforeUnmount(() => {
           @click="toggleSuspend"
         >
           {{ sandbox?.spec.suspended ? 'Reprendre' : 'Suspendre' }}
+        </button>
+        <button
+          v-if="!stacked"
+          type="button"
+          class="btn"
+          data-testid="assistant-toggle"
+          :aria-expanded="assistantOpen"
+          @click="assistantOpen = !assistantOpen"
+        >
+          Assistant
         </button>
         <RouterLink
           v-if="wideEnough"
@@ -341,7 +437,12 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="grid">
-      <section class="card" aria-labelledby="health-title">
+      <section
+        v-show="sectionVisible('health')"
+        data-testid="section-health"
+        class="card"
+        aria-labelledby="health-title"
+      >
         <div class="card-head">
           <h2 id="health-title">Santé du code</h2>
           <span
@@ -364,6 +465,13 @@ onBeforeUnmount(() => {
         </div>
 
         <template v-else>
+          <p
+            data-testid="health-synthesis"
+            class="synthesis"
+            :class="toCorrect > 0 ? 'synthesis--warn' : 'synthesis--ok'"
+          >
+            {{ toCorrect > 0 ? `${toCorrect} vérification${toCorrect > 1 ? 's' : ''} à corriger` : 'Tout est vert' }}
+          </p>
           <p data-testid="verdict" class="verdict" :class="`verdict--${verdictTone}`">
             Statut global : <strong>{{ summary.status }}</strong> — {{ verdictLabels[summary.status] }}
           </p>
@@ -380,17 +488,26 @@ onBeforeUnmount(() => {
             Le résultat n'est pas une mesure complète.
           </div>
 
-          <ul class="checks">
+          <ul class="tiles">
             <li
-              v-for="check in report.checks"
-              :key="check.id"
+              v-for="tile in checkTiles"
+              :key="tile.id"
               data-testid="check-row"
-              class="check"
-              :class="`check--${check.status}`"
+              class="tile"
+              :class="`tile--${tile.tone}`"
             >
-              <span class="check-id">{{ check.id }}</span>
-              <span class="check-kind">{{ check.kind }}</span>
-              <span class="check-status">{{ checkLabels[check.status] }}</span>
+              <div :data-testid="`tile-${tile.id}`" class="tile-body">
+                <span class="tile-name">{{ tile.name }}</span>
+                <span class="tile-state">{{ tile.state }}</span>
+                <span class="tile-value">{{ tile.value }}</span>
+              </div>
+            </li>
+            <li data-testid="tile-coverage" class="tile" :class="`tile--${coverageTile.tone}`">
+              <div class="tile-body">
+                <span class="tile-name">{{ coverageTile.name }}</span>
+                <span class="tile-state">{{ coverageTile.state }}</span>
+                <span class="tile-value">{{ coverageTile.value }}</span>
+              </div>
             </li>
           </ul>
           <p data-testid="checks-summary" class="meta">
@@ -457,7 +574,12 @@ onBeforeUnmount(() => {
         <ErrorCard v-if="refreshError" :message="refreshError" />
       </section>
 
-      <section class="card" aria-labelledby="wf-title">
+      <section
+        v-show="sectionVisible('workflows')"
+        data-testid="section-workflows"
+        class="card"
+        aria-labelledby="wf-title"
+      >
         <h2 id="wf-title">Workflows</h2>
         <ErrorCard v-if="workflowsError" :message="workflowsError" />
         <p v-if="!isRunning" class="warning" data-testid="launch-disabled">
@@ -491,35 +613,87 @@ onBeforeUnmount(() => {
         />
       </section>
 
-      <section class="card" aria-labelledby="runs-title">
+      <section
+        v-show="sectionVisible('runs')"
+        data-testid="section-runs"
+        class="card"
+        aria-labelledby="runs-title"
+      >
         <h2 id="runs-title">Runs de cette sandbox</h2>
         <RunList :key="runsKey" :sandbox="sandboxName" @select="openRun" />
       </section>
-
-      <section class="card chat" :class="{ 'chat--open': chatOpen }" aria-labelledby="chat-title">
-        <div class="card-head">
-          <h2 id="chat-title">Assistant</h2>
-          <button type="button" class="btn chat-toggle" @click="chatOpen = !chatOpen">
-            {{ chatOpen ? 'Fermer' : 'Ouvrir l\'assistant' }}
-          </button>
-        </div>
-        <ContextChat kind="sandbox" :data="{ sandbox_name: sandboxName }" @turn-finished="onTurnFinished" />
-      </section>
     </div>
+  </div>
+
+  <nav
+    v-if="stacked"
+    class="tabbar"
+    role="tablist"
+    aria-label="Sections de la sandbox"
+  >
+    <button
+      v-for="tab in tabs"
+      :key="tab.id"
+      type="button"
+      role="tab"
+      class="tab"
+      :class="{ 'tab--active': activeTab === tab.id }"
+      :aria-selected="activeTab === tab.id"
+      :data-testid="`tab-${tab.id}`"
+      @click="activeTab = tab.id"
+    >
+      <svg v-if="tab.id === 'health'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z" /><path d="M9 12l2 2 4-4" />
+      </svg>
+      <svg v-else-if="tab.id === 'workflows'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /><path d="M10 7h2a2 2 0 0 1 2 2v5" />
+      </svg>
+      <svg v-else-if="tab.id === 'runs'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d="M8 5v14l11-7z" />
+      </svg>
+      <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <path d="M4 5h16v11H9l-5 4z" />
+      </svg>
+      <span>{{ tab.label }}</span>
+    </button>
+  </nav>
+
+  <AssistantPanel
+    :open="panelOpen"
+    title="Assistant de la sandbox"
+    @close="closeAssistant"
+  >
+    <ContextChat kind="sandbox" :data="{ sandbox_name: sandboxName }" @turn-finished="onTurnFinished" />
+  </AssistantPanel>
   </div>
 </template>
 
 <style scoped>
+/* Écran : une ligne (contenu + panneau d'assistant à partir de md). La page ne défile jamais. */
+.screen {
+  box-sizing: border-box;
+  display: flex;
+  height: 100%;
+  min-width: 0;
+}
+
 .overview {
   box-sizing: border-box;
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 16px;
+  min-width: 0;
   height: 100%;
+  padding: 16px;
   max-width: 100%;
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+/* Sous md : la barre d'onglets de l'écran recouvre la barre du shell ; le contenu passe dessous. */
+.overview--stacked {
+  padding-bottom: calc(var(--nav-h) + 16px);
 }
 
 .grid {
@@ -532,8 +706,9 @@ onBeforeUnmount(() => {
 .card {
   box-sizing: border-box;
   min-width: 0;
-  border: 1px solid rgba(127, 127, 127, 0.35);
+  border: 1px solid var(--border);
   border-radius: 8px;
+  background: var(--surface);
   padding: 16px;
   overflow-wrap: anywhere;
 }
@@ -556,8 +731,59 @@ h2 {
   margin: 0 0 8px;
 }
 
-.header-main {
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
+}
+
+.header-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.back {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.back:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.back:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.back svg {
+  width: 20px;
+  height: 20px;
+}
+
+.phase-pill {
+  flex: none;
+  font-size: 0.8rem;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.phase--ok {
+  color: var(--ok);
+}
+
+.phase--muted {
+  color: var(--muted);
 }
 
 .header-actions {
@@ -569,7 +795,7 @@ h2 {
 
 .meta {
   font-size: 0.9rem;
-  opacity: 0.8;
+  color: var(--muted);
   margin: 2px 0;
 }
 
@@ -578,15 +804,20 @@ h2 {
   align-items: center;
   justify-content: center;
   min-height: var(--ctl-h);
-  min-width: 44px;
+  min-width: var(--ctl-h);
   padding: 0 14px;
-  border: 1px solid rgba(127, 127, 127, 0.5);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: transparent;
+  background: var(--surface-2);
   color: inherit;
   font: inherit;
   cursor: pointer;
   text-decoration: none;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .btn:disabled {
@@ -601,22 +832,87 @@ h2 {
   border: 1px solid currentColor;
 }
 
-.badge--ok { color: #1a7f37; }
-.badge--warn { color: #9a6700; }
-.badge--busy { color: #0969da; }
-.verdict--ok { color: #1a7f37; }
-.verdict--warn { color: #9a6700; }
-.verdict--fail { color: #cf222e; }
+.badge--ok { color: var(--ok); }
+.badge--warn { color: var(--warn); }
+.badge--busy { color: var(--accent); }
+
+.synthesis {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.synthesis--ok { color: var(--ok); }
+.synthesis--warn { color: var(--warn); }
+
+.verdict--ok { color: var(--ok); }
+.verdict--warn { color: var(--warn); }
+.verdict--fail { color: var(--err); }
 
 .warning {
   margin: 8px 0;
   padding: 8px 10px;
   border-radius: 6px;
-  background: rgba(214, 153, 34, 0.15);
-  color: #9a6700;
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  color: var(--warn);
 }
 
-.checks,
+/* Vignettes de vérification : deux colonnes, état en texte + point de couleur. */
+.tiles {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tile {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.tile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: var(--ctl-h);
+  padding: 8px 10px;
+}
+
+.tile-name {
+  font-size: 0.8rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.tile-state {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.tile-state::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tile-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.tile--ok .tile-state { color: var(--ok); }
+.tile--warn .tile-state { color: var(--warn); }
+.tile--fail .tile-state { color: var(--err); }
+.tile--muted .tile-state { color: var(--muted); }
+
 .workflows,
 .files,
 .issues ul {
@@ -625,7 +921,6 @@ h2 {
   margin: 8px 0;
 }
 
-.check,
 .workflow {
   display: flex;
   flex-wrap: wrap;
@@ -633,22 +928,14 @@ h2 {
   align-items: center;
   gap: 8px;
   padding: 6px 0;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
-}
-
-.check--errored { color: #9a6700; }
-.check--failed { color: #cf222e; }
-
-.check-kind {
-  opacity: 0.7;
-  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
 }
 
 .file-path,
 .issue-path {
   display: inline-block;
   max-width: 100%;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.85rem;
 }
 
@@ -661,7 +948,7 @@ h2 {
 .issue-check {
   display: block;
   font-size: 0.8rem;
-  opacity: 0.75;
+  color: var(--muted);
 }
 
 .issues summary {
@@ -673,7 +960,7 @@ h2 {
 
 .issue {
   padding: 6px 0;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+  border-bottom: 1px solid var(--border);
 }
 
 .actions {
@@ -682,48 +969,58 @@ h2 {
 
 .ide-unavailable p {
   font-size: 0.85rem;
-  opacity: 0.8;
+  color: var(--muted);
 }
 
-.chat-toggle {
-  display: none;
+/* Barre d'onglets de l'écran (sous md). Position fixe au-dessus de la barre du shell, qu'elle recouvre. */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  height: var(--nav-h);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: var(--ctl-h);
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab svg {
+  width: 20px;
+  height: 20px;
+}
+
+.tab--active {
+  color: var(--accent);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 @media (min-width: 768px) {
   .grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     align-items: start;
-  }
-}
-
-@media (max-width: 767px) {
-  .chat {
-    position: fixed;
-    inset: 0;
-    z-index: 50;
-    display: none;
-    overflow: hidden;
-    border-radius: 0;
-    background: var(--color-background, #fff);
-  }
-
-  .chat--open {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .chat-toggle {
-    display: inline-flex;
-  }
-}
-
-@media (min-width: 768px) {
-  .chat {
-    display: flex;
-    flex-direction: column;
-    height: 70vh;
-    min-height: 0;
   }
 }
 </style>
