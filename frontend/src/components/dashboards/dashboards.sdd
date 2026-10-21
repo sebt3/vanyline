@@ -152,5 +152,10 @@ Scenario: assistant_dans_le_panneau_commun
   Then un `AssistantPanel` s'ouvre et contient `ContextChat` du contexte de l'écran
 
 Tasks:
-  [ ] Refonte UI 2026-10-21 : cartes (accueil), cartes de sandboxes et grille workflows/runs (projet),
-    `AssistantPanel`, jetons de thème ; tests des Scenario ci-dessus.
+  [x] Refonte UI 2026-10-21 (lot 2, validé : 550 tests frontend, check, build, lint specs verts) :
+    cartes (accueil), cartes de sandboxes et grille workflows/runs (projet), `AssistantPanel`,
+    jetons de thème. Arbitrages : libellés conservés « IDE » (Scenario deux_actions) et « En cours »
+    (clonage) ; l'accueil lit aussi `/api/sandboxes` pour les pastilles (rafraîchi par le hub
+    d'événements) ; pas d'état d'erreur de clonage ni de progression mesurée (l'API ne fournit que
+    `status.cloned`) ; « Paramètres » et « Retour » restent dans l'en-tête du projet.
+  [ ] Vérification navigateur (390 px / 1280 px) au smoke test : non faite.

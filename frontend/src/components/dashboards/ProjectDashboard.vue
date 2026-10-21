@@ -52,6 +52,7 @@ interface CreateSandboxBody {
 
 interface Project {
   metadata: { name: string };
+  spec?: { repoUrl?: string; defaultBranch?: string | null } | null;
   status?: { cloned?: boolean } | null;
 }
 
@@ -105,6 +106,21 @@ const stacked = computed(() => width.value < MD_MIN_WIDTH);
 
 function isRunning(sandbox: Sandbox): boolean {
   return sandbox.status?.phase === 'Running';
+}
+
+/** Ton de la pastille de phase : libellé texte toujours présent, couleur d'état seulement. */
+function phaseTone(sandbox: Sandbox): 'ok' | 'warn' | 'err' | 'muted' {
+  const phase = sandbox.status?.phase;
+  if (!phase) return 'muted';
+  if (phase === 'Running') return 'ok';
+  if (phase === 'Suspended') return 'muted';
+  if (/fail|error/i.test(phase)) return 'err';
+  return 'warn';
+}
+
+function toolchainLabel(sandbox: Sandbox): string {
+  const names = sandbox.spec.toolchains?.map((t) => t.name) ?? [];
+  return names.length > 0 ? names.join(', ') : '—';
 }
 
 /** IDE : seulement si la sandbox tourne ET que la fenêtre est assez large. */
@@ -258,28 +274,47 @@ async function deleteSandbox(name: string) {
 </script>
 
 <template>
-  <div class="dashboard" :class="{ 'dashboard--assistant': assistantOpen && !stacked }">
+  <div class="dashboard">
     <div class="dashboard__main">
-      <h1>Sandboxes de {{ projectName }}</h1>
-      <div class="actions-row">
-        <button
-          class="btn btn-create"
-          :disabled="!projectReady"
-          :title="projectReady ? undefined : 'Le clone initial du projet n\'est pas encore terminé'"
-          @click="modalOpen = true"
-        >
-          Créer une sandbox
-        </button>
-        <button class="btn btn-back" @click="router.push('/')">Retour</button>
-        <button class="btn btn-settings" @click="router.push('/settings')">Paramètres</button>
-        <button class="btn btn-assistant" @click="assistantOpen = !assistantOpen">Assistant</button>
-      </div>
+      <header class="page-head">
+        <div class="page-title">
+          <h1>{{ projectName }}</h1>
+          <p v-if="project?.spec?.repoUrl" class="page-meta">
+            <span class="mono">{{ project.spec.repoUrl }}</span>
+            <span v-if="project.spec.defaultBranch" class="mono"> · {{ project.spec.defaultBranch }}</span>
+          </p>
+          <p v-if="project" class="page-state">
+            <span class="dot" :class="projectReady ? 'dot--ok' : 'dot--warn'" aria-hidden="true"></span>
+            {{ projectReady ? 'Cloné' : 'Clonage en cours' }}
+          </p>
+        </div>
+        <div class="page-actions">
+          <button
+            class="btn btn-create"
+            :disabled="!projectReady"
+            :title="projectReady ? undefined : 'Le clone initial du projet n\'est pas encore terminé'"
+            @click="modalOpen = true"
+          >
+            Nouvelle sandbox
+          </button>
+          <button class="btn btn-back" @click="router.push('/')">Retour</button>
+          <button class="btn btn-settings" @click="router.push('/settings')">Paramètres</button>
+          <button
+            class="btn btn-assistant"
+            :aria-expanded="assistantOpen"
+            @click="assistantOpen = !assistantOpen"
+          >
+            Assistant
+          </button>
+        </div>
+      </header>
       <p v-if="project && !projectReady" class="not-ready-hint">
         Clone du projet en cours — la création de sandbox sera disponible une fois terminé.
       </p>
 
       <div class="dash-sections">
         <section class="dash-section" data-section="sandboxes">
+          <h2 class="section-title">Sandboxes</h2>
           <LoadingSkeleton v-if="loading" />
           <div v-else>
             <ErrorCard v-if="error" :message="error" />
@@ -288,31 +323,34 @@ async function deleteSandbox(name: string) {
                 L'IDE est réservé aux écrans d'au moins 1024 px. La vue d'ensemble reste disponible.
               </p>
               <EmptyState v-if="projectSandboxes.length === 0" message="Aucune sandbox." />
-              <table class="table" v-else>
-                <thead>
-                  <tr>
-                    <th class="th-name">Nom</th>
-                    <th class="th-branch">Branche</th>
-                    <th class="th-phase">Phase</th>
-                    <th class="th-toolchains">Toolchains</th>
-                    <th class="th-action"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="s in projectSandboxes" :key="s.metadata.name"
-                      @click="onRowClick(s)"
-                      :class="{ 'row-clickable': isRunning(s) }">
-                    <td>{{ s.metadata.name }}</td>
-                    <td>{{ s.spec.branch }}</td>
-                    <td>{{ s.status?.phase ?? '—' }}</td>
-                    <td>
-                      {{
-                        s.spec.toolchains && s.spec.toolchains.length > 0
-                          ? s.spec.toolchains.map((t) => t.name).join(', ')
-                          : '—'
-                      }}
-                    </td>
-                    <td class="td-actions">
+              <ul v-else class="sandbox-grid">
+                <li v-for="s in projectSandboxes" :key="s.metadata.name" class="sandbox-item">
+                  <article
+                    class="sandbox-card"
+                    :class="{ 'row-clickable': isRunning(s) }"
+                    @click="onRowClick(s)"
+                  >
+                    <div class="sandbox-card__head">
+                      <span class="sandbox-card__name">{{ s.metadata.name }}</span>
+                      <details class="card-menu" @click.stop>
+                        <summary class="card-menu__toggle" :aria-label="`Actions de la sandbox ${s.metadata.name}`">…</summary>
+                        <div class="card-menu__panel">
+                          <button class="btn btn-delete" @click.stop="deleteSandbox(s.metadata.name)">
+                            Supprimer
+                          </button>
+                        </div>
+                      </details>
+                    </div>
+                    <p class="sandbox-card__branch mono">{{ s.spec.branch }}</p>
+                    <p class="sandbox-card__phase">
+                      <span class="dot" :class="`dot--${phaseTone(s)}`" aria-hidden="true"></span>
+                      {{ s.status?.phase ?? '—' }}
+                    </p>
+                    <div class="pills">
+                      <span v-for="t in (s.spec.toolchains ?? [])" :key="t.name" class="pill">{{ t.name }}</span>
+                      <span v-if="toolchainLabel(s) === '—'" class="pill pill--muted">aucune toolchain</span>
+                    </div>
+                    <div class="sandbox-card__actions">
                       <button
                         class="btn btn-open"
                         :disabled="!isRunning(s) || !ideAvailable"
@@ -321,10 +359,7 @@ async function deleteSandbox(name: string) {
                       >
                         IDE
                       </button>
-                      <button
-                        class="btn btn-overview"
-                        @click.stop="openOverview(s)"
-                      >
+                      <button class="btn btn-overview" @click.stop="openOverview(s)">
                         Vue d'ensemble
                       </button>
                       <button
@@ -334,265 +369,438 @@ async function deleteSandbox(name: string) {
                       >
                         {{ s.spec.suspended ? 'Reprendre' : 'Suspendre' }}
                       </button>
-                      <button class="btn btn-delete" @click.stop="deleteSandbox(s.metadata.name)">
-                        Supprimer
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                    </div>
+                  </article>
+                </li>
+              </ul>
             </div>
           </div>
         </section>
 
-        <section class="dash-section" data-section="workflows">
-          <WorkflowList
-            :key="sectionsVersion"
-            :project="projectName"
-            @create="onCreateWorkflow"
-            @edit="onEditWorkflow"
-            @launch="onLaunch"
-          />
-        </section>
+        <div class="dash-split">
+          <section class="dash-section" data-section="workflows">
+            <WorkflowList
+              :key="sectionsVersion"
+              :project="projectName"
+              @create="onCreateWorkflow"
+              @edit="onEditWorkflow"
+              @launch="onLaunch"
+            />
+          </section>
 
-        <section class="dash-section" data-section="runs">
-          <RunList :key="sectionsVersion" :project="projectName" @select="openRun" />
-        </section>
+          <section class="dash-section" data-section="runs">
+            <RunList :key="sectionsVersion" :project="projectName" @select="openRun" />
+          </section>
+        </div>
       </div>
 
       <div v-if="actionError" class="creation-error">{{ actionError }}</div>
+
+      <DialogShell v-model:open="modalOpen" title="Créer une sandbox">
+        <Field label="Nom">
+          <input
+            class="field-input"
+            v-model="formName"
+            type="text"
+            placeholder="ma-sandbox"
+            aria-label="Nom de la sandbox"
+          />
+        </Field>
+        <Field label="Branche">
+          <input
+            class="field-input"
+            v-model="formBranch"
+            type="text"
+            placeholder="main"
+            aria-label="Branche"
+          />
+        </Field>
+        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+        <template #actions>
+          <button class="btn btn-create" :disabled="!projectReady" @click="createSandbox">
+            Créer
+          </button>
+          <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+        </template>
+      </DialogShell>
+
+      <DialogShell
+        v-model:open="editorOpen"
+        :title="editingWorkflow ? 'Éditer le workflow' : 'Nouveau workflow'"
+      >
+        <WorkflowEditor
+          :workflow="editingWorkflow"
+          :saving="editorSaving"
+          :error="editorError"
+          @save="onSaveWorkflow"
+          @cancel="editorOpen = false"
+        />
+      </DialogShell>
+
+      <LaunchDialog
+        v-if="launchTarget"
+        v-model:open="launchOpen"
+        :project="projectName"
+        :workflow="launchTarget"
+        :scope="launchTarget.scope"
+        :sandboxes="launchSandboxes"
+        @launched="onLaunched"
+      />
     </div>
 
-    <aside
-      v-if="assistantOpen"
-      class="assistant"
+    <AssistantPanel
+      :open="assistantOpen"
+      title="Assistant de projet"
       :data-layout="stacked ? 'sheet' : 'panel'"
-      aria-label="Assistant de projet"
+      @close="assistantOpen = false"
     >
-      <div class="assistant__bar">
-        <button class="btn btn-cancel" @click="assistantOpen = false">Fermer l'assistant</button>
-      </div>
       <ContextChat kind="project" :data="chatData" />
-    </aside>
-
-    <DialogShell v-model:open="modalOpen" title="Créer une sandbox">
-      <Field label="Nom">
-        <input
-          class="field-input"
-          v-model="formName"
-          type="text"
-          placeholder="ma-sandbox"
-          aria-label="Nom de la sandbox"
-        />
-      </Field>
-      <Field label="Branche">
-        <input
-          class="field-input"
-          v-model="formBranch"
-          type="text"
-          placeholder="main"
-          aria-label="Branche"
-        />
-      </Field>
-      <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-      <template #actions>
-        <button class="btn btn-create" :disabled="!projectReady" @click="createSandbox">
-          Créer
-        </button>
-        <DialogClose class="btn btn-cancel">Annuler</DialogClose>
-      </template>
-    </DialogShell>
-
-    <DialogShell
-      v-model:open="editorOpen"
-      :title="editingWorkflow ? 'Éditer le workflow' : 'Nouveau workflow'"
-    >
-      <WorkflowEditor
-        :workflow="editingWorkflow"
-        :saving="editorSaving"
-        :error="editorError"
-        @save="onSaveWorkflow"
-        @cancel="editorOpen = false"
-      />
-    </DialogShell>
-
-    <LaunchDialog
-      v-if="launchTarget"
-      v-model:open="launchOpen"
-      :project="projectName"
-      :workflow="launchTarget"
-      :scope="launchTarget.scope"
-      :sandboxes="launchSandboxes"
-      @launched="onLaunched"
-    />
+    </AssistantPanel>
   </div>
 </template>
 
 <style scoped>
+/* Coquille de l'écran : la page ne défile pas, la région de contenu défile en interne et
+   l'assistant (AssistantPanel) occupe la colonne de droite à partir de md (layout.sdd). */
 .dashboard {
-  box-sizing: border-box;
+  display: flex;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+.dashboard__main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
-  background: #0c1420;
-  color: #e6e9f0;
-  padding: 48px 56px;
+  padding: 24px 28px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
 }
 
 h1 {
   font-size: 18px;
   font-weight: 600;
-  margin: 0 0 16px 0;
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
 }
 
-.actions-row {
+.page-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.page-state {
   display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
 }
 
-.table {
-  width: 100%;
-  max-width: 760px;
-  border-collapse: collapse;
-  margin-bottom: 24px;
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.row-clickable {
+.page-actions .btn,
+.sandbox-card__actions .btn,
+.card-menu .btn-delete {
+  font: inherit;
   cursor: pointer;
 }
 
-.th-name,
-.th-branch,
-.th-phase,
-.th-toolchains,
-.th-action {
-  text-align: left;
-  padding: 8px 12px;
-  border-bottom: 1px solid #1c1c2a;
-  font-weight: 600;
-  font-size: 12px;
-  text-transform: uppercase;
-  color: #6a7185;
-}
-.th-name { width: 20%; }
-.th-branch { width: 15%; }
-.th-phase { width: 15%; }
-.th-toolchains { width: 20%; }
-.th-action { text-align: right; width: 15%; }
-
-.table td {
-  padding: 8px 12px;
-  border-bottom: 1px solid #1c1c2a;
-  font-size: 13px;
+.page-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--ctl-h);
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-weight: 500;
 }
 
-.btn-suspend {
-  background: #e0a83d22;
-  color: #e0a83d;
-  border: 1px solid #e0a83d44;
-  margin-right: 6px;
+.page-actions .btn-create {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
 }
 
-.btn-suspend:hover {
-  background: #e0a83d33;
-}
-
-.btn-suspended {
-  background: #3fb56d22;
-  color: #3fb56d;
-  border: 1px solid #3fb56d44;
-}
-
-.btn-suspended:hover {
-  background: #3fb56d33;
-}
-
-.btn-open {
-  background: #4c90f0;
-  color: white;
-  margin-right: 6px;
-}
-
-.btn-open:hover {
-  background: #3a7de0;
-}
-
-.btn-open:disabled {
-  background: #2b3550;
-  color: #6a7185;
+.page-actions .btn-create:disabled {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--muted);
   cursor: not-allowed;
 }
 
-.btn-open:disabled:hover {
-  background: #2b3550;
+.page-actions .btn-back,
+.page-actions .btn-settings,
+.page-actions .btn-assistant {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
-.btn-back {
-  background: #1c1c2a;
-  color: #e6e9f0;
-  border: 1px solid #2b2b4a;
-}
-
-.btn-back:hover {
-  background: #2b2b4a;
-}
-
-.btn-settings {
-  background: #1c1c2a;
-  color: #e6e9f0;
-  border: 1px solid #2b2b4a;
-}
-
-.btn-settings:hover {
-  background: #2b2b4a;
-}
-
-.btn-create:disabled {
-  background: #2b3550;
-  color: #6a7185;
-  cursor: not-allowed;
-}
-
-.btn-create:disabled:hover {
-  background: #2b3550;
+.page-actions .btn:focus-visible,
+.sandbox-card:focus-visible,
+.card-menu__toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .not-ready-hint {
-  color: #6a7185;
+  color: var(--muted);
   font-size: 13px;
-  margin: -12px 0 20px;
-}
-
-.btn-assistant {
-  background: #4c90f0;
-  color: white;
-}
-
-.btn-overview {
-  background: #1c1c2a;
-  color: #e6e9f0;
-  border: 1px solid #2b2b4a;
-  margin-right: 6px;
-}
-
-.btn-overview:hover {
-  background: #2b2b4a;
-}
-
-.td-actions {
-  text-align: right;
+  margin: -8px 0 16px;
 }
 
 .ide-hint {
-  color: #6a7185;
+  color: var(--muted);
   font-size: 13px;
   margin: 0 0 12px;
 }
 
-/* Sections : une colonne sous md, grille à partir de md (sandboxes pleine largeur). */
-.dash-sections {
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+/* Sandboxes en cartes ; pleine largeur. */
+.sandbox-grid {
+  list-style: none;
+  margin: 0 0 24px;
+  padding: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.sandbox-item {
+  min-width: 0;
+}
+
+.sandbox-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.sandbox-card.row-clickable {
+  cursor: pointer;
+}
+
+.sandbox-card.row-clickable:hover {
+  border-color: var(--accent);
+}
+
+.sandbox-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sandbox-card__name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.sandbox-card__branch {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.sandbox-card__phase {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.sandbox-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.sandbox-card__actions .btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--ctl-h);
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.sandbox-card__actions .btn:hover {
+  background: var(--surface);
+}
+
+.sandbox-card__actions .btn-open {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+.sandbox-card__actions .btn-open:hover {
+  filter: brightness(1.08);
+}
+
+.sandbox-card__actions .btn-open:disabled {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.sandbox-card__actions .btn-suspend {
+  color: var(--warn);
+}
+
+.sandbox-card__actions .btn-suspended {
+  color: var(--ok);
+}
+
+.dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.dot--ok {
+  background: var(--ok);
+}
+.dot--warn {
+  background: var(--warn);
+}
+.dot--err {
+  background: var(--err);
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.pill--muted {
+  font-style: italic;
+}
+
+/* Menu de la carte : suppression repliée, jamais un bouton rouge permanent. */
+.card-menu {
+  position: relative;
+  z-index: 1;
+}
+
+.card-menu__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.card-menu__toggle::-webkit-details-marker {
+  display: none;
+}
+
+.card-menu__toggle:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.card-menu__panel {
+  position: absolute;
+  right: 0;
+  top: calc(var(--ctl-h) + 4px);
+  z-index: 2;
+  padding: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.card-menu .btn-delete {
+  display: block;
+  min-height: var(--ctl-h);
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--err);
+  white-space: nowrap;
+}
+
+.card-menu .btn-delete:hover {
+  background: var(--surface);
+}
+
+/* Sections : une colonne ; à partir de md, WORKFLOWS et RUNS côte à côte (auto-fit 340 px). */
+.dash-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.dash-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: 24px;
   align-items: start;
 }
@@ -601,73 +809,10 @@ h1 {
   min-width: 0;
 }
 
-.dashboard--assistant {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
-  gap: 24px;
-  align-items: start;
-}
-
-.dashboard__main {
-  min-width: 0;
-}
-
-.assistant {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  height: 70vh;
-  border: 1px solid #2b2b4a;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #0c1420;
-}
-
-.assistant__bar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 8px 12px;
-}
-
-@media (min-width: 768px) {
-  .dash-sections {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .dash-section[data-section='sandboxes'] {
-    grid-column: 1 / -1;
-  }
-}
-
-/* Sous md : feuille plein écran, marges de 16 px, tableaux empilés (cartes). */
+/* Sous md : marges de 16 px. */
 @media (max-width: 767px) {
-  .dashboard {
-    padding: 24px 16px;
-  }
-  .assistant {
-    position: fixed;
-    inset: 0;
-    z-index: 900;
-    height: auto;
-    border: 0;
-    border-radius: 0;
-  }
-  .table,
-  .table tbody,
-  .table tr,
-  .table td {
-    display: block;
-    width: 100%;
-  }
-  .table thead {
-    display: none;
-  }
-  .table tr {
-    border-bottom: 1px solid #1c1c2a;
-    padding: 8px 0;
-  }
-  .td-actions {
-    text-align: left;
+  .dashboard__main {
+    padding: 16px;
   }
 }
 </style>

@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import HomeDashboard from './HomeDashboard.vue';
 import ContextChat from '../ContextChat.vue';
+import AssistantPanel from '../shell/AssistantPanel.vue';
 
 // Le hub est mocké pour observer l'appel à `reconnectNow` après une création.
 const hub = vi.hoisted(() => ({ reconnectNow: vi.fn(), projectFns: new Set<() => void>() }));
@@ -79,7 +80,7 @@ describe('HomeDashboard', () => {
     expect(wrapper.text()).toContain('https://github.com/org/beta');
   });
 
-  it('cliquer une ligne navigue vers /p/<name>', async () => {
+  it('cliquer le nom d\'une carte navigue vers /p/<name>', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockResolvedValueOnce({
       ok: true,
@@ -102,7 +103,7 @@ describe('HomeDashboard', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    const row = wrapper.find('tr.row-clickable');
+    const row = wrapper.find('.project-card__open');
     await row.trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
@@ -130,7 +131,7 @@ describe('HomeDashboard', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    await wrapper.find('tr.row-clickable').trigger('click');
+    await wrapper.find('.project-card__open').trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
@@ -198,7 +199,7 @@ describe('HomeDashboard', () => {
     expect(router.currentRoute.value.path).toBe('/');
   });
 
-  it('cliquer "Paramètres" navigue vers /settings', async () => {
+  it('l\'accueil n\'affiche pas de bouton "Paramètres" (le rail le porte, shell.sdd)', async () => {
     const router = createTestRouter();
     await router.push('/');
     await router.isReady();
@@ -207,12 +208,8 @@ describe('HomeDashboard', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    const settingsBtn = wrapper.find('.btn-settings');
-    await settingsBtn.trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(router.currentRoute.value.path).toBe('/settings');
+    expect(wrapper.find('.btn-settings').exists()).toBe(false);
+    expect(wrapper.findAll('button').some((b) => b.text().trim() === 'Paramètres')).toBe(false);
   });
 
   it('création en modale : dialog apparaît → remplir → créer → dialog fermé', async () => {
@@ -359,14 +356,14 @@ describe('HomeDashboard — dashboards.sdd (G2a)', () => {
     await router.isReady();
     await homeFlush();
 
-    expect(wrapper.findAll('tbody tr')).toHaveLength(3);
+    expect(wrapper.findAll('.project-card')).toHaveLength(3);
     const text = wrapper.text();
     expect(text).toContain('p-one');
     expect(text).toContain('p-two');
     expect(text).toContain('p-three');
     expect(text).toContain('Cloné');
     expect(text).toContain('En cours');
-    expect(text).toContain('Créer un projet');
+    expect(text).toContain('Nouveau projet');
   });
 
   it('assistant_accueil_ouvre_contexte_home', async () => {
@@ -436,6 +433,75 @@ describe('HomeDashboard — événements project (2026-10-19)', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(hub.reconnectNow).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dashboards.sdd — refonte 2026-10-21 : cartes (sans tableau), assistant commun.
+// ---------------------------------------------------------------------------
+
+function jsonRes(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+describe('HomeDashboard — refonte 2026-10-21 (dashboards.sdd)', () => {
+  it('accueil_cartes_sans_tableau', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/projects') {
+        return jsonRes([
+          { metadata: { name: 'p-one' }, spec: { owner: 'u', repoUrl: 'https://x/one' }, status: { cloned: true } },
+          { metadata: { name: 'p-two' }, spec: { owner: 'u', repoUrl: 'https://x/two' }, status: { cloned: false } },
+          { metadata: { name: 'p-three' }, spec: { owner: 'u', repoUrl: 'https://x/three' } },
+        ]);
+      }
+      if (url === '/api/sandboxes') {
+        return jsonRes([
+          { metadata: { name: 'sb-1' }, spec: { project: 'p-one', branch: 'main' }, status: { phase: 'Running' } },
+        ]);
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const router = createTestRouter();
+    const wrapper = mount(HomeDashboard, { global: { plugins: [router] } });
+    await router.isReady();
+    await homeFlush();
+
+    expect(wrapper.find('table').exists()).toBe(false);
+    const cards = wrapper.findAll('.project-card');
+    expect(cards).toHaveLength(3);
+    // Carte en cours de clonage : état visible et barre de progression.
+    expect(cards[1].text()).toContain('En cours');
+    expect(cards[1].find('[role="progressbar"]').exists()).toBe(true);
+    expect(cards[0].text()).toContain('Cloné');
+    expect(cards[0].text()).toContain('https://x/one');
+    // Pastilles de sandboxes : une active, aucune sandbox.
+    expect(cards[0].text()).toContain('1 active');
+    expect(cards[2].text()).toContain('aucune sandbox');
+    expect(wrapper.findAll('button').some((b) => b.text().trim() === 'Paramètres')).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('assistant_dans_le_panneau_commun', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonRes([]));
+    const router = createTestRouter();
+    const wrapper = mount(HomeDashboard, { global: { plugins: [router], stubs: { ContextChat: true } } });
+    await router.isReady();
+    await homeFlush();
+
+    expect(wrapper.findComponent(AssistantPanel).props('open')).toBe(false);
+    expect(wrapper.findComponent(ContextChat).exists()).toBe(false);
+
+    await wrapper.find('.btn-assistant').trigger('click');
+    await homeFlush();
+
+    const panel = wrapper.findComponent(AssistantPanel);
+    expect(panel.props('open')).toBe(true);
+    const chat = panel.findComponent(ContextChat);
+    expect(chat.exists()).toBe(true);
+    expect(chat.props('kind')).toBe('home');
     wrapper.unmount();
   });
 });

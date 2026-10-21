@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ProjectDashboard from './ProjectDashboard.vue';
 import ContextChat from '../ContextChat.vue';
+import AssistantPanel from '../shell/AssistantPanel.vue';
 
 // Capture des rafraîchissements `project` : le test déclenche lui-même l'événement
 // (le hub reste réel pour le reste du fichier).
@@ -163,7 +164,7 @@ describe('ProjectDashboard', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    const row = wrapper.find('tr.row-clickable');
+    const row = wrapper.find('.sandbox-card.row-clickable');
     await row.trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
@@ -201,9 +202,9 @@ describe('ProjectDashboard', () => {
 
     const openBtn = wrapper.find('.btn-open');
     expect(openBtn.attributes('disabled')).toBeDefined();
-    expect(wrapper.find('tr.row-clickable').exists()).toBe(false);
+    expect(wrapper.find('.sandbox-card.row-clickable').exists()).toBe(false);
 
-    await wrapper.find('tbody tr').trigger('click');
+    await wrapper.find('.sandbox-card').trigger('click');
     await openBtn.trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
@@ -769,7 +770,7 @@ describe('ProjectDashboard — identifiants encodés dans les URL', () => {
     expect(urls).toContain('/api/projects/a%3Fb');
     expect(urls.some((u) => u.includes('a?b'))).toBe(false);
 
-    await wrapper.find('tr.row-clickable').trigger('click');
+    await wrapper.find('.sandbox-card.row-clickable').trigger('click');
     await flush();
     expect(router.currentRoute.value.path).toBe('/p/a%3Fb/s/sb%20c');
     expect(router.currentRoute.value.params.projectName).toBe('a?b');
@@ -964,5 +965,25 @@ describe('ProjectDashboard — événements project (2026-10-19)', () => {
     expect(wrapper.find('.btn-create').element).toBe(createBtn);
     wrapper.unmount();
     expect(projectRefresh.fns.size).toBe(0);
+  });
+});
+
+describe('ProjectDashboard — refonte 2026-10-21 (dashboards.sdd)', () => {
+  afterEach(() => {
+    setWidth(1024);
+  });
+
+  it('assistant_dans_le_panneau_commun', async () => {
+    const { wrapper } = await mountProject('demo', projectTable('demo'), 1024);
+    expect(wrapper.findComponent(AssistantPanel).props('open')).toBe(false);
+    await wrapper.find('.btn-assistant').trigger('click');
+    await flush();
+    const panel = wrapper.findComponent(AssistantPanel);
+    expect(panel.props('open')).toBe(true);
+    const chat = panel.findComponent(ContextChat);
+    expect(chat.exists()).toBe(true);
+    expect(chat.props('kind')).toBe('project');
+    expect(chat.props('data')).toEqual({ project_name: 'demo' });
+    wrapper.unmount();
   });
 });
