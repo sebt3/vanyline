@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
+import AppBreadcrumb from './components/AppBreadcrumb.vue';
+import AppNav from './components/shell/AppNav.vue';
 import MenuBar from './components/MenuBar.vue';
 import StatusBar from './components/StatusBar.vue';
 
@@ -15,14 +17,28 @@ const workspace = computed(() =>
 
 <template>
   <UApp>
-    <div class="shell">
-      <div v-if="isIdeRoute" class="topbar">
+    <!-- Route IDE : coquille inchangée (barre de menu, dock, barre d'état). -->
+    <div v-if="isIdeRoute" class="shell shell-ide">
+      <div class="topbar">
         <MenuBar />
       </div>
       <div class="dock">
         <router-view />
       </div>
-      <StatusBar :workspace="workspace" :extended="isIdeRoute" />
+      <StatusBar :workspace="workspace" :extended="true" />
+    </div>
+    <!-- Hors IDE : shell commun (cf. components/shell/shell.sdd). La page ne défile jamais ;
+         seule la région de contenu défile. -->
+    <div v-else class="shell shell-app">
+      <AppNav />
+      <div class="app-main">
+        <div class="ctx-bar">
+          <AppBreadcrumb />
+        </div>
+        <div class="app-content">
+          <router-view />
+        </div>
+      </div>
     </div>
   </UApp>
 </template>
@@ -33,6 +49,8 @@ const workspace = computed(() =>
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.shell-ide {
   background: #10192c;
 }
 .topbar {
@@ -51,5 +69,44 @@ const workspace = computed(() =>
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Shell hors IDE : rail à gauche à partir de md, barre d'onglets en bas en dessous. */
+.shell-app {
+  flex-direction: row;
+  background: var(--bg);
+  color: var(--text);
+}
+.app-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ctx-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+}
+.app-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+@media (max-width: 767px) {
+  .shell-app {
+    /* La nav est en premier dans le DOM : column-reverse la place en bas. */
+    flex-direction: column-reverse;
+  }
 }
 </style>

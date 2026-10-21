@@ -1,0 +1,23 @@
+/* Thème du shell (contrat : ./components/shell/shell.sdd). Un seul thème en v1 :
+   sombre graphite. L'accent est la seule couleur de marque ; --ok/--warn/--err
+   ne servent qu'aux états (sandbox, run, santé du code), jamais à la décoration. */
+:root {
+  --bg: #0f1012;
+  --surface: #16181b;
+  --surface-2: #1d2024;
+  --border: #2a2e33;
+  --text: #e8eaed;
+  --muted: #9aa1ab;
+  --accent: #8b9bff;
+  --accent-bg: #1f2547;
+  --accent-text: #c4ccff;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --err: #f87171;
+
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Hauteur de la barre d'onglets du shell (sous md), cf. AppNav / AssistantPanel. */
+  --nav-h: 56px;
+}

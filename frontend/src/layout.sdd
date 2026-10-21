@@ -32,6 +32,7 @@ Can modify:
 
 Can read:
   ./frontend.sdd
+  ./components/shell/shell.sdd
   ./components/SettingsView.sdd
   ./components/ContextChat.sdd
   ./components/dashboards/dashboards.sdd
@@ -46,7 +47,7 @@ Must:
   Chat contextuel (`ContextChat`) : la liste des messages défile en interne, la zone de saisie
     reste ancrée en bas de la colonne, l'en-tête (modèle/agent, session) reste visible. Cela vaut
     pour la colonne d'assistant des réglages comme pour les chats des autres écrans.
-  Densité : une variable CSS `--ctl-h` définie dans ./style.css vaut 28px par défaut (bureau) et
+  Densité : une variable CSS `--ctl-h` définie dans ./style.css vaut 32px par défaut (bureau ; 28px avant la refonte du 2026-10-21) et
     44px quand le pointeur est grossier ou la fenêtre étroite
     (`@media (pointer: coarse), (max-width: 767px)`). Toute hauteur minimale de contrôle (bouton,
     sélecteur, onglet, champ) s'écrit `var(--ctl-h)`, jamais `44px` en dur : les quinze `44px` des
@@ -54,6 +55,13 @@ Must:
     par la variable, pas par la valeur en dur.
   Les barres (en-tête du chat, barre de session, barre de statut) restent des barres de bureau :
     sélecteurs et boutons de 24 à 32 px de haut, marges de 4 à 8 px.
+
+  Coquille (2026-10-21, refonte, cf. ./components/shell/shell.sdd) : hors route IDE, ./App.vue rend
+    `AppNav`, un bandeau de contexte de 28px (`AppBreadcrumb`) et une région de contenu qui
+    occupe le reste (rail à gauche à partir de `md`, barre
+    d'onglets en bas en dessous) ; sur la route IDE, la coquille actuelle (barre de menu, dock,
+    barre d'état) est inchangée. ./style.css importe `./theme.css` ; le fond de `body` et de la
+    coquille hors IDE est `var(--bg)`, plus aucune valeur `#10192c` hors de la coquille de l'IDE.
 
 Must not:
   Écrire `min-height: 44px` / `height: 44px` hors de ./style.css (qui porte la valeur tactile).
@@ -63,7 +71,7 @@ Scenario: aucune_hauteur_tactile_en_dur
   Given les fichiers `.vue` et `.css` de ../frontend/src et ../packages/ui/src
   When le test de garde ./layout.guard.spec.ts les scanne
   Then aucune déclaration `min-height: 44px` ou `height: 44px` n'existe hors de ./style.css, et
-    ./style.css définit `--ctl-h` à 28px par défaut et à 44px sous `(pointer: coarse)`
+    ./style.css définit `--ctl-h` à 32px par défaut et à 44px sous `(pointer: coarse)`
 
 Scenario: la_page_des_reglages_ne_defile_pas
   Given le test de garde lisant ./components/SettingsView.vue
@@ -76,7 +84,20 @@ Scenario: le_chat_contextuel_occupe_le_reste_de_la_colonne
   When il inspecte `.context-chat`
   Then la racine est `flex: 1` avec `min-height: 0` (et non `height: 100%`)
 
+Scenario: coquille_hors_ide
+  Given le test de composant de ./App.vue avec un routeur de test
+  When la route est `/`, puis la route `ide`
+  Then sur `/` la nav « Navigation principale » est rendue ; sur la route IDE elle ne l'est pas et
+    la barre de menu de l'IDE l'est
+
+Scenario: fond_via_theme
+  Given le test de garde lisant ./style.css et ./App.vue
+  When il les inspecte
+  Then ./style.css importe `./theme.css` et le fond hors IDE vient de `var(--bg)`
+
 Tasks:
+  [x] (Lot 1, validé 2026-10-21) Refonte du shell (2026-10-21) : brancher `AppNav`, importer `theme.css`, mettre à jour le test
+    de garde (`--ctl-h` 32px) et les deux Scenario ci-dessus.
   [x] Appliquer ces règles aux écrans listés (réglages, chat contextuel, dashboards, sandbox,
     run) et écrire le test de garde `./layout.guard.spec.ts` (Vitest, lecture des sources) : vert.
     Le test ne vérifie que les Scenarios de déclarations CSS, pas le rendu.

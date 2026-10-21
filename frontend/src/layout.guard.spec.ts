@@ -46,9 +46,9 @@ describe('layout — aucune_hauteur_tactile_en_dur', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('style.css définit --ctl-h à 28px par défaut et 44px sous pointer: coarse / max-width 767px', () => {
+  it('style.css définit --ctl-h à 32px par défaut et 44px sous pointer: coarse / max-width 767px', () => {
     const css = readFileSync(STYLE_CSS, 'utf8');
-    expect(css).toMatch(/:root\s*\{[^}]*--ctl-h\s*:\s*28px\s*;?[^}]*\}/);
+    expect(css).toMatch(/:root\s*\{[^}]*--ctl-h\s*:\s*32px\s*;?[^}]*\}/);
     expect(css).toMatch(
       /@media\s*\(\s*pointer\s*:\s*coarse\s*\)\s*,\s*\(\s*max-width\s*:\s*767px\s*\)\s*\{[\s\S]*?--ctl-h\s*:\s*44px/,
     );
@@ -85,5 +85,24 @@ describe('layout — le_chat_contextuel_occupe_le_reste_de_la_colonne', () => {
     expect(body).toMatch(/(?<![-\w])flex\s*:\s*1\b/);
     expect(body).toMatch(/(?<![-\w])min-height\s*:\s*0\b/);
     expect(body).not.toMatch(/(?<![-\w])height\s*:\s*100%/);
+  });
+});
+
+describe('layout — fond_via_theme', () => {
+  const css = readFileSync(STYLE_CSS, 'utf8');
+  const app = readFileSync(join(FRONTEND_SRC, 'App.vue'), 'utf8');
+
+  it('style.css importe ./theme.css', () => {
+    expect(css).toMatch(/@import\s+["']\.\/theme\.css["']/);
+  });
+
+  it('le fond de body et de la coquille hors IDE vient de var(--bg)', () => {
+    expect(ruleBody(css, 'body')).toMatch(/background\s*:\s*var\(--bg\)/);
+    expect(ruleBody(app, '.shell-app')).toMatch(/background\s*:\s*var\(--bg\)/);
+  });
+
+  it('aucune valeur #10192c hors de la coquille IDE (style.css, App.vue hors .shell)', () => {
+    expect(css).not.toMatch(/#10192c/i);
+    expect(ruleBody(app, '.shell-app')).not.toMatch(/#10192c/i);
   });
 });

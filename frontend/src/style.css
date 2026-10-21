@@ -1,3 +1,4 @@
+@import "./theme.css";
 @import "dockview-vue/dist/styles/dockview.css";
 @import "element-plus/theme-chalk/base.css";
 @import "element-plus/theme-chalk/el-tree.css";
@@ -7,7 +8,7 @@
 /* Hauteur des contrôles (boutons, sélecteurs, onglets, champs) : densité bureau par
    défaut, cibles tactiles sur pointeur grossier ou fenêtre étroite (cf. layout.sdd). */
 :root {
-  --ctl-h: 28px;
+  --ctl-h: 32px;
 }
 @media (pointer: coarse), (max-width: 767px) {
   :root {
@@ -20,10 +21,10 @@ html, body, #app {
   margin: 0;
 }
 body {
-  /* La coquille .shell (App.vue) couvre tout l'écran, mais le contenu
-     téléporté (menus, à terme tooltips/dialogs) sort de cette arborescence
-     et repose directement sur ce fond. Sans lui : transparent = blanc navigateur. */
-  background: #10192c;
+  /* La coquille (App.vue) couvre tout l'écran, mais le contenu téléporté
+     (menus, à terme tooltips/dialogs) sort de cette arborescence et repose
+     directement sur ce fond. Sans lui : transparent = blanc navigateur. */
+  background: var(--bg);
   font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
 }

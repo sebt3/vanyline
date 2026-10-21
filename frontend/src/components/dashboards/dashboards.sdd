@@ -62,6 +62,22 @@ Must:
   Rendre l'assistant utilisable sans connaître l'API : le chat est la seconde voie pour toute
     action des sections.
 
+  Habillage de la refonte (2026-10-21, cf. ../shell/shell.sdd) : les deux écrans s'affichent dans la
+    coquille commune (rail / barre d'onglets fournis par ./App.vue) et n'utilisent que les jetons de
+    `theme.css`. Plus de bouton « Paramètres » sur l'accueil (le rail le porte) ; le bouton
+    « Assistant » reste dans l'en-tête de page et ouvre `AssistantPanel` (colonne à droite à partir
+    de `md`, feuille en dessous) qui enveloppe `ContextChat` — plus de panneau d'assistant propre à
+    chaque dashboard.
+  Accueil : les projets sont des CARTES en grille (`auto-fill`, 260 px au minimum) — nom, URL du
+    dépôt en police mono, état de clonage, nombre de sandboxes par phase ; un projet en cours de
+    clonage montre une barre de progression ou l'étape en cours. Plus de tableau, plus de colonne
+    « Branche par défaut ». Un clic sur la carte ouvre le projet ; la suppression passe par un
+    menu de la carte (jamais un bouton rouge permanent).
+  Projet : en-tête (nom, dépôt, branche, état), puis SANDBOXES en cartes (nom, branche, phase,
+    toolchains, actions « Ouvrir l'IDE » / « Vue d'ensemble » / suspendre ou reprendre), puis
+    WORKFLOWS et RUNS côte à côte à partir de `md`, empilés en dessous. Les états utilisent
+    `--ok`/`--warn`/`--err` accompagnés d'un libellé texte (jamais la couleur seule).
+
 Must not:
   Calculer un statut de run côté client : il vient de l'API.
   Afficher un jeton, un secret ou le contenu d'un script de workflow dans une liste.
@@ -123,3 +139,18 @@ Scenario: creation_de_project_relance_le_hub
   Given HomeDashboard et un formulaire de création valide
   When la création réussit
   Then `reconnectNow()` est appelé une fois
+
+Scenario: accueil_cartes_sans_tableau
+  Given trois projets dont un en cours de clonage
+  When HomeDashboard s'affiche
+  Then trois cartes (aucun élément `table`), l'état de clonage visible sur la carte concernée, et
+    aucun bouton « Paramètres »
+
+Scenario: assistant_dans_le_panneau_commun
+  Given HomeDashboard ou ProjectDashboard
+  When l'utilisateur clique sur « Assistant »
+  Then un `AssistantPanel` s'ouvre et contient `ContextChat` du contexte de l'écran
+
+Tasks:
+  [ ] Refonte UI 2026-10-21 : cartes (accueil), cartes de sandboxes et grille workflows/runs (projet),
+    `AssistantPanel`, jetons de thème ; tests des Scenario ci-dessus.

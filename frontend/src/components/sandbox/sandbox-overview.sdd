@@ -46,6 +46,17 @@ Must:
   Désactiver le lancement d'un workflow quand la sandbox n'est pas `Running` (explication visible).
   Proposer un lien vers l'IDE seulement sur une fenêtre ≥ `lg`.
 
+  Refonte (2026-10-21, cf. ../shell/shell.sdd) : en dessous de `md`, l'écran est organisé en QUATRE
+    ONGLETS dans une barre inférieure — Santé, Workflows, Exécutions, Assistant — un seul
+    contenu à la fois, onglet actif en `aria-current`/`aria-selected`, Santé par défaut ; la barre
+    d'onglets de l'écran REMPLACE (sur cet écran) la barre du shell (`AppNav`). À partir de `md`,
+    les cartes Santé, Workflows et Runs sont visibles ensemble en grille et l'assistant s'ouvre en
+    `AssistantPanel`. L'en-tête mobile porte un retour vers le projet, le nom de la sandbox, sa
+    phase et reste à hauteur `var(--ctl-h)`. La carte Santé met en tête une phrase de synthèse
+    (« N vérification(s) à corriger » ou « Tout est vert »), puis une grille de vignettes par
+    vérification (Tests, Clippy/lint, Format, Couverture) avec état + libellé texte. Jetons de
+    `theme.css` uniquement.
+
 Must not:
   Contenir un éditeur, un terminal ou un explorateur de fichiers.
   Appeler la sandbox directement.
@@ -110,3 +121,24 @@ Scenario: aucun_appel_direct
   Given l'écran en fonctionnement
   When les requêtes réseau sont examinées
   Then toutes ciblent l'API de l'app, aucune l'hôte de la sandbox
+
+Scenario: quatre_onglets_sous_md
+  Given une fenêtre de 390 px
+  When SandboxOverview s'affiche
+  Then quatre onglets (Santé, Workflows, Exécutions, Assistant), Santé actif ; un clic sur
+    « Workflows » n'affiche que la carte des workflows
+
+Scenario: cartes_ensemble_a_partir_de_md
+  Given une fenêtre de 1280 px
+  When SandboxOverview s'affiche
+  Then les cartes Santé, Workflows et Runs sont visibles ensemble, sans barre à quatre onglets
+
+Scenario: synthese_de_sante
+  Given un rapport avec trois erreurs de lint et tous les tests verts
+  When la carte Santé s'affiche
+  Then la phrase de synthèse annonce une vérification à corriger et la vignette lint porte « 3 »
+    avec un état textuel
+
+Tasks:
+  [ ] Refonte UI 2026-10-21 : onglets mobiles, grille ≥ md, synthèse de santé ; tests des Scenario
+    ci-dessus.

@@ -52,6 +52,14 @@ Must:
 Must not:
   Calculer le statut de santé côté client.
 
+Tasks:
+  [ ] PHASE 2 de la refonte UI (2026-10-21, décision à confirmer par le développeur principal) :
+    remplacer le docking libre (dockview) par TROIS ZONES FIXES à séparateurs redimensionnables —
+    barre latérale à onglets (Fichiers / Git / Recherche), centre éditeur avec panneau inférieur à
+    onglets (Terminal / Problèmes / Workflows), colonne droite (Assistant / Exécutions). Cette
+    spec devra être réécrite et revue AVANT toute implémentation ; la phase 1 (./shell/shell.sdd)
+    ne touche pas à l'IDE. Motif : la liberté de docking est la source des casses de mise en page.
+
 Scenario: panneau_workflows
   Given l'IDE d'une sandbox `Running` et deux workflows de portée sandbox
   When le panneau « Workflows » s'ouvre

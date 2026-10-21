@@ -1,0 +1,114 @@
+Spec: Shell commun — navigation, panneau d'assistant et thème
+
+Platform: TypeScript/Vue 3/CSS
+
+Purpose:
+  Refonte de l'interface (2026-10-21, maquette validée par le développeur principal : canvas
+  « Vanyline — refonte UI ») : tous les écrans hors IDE partagent UN shell à trois zones — un RAIL
+  de navigation, une région de CONTENU, un PANNEAU d'assistant — et UN thème. Cette spec porte
+  les trois briques communes : le thème (`theme.css`, jetons de couleur), la navigation
+  (`AppNav.vue` : rail vertical à partir de `md`, barre d'onglets en bas en dessous) et le panneau
+  d'assistant (`AssistantPanel.vue` : colonne à droite à partir de `md`, feuille plein écran en
+  dessous) qui enveloppe `ContextChat`. Elle remplace les boutons « Paramètres » / « Assistant »
+  dispersés dans les écrans et le fond bleu marine codé en dur. L'IDE n'est PAS concerné par
+  cette phase (sa coquille dockview reste, cf. ../ide.sdd, tâche de phase 2).
+  Le regroupement de trois fichiers tient à un seul contrat : le shell n'existe que par ses trois
+  pièces ensemble (thème lu par les deux composants).
+
+Owns:
+  ./AppNav.vue
+  ./AssistantPanel.vue
+  ../../theme.css
+
+Can read:
+  ../../frontend.sdd
+  ../../layout.sdd
+  ../ContextChat.sdd
+  ../../router.ts
+
+Exposes:
+  theme.css — jetons CSS sur `:root` (thème sombre graphite, un seul thème en v1) :
+    `--bg` #0f1012, `--surface` #16181b, `--surface-2` #1d2024, `--border` #2a2e33,
+    `--text` #e8eaed, `--muted` #9aa1ab, `--accent` #8b9bff, `--accent-bg` #1f2547,
+    `--accent-text` #c4ccff, `--ok` #4ade80, `--warn` #fbbf24, `--err` #f87171,
+    `--nav-h` 56px (hauteur de la barre d'onglets mobile, lue par `AssistantPanel`),
+    `--font-sans` (Inter puis `system-ui`), `--font-mono` (JetBrains Mono puis `monospace`).
+    L'accent est la SEULE couleur de marque ; `--ok`/`--warn`/`--err` ne servent qu'aux ÉTATS
+    (sandbox, run, santé du code) et jamais à la décoration.
+  AppNav — `<nav aria-label="Navigation principale">` avec deux entrées : « Projets » (`/`) et
+    « Paramètres » (`/settings`). L'entrée dont la route est active porte `aria-current="page"`
+    (« Projets » est active sur `/` et toute route `/p/…`). Chaque entrée est un `RouterLink` avec
+    une icône SVG décorative (`aria-hidden`) et un libellé accessible. À partir de `md` (768 px) :
+    rail vertical de 60 px, « Paramètres » en bas ; en dessous de `md` : barre d'onglets en bas de
+    l'écran, hauteur min `var(--ctl-h)` pour chaque entrée, libellé visible sous l'icône. Pas
+    d'entrée « Exécutions » tant qu'aucune route d'exécutions globale n'existe.
+  AssistantPanel — props `open: boolean` et `title: string`, slot par défaut (le `ContextChat`),
+    émet `close`. Fermé : ne rend rien. Ouvert : `<aside role="complementary"
+    aria-label="{title}">` avec un en-tête (titre, bouton de fermeture) puis le slot qui occupe le
+    reste de la colonne (`flex: 1; min-height: 0`). À partir de `md` : colonne de 340 px à droite,
+    bordure gauche `--border`, fond `--surface` ; en dessous : feuille `position: fixed; inset: 0`
+    au-dessus du contenu (la barre d'onglets reste accessible, `bottom` = hauteur de la barre).
+
+Must:
+  Les composants du shell et `theme.css` utilisent EXCLUSIVEMENT les jetons de `theme.css` pour
+    leurs couleurs (aucune valeur hexadécimale en dur dans les deux composants).
+  La page ne défile jamais (règles de ../../layout.sdd) : le rail et le panneau ont leur hauteur
+    imposée par la coquille, seul le contenu défile.
+  Aucune cible interactive en dessous de `var(--ctl-h)` ; icônes seules avec `aria-label`.
+  Le contraste du texte courant sur les fonds du thème atteint 4,5:1 (`--text` et `--muted` sur
+    `--bg`, `--surface` et `--surface-2`).
+  Ne dépendre d'aucune bibliothèque d'icônes ajoutée : SVG en ligne.
+
+Must not:
+  Contenir de la logique métier ou appeler l'API (le shell est présentationnel ; le contexte du
+    chat est fourni par l'écran qui monte `AssistantPanel`).
+  Introduire un second thème ou un sélecteur de thème (hors périmètre v1).
+  Couvrir l'IDE.
+
+Scenario: nav_deux_entrees
+  Given AppNav monté sur la route `/`
+  When il s'affiche
+  Then deux liens, « Projets » (`/`) et « Paramètres » (`/settings`), dans une `nav` nommée
+    « Navigation principale »
+
+Scenario: nav_entree_active
+  Given la route `/p/demo`, puis `/settings`
+  When AppNav s'affiche
+  Then « Projets » porte `aria-current="page"` sur `/p/demo` et « Paramètres » seul le porte sur
+    `/settings`
+
+Scenario: nav_barre_sous_md
+  Given le source de AppNav.vue
+  When le test de garde le lit
+  Then une règle `@media (max-width: 767px)` bascule la nav en barre inférieure et l'entrée a une
+    hauteur minimale `var(--ctl-h)`
+
+Scenario: panneau_ferme_ne_rend_rien
+  Given AssistantPanel avec `open=false`
+  When il est monté
+  Then aucun élément `complementary` n'existe
+
+Scenario: panneau_ouvert_et_fermeture
+  Given AssistantPanel avec `open=true`, `title="Assistant"` et un contenu dans le slot
+  When il est monté, puis le bouton de fermeture est cliqué
+  Then un `complementary` nommé « Assistant » contient le slot, puis l'événement `close` est émis
+
+Scenario: panneau_feuille_sous_md
+  Given le source de AssistantPanel.vue
+  When le test de garde le lit
+  Then une règle `@media (max-width: 767px)` le rend `position: fixed` plein écran et la colonne
+    à partir de `md` fait 340px
+
+Scenario: jetons_du_theme
+  Given theme.css
+  When le test de garde le lit
+  Then les douze jetons de couleur listés dans Exposes sont définis sur `:root` avec les valeurs
+    indiquées, et ni AppNav.vue ni AssistantPanel.vue ne contiennent de couleur hexadécimale
+
+Tasks:
+  [x] Écrire les tests de garde et de composant (Vitest) dérivés des Scenario, puis `theme.css`,
+    `AppNav.vue`, `AssistantPanel.vue`. (Lot 1, 2026-10-21 : validé — protocol 28, ui 98, frontend
+    547 tests, build, check, specdd lint verts.)
+  [ ] Monter `AssistantPanel` dans les écrans (lots 2 à 4) : aucun écran ne l'utilise encore.
+  [ ] Vérification navigateur (mobile 390 px / bureau 1280 px) au smoke test : règles `@media`
+    d'AppNav et d'AssistantPanel non vérifiées visuellement.

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import App from '../App.vue';
 import MenuBar from './MenuBar.vue';
 import StatusBar from './StatusBar.vue';
+import AppNav from './shell/AppNav.vue';
 import AppBreadcrumb from './AppBreadcrumb.vue';
 
 describe('App', () => {
@@ -25,7 +26,7 @@ describe('App', () => {
     return mount(App, { global: { plugins: [router] } });
   }
 
-  it('affiche MenuBar et StatusBar en mode étendu sur la route IDE', async () => {
+  it('route IDE : MenuBar, StatusBar étendue, pas de nav du shell (coquille IDE inchangée)', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/p/foo/s/bar');
     expect(wrapper.findComponent(MenuBar).exists()).toBe(true);
@@ -33,32 +34,33 @@ describe('App', () => {
     expect(wrapper.findComponent(StatusBar).props('extended')).toBe(true);
     expect(wrapper.findComponent(StatusBar).props('workspace')).toBe('bar');
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
+    expect(wrapper.findComponent(AppNav).exists()).toBe(false);
   });
 
-  it('naffiche pas MenuBar, affiche StatusBar en mode non étendu sur /', async () => {
+  it('hors IDE sur / : nav « Navigation principale », pas de MenuBar ni de StatusBar, fil d’Ariane', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/');
+    expect(wrapper.find('nav[aria-label="Navigation principale"]').exists()).toBe(true);
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
-    expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
-    expect(wrapper.findComponent(StatusBar).props('extended')).toBeFalsy();
+    expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 
-  it('naffiche pas MenuBar, affiche StatusBar en mode non étendu sur /p/:projectName', async () => {
+  it('hors IDE sur /p/:projectName : nav, pas de StatusBar', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/p/foo');
+    expect(wrapper.findComponent(AppNav).exists()).toBe(true);
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
-    expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
-    expect(wrapper.findComponent(StatusBar).props('extended')).toBeFalsy();
+    expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 
-  it('naffiche pas MenuBar, affiche StatusBar en mode non étendu sur /settings', async () => {
+  it('hors IDE sur /settings : nav, pas de StatusBar', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/settings');
+    expect(wrapper.findComponent(AppNav).exists()).toBe(true);
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
-    expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
-    expect(wrapper.findComponent(StatusBar).props('extended')).toBeFalsy();
+    expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 });

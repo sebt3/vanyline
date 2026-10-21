@@ -51,6 +51,14 @@ Must:
     l'utilisateur voie ce qui a été modifié.
   Être utilisable à 360 px (assistant en plein écran, navigation repliable).
 
+  Refonte (2026-10-21, cf. ./shell/shell.sdd) : la vue s'affiche dans la coquille commune et
+    n'utilise que les jetons de `theme.css`. Le panneau de l'assistant à partir de `md` est un
+    `AssistantPanel` (340 px) ; en dessous de `md`, le choix Configuration / Assistant devient un
+    CONTRÔLE SEGMENTÉ sous l'en-tête (deux boutons de hauteur `var(--ctl-h)`, `role="tablist"`),
+    et la navigation par groupes s'ouvre depuis un bouton menu de l'en-tête. Les listes de
+    ressources de ConfigShell restent des lignes (état en pastille + libellé), les formulaires
+    des cartes ; l'organisation des groupes de ConfigShell (`@vanyline/ui`) n'est pas modifiée.
+
 Must not:
   Proposer d'éditer le prompt, les outils ou le nom de l'agent de configuration.
   Contourner les droits de l'utilisateur : l'agent agit avec ses droits (côté serveur).
@@ -101,3 +109,16 @@ Tasks:
     Recommandation (Claude, 2026-10-18) : assumer (lecture réservée aux administrateurs, qui écrivent déjà ces réglages) et documenter que `options` ne
     doit jamais porter de secret.
     Réponse du développeur : défaut (recommandation validée le 2026-10-18)
+
+Scenario: controle_segmente_sous_md
+  Given une fenêtre de 390 px
+  When SettingsView s'affiche
+  Then un `tablist` « Configuration » / « Assistant » ; choisir « Assistant » affiche le chat et
+    masque la configuration
+
+Scenario: panneau_assistant_a_partir_de_md
+  Given une fenêtre de 1280 px
+  When SettingsView s'affiche
+  Then l'assistant est dans un `AssistantPanel` et aucun `tablist` Configuration/Assistant
+  [ ] Refonte UI 2026-10-21 : contrôle segmenté sous `md`, `AssistantPanel` à partir de `md`, jetons de
+    thème ; tests des deux Scenario `controle_segmente_sous_md` et `panneau_assistant_a_partir_de_md`.

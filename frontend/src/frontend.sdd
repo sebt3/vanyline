@@ -73,6 +73,13 @@ Must not:
   Introduire un écran non responsive autre que l'IDE.
 
 Tasks:
+  [ ] REFONTE UI 2026-10-21 (maquette validée par le développeur principal, canvas « Vanyline —
+    refonte UI ») en deux phases. PHASE 1 (specs à jour) : shell commun (./components/shell/shell.sdd :
+    thème sombre graphite à un accent, rail de navigation / barre d'onglets mobile, panneau
+    d'assistant), accueil en cartes de projets, projet en cartes de sandboxes + workflows + runs,
+    vue de sandbox mobile à quatre onglets, réglages habillés. Navigation globale : deux entrées
+    (Projets, Paramètres) ; le bouton « Paramètres » de l'accueil disparaît. PHASE 2 (spec à
+    réécrire AVANT code, cf. ./components/ide.sdd) : IDE à trois zones fixes sans dockview.
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : `lg` (1024 px) validé, à confirmer à l'usage. (Question d'origine : Seuil de l'IDE : `lg` (1024 px). Une tablette en paysage passe-t-elle ? À confirmer à l'usage.)
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : interrogation périodique en v1. (Question d'origine : Rafraîchissement de la vue mobile (santé du code) : interrogation périodique (10 s pendant un
     calcul, 30 s sinon) ou poussée par le WebSocket d'états de sandbox existant (`/api/ws/sandbox-state`) ?
