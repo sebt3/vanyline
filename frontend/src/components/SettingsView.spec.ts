@@ -206,3 +206,44 @@ describe('SettingsView — Global (G2a, SettingsView.sdd)', () => {
     expect(ordinary.text()).not.toContain('Global');
   });
 });
+
+describe('SettingsView — refonte 2026-10-21 (SettingsView.sdd)', () => {
+  afterEach(() => {
+    setWidth(1024);
+    vi.restoreAllMocks();
+  });
+
+  it('controle_segmente_sous_md', async () => {
+    setWidth(390);
+    configFetch([{ id: 1, name: 'profil' }]);
+    const wrapper = mount(SettingsView, { global: { stubs: { ContextChat: ContextChatStub } } });
+    await flush();
+
+    const tablist = wrapper.find('[role="tablist"]');
+    expect(tablist.exists()).toBe(true);
+    const tabs = tablist.findAll('[role="tab"]');
+    expect(tabs.map((t) => t.text())).toEqual(['Configuration', 'Assistant']);
+    expect(tabs[0].attributes('aria-selected')).toBe('true');
+    expect(tabs[1].attributes('aria-selected')).toBe('false');
+    expect(wrapper.find('.settings-main').attributes('style') ?? '').not.toContain('display: none');
+
+    await tabs[1].trigger('click');
+    await flush();
+    expect(tabs[1].attributes('aria-selected')).toBe('true');
+    expect(tabs[0].attributes('aria-selected')).toBe('false');
+    expect(wrapper.findComponent({ name: 'ContextChat' }).exists()).toBe(true);
+    expect(wrapper.find('.settings-main').attributes('style')).toContain('display: none');
+  });
+
+  it('panneau_assistant_a_partir_de_md', async () => {
+    setWidth(1280);
+    configFetch([{ id: 1, name: 'profil' }]);
+    const wrapper = mount(SettingsView, { global: { stubs: { ContextChat: ContextChatStub } } });
+    await flush();
+
+    expect(wrapper.find('[role="tablist"]').exists()).toBe(false);
+    const panel = wrapper.findComponent({ name: 'AssistantPanel' });
+    expect(panel.exists()).toBe(true);
+    expect(panel.findComponent({ name: 'ContextChat' }).exists()).toBe(true);
+  });
+});

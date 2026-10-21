@@ -55,7 +55,9 @@ Must:
     n'utilise que les jetons de `theme.css`. Le panneau de l'assistant à partir de `md` est un
     `AssistantPanel` (340 px) ; en dessous de `md`, le choix Configuration / Assistant devient un
     CONTRÔLE SEGMENTÉ sous l'en-tête (deux boutons de hauteur `var(--ctl-h)`, `role="tablist"`),
-    et la navigation par groupes s'ouvre depuis un bouton menu de l'en-tête. Les listes de
+    et la navigation par groupes reste le menu repliable de ConfigShell (`@vanyline/ui`, inchangé ; un
+    bouton menu propre à l'en-tête est reporté, cf. Tasks). Sous `md`, l'assistant est une SECTION
+    plein contenu (et non la feuille fixe d'AssistantPanel, qui recouvrirait le contrôle segmenté). Les listes de
     ressources de ConfigShell restent des lignes (état en pastille + libellé), les formulaires
     des cartes ; l'organisation des groupes de ConfigShell (`@vanyline/ui`) n'est pas modifiée.
 
@@ -120,5 +122,11 @@ Scenario: panneau_assistant_a_partir_de_md
   Given une fenêtre de 1280 px
   When SettingsView s'affiche
   Then l'assistant est dans un `AssistantPanel` et aucun `tablist` Configuration/Assistant
-  [ ] Refonte UI 2026-10-21 : contrôle segmenté sous `md`, `AssistantPanel` à partir de `md`, jetons de
-    thème ; tests des deux Scenario `controle_segmente_sous_md` et `panneau_assistant_a_partir_de_md`.
+  [x] Refonte UI 2026-10-21 (lot 4, validé : 556 tests frontend, check, build, lint specs verts) :
+    contrôle segmenté sous `md`, `AssistantPanel` (340 px, repliable) à partir de `md`, jetons de
+    thème, `GlobalSettingsScreen` sans couleur en dur. Arbitrage : les accents de couleur par
+    groupe de navigation sont remplacés par `--accent` (le thème réserve ok/warn/err aux états).
+  [ ] Dette de la refonte : `AccountScreen.vue` garde des couleurs en dur (#101828, #1c1c2a,
+    dégradé du squelette, #e85d5d) — hors Owns, spec à créer avant de le toucher ; ConfigShell
+    (`packages/ui`) pas audité pour les couleurs ; bouton menu d'en-tête pour les groupes sous
+    `md` non fait. Vérification navigateur (390 px / 1280 px) au smoke test : non faite.

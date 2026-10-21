@@ -14,6 +14,7 @@ import {
 } from '@vanyline/ui';
 import AccountScreen from './settings/AccountScreen.vue';
 import ContextChat from './ContextChat.vue';
+import AssistantPanel from './shell/AssistantPanel.vue';
 import { httpConfigRepo } from '../api/httpConfigRepo';
 import { listModelProfiles } from '../api/contextChatBackend';
 import { isAdmin } from '../api/appSettingsClient';
@@ -28,7 +29,7 @@ const baseGroups: ConfigNavGroup[] = [
     id: 'modeles',
     label: 'Modèles',
     icon: '✦',
-    accent: '#5b1ecf',
+    accent: 'var(--accent)',
     sub: [
       { id: 'llm-providers', label: 'Fournisseurs LLM' },
       { id: 'model-profiles', label: 'Profils de modèle' },
@@ -38,19 +39,19 @@ const baseGroups: ConfigNavGroup[] = [
     id: 'outils',
     label: 'Outils',
     icon: '⚙',
-    accent: '#4c90f0',
+    accent: 'var(--accent)',
     sub: [
       { id: 'mcp-servers', label: 'Serveurs MCPs' },
       { id: 'toolsets', label: 'Toolsets' },
     ],
   },
-  { id: 'agents', label: 'Agents', icon: '✦', accent: '#e0a83d' },
-  { id: 'skills', label: 'Skills', icon: '⚡', accent: '#3fb56d' },
-  { id: 'account', label: 'Compte', icon: '●', accent: '#e0a83d' },
+  { id: 'agents', label: 'Agents', icon: '✦', accent: 'var(--accent)' },
+  { id: 'skills', label: 'Skills', icon: '⚡', accent: 'var(--accent)' },
+  { id: 'account', label: 'Compte', icon: '●', accent: 'var(--accent)' },
 ];
 
 /** Groupe « Global » (modèle par défaut, app-settings) : administrateurs seulement. */
-const globalGroup: ConfigNavGroup = { id: 'global', label: 'Global', icon: '◎', accent: '#5b1ecf' };
+const globalGroup: ConfigNavGroup = { id: 'global', label: 'Global', icon: '◎', accent: 'var(--accent)' };
 
 const adminUser = ref(false);
 
@@ -140,78 +141,155 @@ const mobileTab = ref<'config' | 'assistant'>('config');
 
 <template>
   <div class="settings-view" :class="{ 'settings-view--narrow': narrow }">
-    <div v-if="narrow" class="settings-tabs" role="tablist" aria-label="Configuration et assistant">
+    <header class="settings-head">
+      <div v-if="narrow" class="settings-seg" role="tablist" aria-label="Configuration et assistant">
+        <button
+          type="button"
+          role="tab"
+          class="settings-seg__tab"
+          :aria-selected="mobileTab === 'config'"
+          @click="mobileTab = 'config'"
+        >
+          Configuration
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="settings-seg__tab"
+          :aria-selected="mobileTab === 'assistant'"
+          @click="mobileTab = 'assistant'"
+        >
+          Assistant
+        </button>
+      </div>
       <button
+        v-else
         type="button"
-        role="tab"
-        class="settings-tab"
-        :aria-selected="mobileTab === 'config'"
-        @click="mobileTab = 'config'"
-      >
-        Configuration
-      </button>
-      <button
-        type="button"
-        role="tab"
-        class="settings-tab"
-        :aria-selected="mobileTab === 'assistant'"
-        @click="mobileTab = 'assistant'"
+        class="settings-head__toggle"
+        :aria-expanded="panelOpen"
+        @click="panelOpen = !panelOpen"
       >
         Assistant
       </button>
-    </div>
+    </header>
 
-    <div class="settings-main" v-show="!narrow || mobileTab === 'config'">
-      <ConfigShell
-        :groups="groups"
-        :screens="screens"
-        :active-screen="activeScreen"
-        @update:active-screen="onScreenChange"
-        @nav-change="onNavChange"
-      />
-    </div>
-
-    <aside
-      v-if="narrow ? mobileTab === 'assistant' : panelOpen"
-      class="settings-assistant"
-      :data-layout="narrow ? 'tab' : 'panel'"
-      aria-label="Assistant de configuration"
-    >
-      <div v-if="!narrow" class="settings-assistant__bar">
-        <button type="button" class="btn" @click="panelOpen = false">Replier l'assistant</button>
+    <div class="settings-body">
+      <div class="settings-main" v-show="!narrow || mobileTab === 'config'">
+        <ConfigShell
+          :groups="groups"
+          :screens="screens"
+          :active-screen="activeScreen"
+          @update:active-screen="onScreenChange"
+          @nav-change="onNavChange"
+        />
       </div>
-      <p v-if="!assistantReady" class="settings-assistant__disabled" role="alert">
-        Aucun profil de modèle : l'assistant n'est pas utilisable. Crée d'abord un fournisseur LLM
-        puis un profil de modèle dans les formulaires de configuration, puis reviens ici.
-      </p>
-      <ContextChat
-        v-else
-        kind="settings"
-        :data="settingsChatData"
-        @turn-finished="onTurnFinished"
-      />
-    </aside>
 
-    <button
-      v-if="!narrow && !panelOpen"
-      type="button"
-      class="settings-assistant-open"
-      @click="panelOpen = true"
-    >
-      Ouvrir l'assistant
-    </button>
+      <AssistantPanel
+        v-if="!narrow"
+        :open="panelOpen"
+        title="Assistant de configuration"
+        @close="panelOpen = false"
+      >
+        <p v-if="!assistantReady" class="settings-assistant__disabled" role="alert">
+          Aucun profil de modèle : l'assistant n'est pas utilisable. Crée d'abord un fournisseur LLM
+          puis un profil de modèle dans les formulaires de configuration, puis reviens ici.
+        </p>
+        <ContextChat
+          v-else
+          kind="settings"
+          :data="settingsChatData"
+          @turn-finished="onTurnFinished"
+        />
+      </AssistantPanel>
+
+      <section
+        v-else-if="mobileTab === 'assistant'"
+        class="settings-assistant"
+        data-layout="tab"
+        aria-label="Assistant de configuration"
+      >
+        <p v-if="!assistantReady" class="settings-assistant__disabled" role="alert">
+          Aucun profil de modèle : l'assistant n'est pas utilisable. Crée d'abord un fournisseur LLM
+          puis un profil de modèle dans les formulaires de configuration, puis reviens ici.
+        </p>
+        <ContextChat
+          v-else
+          kind="settings"
+          :data="settingsChatData"
+          @turn-finished="onTurnFinished"
+        />
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
-/* La page ne défile pas : seule la région de configuration (.settings-main) et la
-   liste de messages de l'assistant défilent (cf. layout.sdd). */
+/* Contrat : ./SettingsView.sdd (refonte 2026-10-21) et ./shell/shell.sdd. La page ne défile
+   jamais : seules la navigation de configuration et la liste de messages défilent (layout.sdd).
+   Couleurs uniquement via les jetons de theme.css ; hauteurs de contrôle via --ctl-h. */
 .settings-view {
   display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
   width: 100%;
   overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+.settings-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-head__toggle,
+.settings-seg__tab {
+  min-height: var(--ctl-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-head__toggle[aria-expanded='true'] {
+  background: var(--surface-2);
+}
+
+.settings-seg {
+  flex: 1;
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.settings-seg__tab {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+}
+
+.settings-seg__tab[aria-selected='true'] {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.settings-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
 }
 
 .settings-main {
@@ -224,62 +302,25 @@ const mobileTab = ref<'config' | 'assistant'>('config');
 .settings-assistant {
   display: flex;
   flex-direction: column;
-  width: 380px;
-  flex-shrink: 0;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-left: 1px solid #2b2b4a;
-}
-
-.settings-assistant__bar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 8px 12px;
 }
 
 .settings-assistant__disabled {
+  margin: 0;
   padding: 16px;
   font-size: 13px;
+  color: var(--muted);
 }
 
-.settings-assistant-open {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  min-height: var(--ctl-h);
-  padding: 0 16px;
-}
-
-.settings-tabs {
-  display: flex;
-  gap: 8px;
-  padding: 8px 16px;
-  width: 100%;
-}
-
-.settings-tab {
-  flex: 1;
-  min-height: var(--ctl-h);
-}
-
-.settings-tab[aria-selected='true'] {
-  font-weight: 600;
-}
-
-/* Sous md : onglets en haut, puis une seule région (configuration ou assistant) qui
-   occupe le reste de l'écran et défile en interne. */
-.settings-view--narrow {
+/* Sous md : le choix Configuration / Assistant est sous l'en-tête ; une seule région à la fois. */
+.settings-view--narrow .settings-body {
   flex-direction: column;
 }
 
-.settings-view--narrow .settings-main,
 .settings-view--narrow .settings-assistant {
-  flex: 1;
-}
-
-.settings-view--narrow .settings-assistant {
-  width: 100%;
-  border-left: 0;
+  background: var(--bg);
 }
 </style>

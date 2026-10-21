@@ -138,7 +138,7 @@ onMounted(load);
 
 .global-settings__hint {
   font-size: 13px;
-  color: #6a7185;
+  color: var(--muted);
   margin: 0;
 }
 
@@ -164,13 +164,13 @@ onMounted(load);
 }
 
 .global-settings__error {
-  color: #e06c75;
+  color: var(--err);
   font-size: 13px;
   margin: 0;
 }
 
 .global-settings__ok {
-  color: #3fb56d;
+  color: var(--ok);
   font-size: 13px;
   margin: 0;
 }
