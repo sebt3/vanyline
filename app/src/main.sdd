@@ -50,8 +50,9 @@ Structure:
     ligne canonique quatre lints, `../../tooling.sdd` ratifié 2026-10-14) — seule ligne de
     ./main.rs que ../../tooling.sdd autorise à
     modifier dans ce fichier ; aucune autre exemption dans le corps.
-  Déclarations de modules (9, toutes privées, sans `pub`) : `mod api; mod auth;
-  mod config; mod config_store; mod db; mod error; mod k8s; mod migration; mod ws;` —
+  Déclarations de modules (13, toutes privées, sans `pub`) : `mod api; mod auth;
+  mod config; mod config_store; mod db; mod error; mod k8s; mod mcp_domain; mod migration;
+  mod naming; mod system_agents; mod workflow; mod ws;` —
   tout module du crate doit être déclaré ici pour exister.
   @AppState — struct `#[derive(Clone)] pub` à 7 champs (table en Exposes).
   impl @FromRef<@AppState> for @MiryadAuthState — clone du champ `auth`.

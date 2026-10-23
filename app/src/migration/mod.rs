@@ -12,6 +12,8 @@ mod m20261005_000001_create_vanyline_project_workflows;
 mod m20261005_000002_create_vanyline_workflow_runs;
 mod m20261005_000003_alter_vanyline_agents_system;
 mod m20261005_000004_create_vanyline_app_settings;
+mod m20261023_000001_create_vanyline_projects;
+mod m20261023_000002_create_vanyline_sandboxes;
 
 use sea_orm::sea_query::{Alias, DynIden, IntoIden};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -35,6 +37,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20261005_000002_create_vanyline_workflow_runs::Migration),
             Box::new(m20261005_000003_alter_vanyline_agents_system::Migration),
             Box::new(m20261005_000004_create_vanyline_app_settings::Migration),
+            Box::new(m20261023_000001_create_vanyline_projects::Migration),
+            Box::new(m20261023_000002_create_vanyline_sandboxes::Migration),
         ]
     }
 
@@ -458,18 +462,19 @@ mod workflow_migrations {
     }
 
     /// Scenario: `down_supprime_la_table` (les deux specs) — `Migrator::down` annule la fin de
-    /// chaîne : depuis la chaîne à QUATORZE migrations, trois pas (000004 `app_settings`,
-    /// 000003 `agents_system`, puis 000002) annulent `vanyline_workflow_runs` (disparaît,
-    /// `vanyline_project_workflows` reste) ; un pas de plus annule la première. Les deux
-    /// migrations du bout sont exercées par `mod system_migrations` ci-dessous.
+    /// chaîne : depuis la chaîne à SEIZE migrations, cinq pas (000016 et 000015 identité,
+    /// 000004 `app_settings`, 000003 `agents_system`, puis 000002) annulent
+    /// `vanyline_workflow_runs` (disparaît, `vanyline_project_workflows` reste) ; un pas de plus
+    /// annule la première. Les deux migrations du bout sont exercées par `mod system_migrations`
+    /// ci-dessous.
     #[tokio::test]
     async fn down_supprime_les_tables() {
         let db = real_db().await;
         assert!(table_sql(&db, "vanyline_workflow_runs").await.is_some());
 
-        crate::migration::Migrator::down(&db, Some(3))
+        crate::migration::Migrator::down(&db, Some(5))
             .await
-            .expect("three-step down succeeds (000004, 000003, then 000002)");
+            .expect("five-step down succeeds (000016, 000015, 000004, 000003, then 000002)");
         assert!(
             table_sql(&db, "vanyline_workflow_runs").await.is_none(),
             "vanyline_workflow_runs must be dropped by its down()"
@@ -742,16 +747,17 @@ mod system_migrations {
         assert!(dup.is_err(), "duplicate key must violate UNIQUE");
     }
 
-    /// Scenario: `down_supprime_la_table` (`m20261005_000004`) — un pas de `down` (la
-    /// migration est dernière de chaîne) DROP la table, la chaîne workflow reste posée.
+    /// Scenario: `down_supprime_la_table` (`m20261005_000004`) — trois pas de `down` (les deux
+    /// migrations d'identité `m20261023_*` sont annulées d'abord, puis `000004`) DROP la table,
+    /// la chaîne workflow reste posée.
     #[tokio::test]
     async fn down_supprime_app_settings() {
         let db = real_db().await;
         assert!(table_sql(&db, "vanyline_app_settings").await.is_some());
 
-        crate::migration::Migrator::down(&db, Some(1))
+        crate::migration::Migrator::down(&db, Some(3))
             .await
-            .expect("one-step down succeeds");
+            .expect("three-step down succeeds (000016, 000015, then 000004)");
         assert!(
             table_sql(&db, "vanyline_app_settings").await.is_none(),
             "vanyline_app_settings must be dropped by its down()"
@@ -762,9 +768,10 @@ mod system_migrations {
         );
     }
 
-    /// Scenario: `down_restaure_le_schema` (`m20261005_000003`) — DEUX pas de `down`
-    /// (000004 puis 000003) : les colonnes `system_key`/`system_version` et leur index unique
-    /// n'existent plus, la table des agents et la chaîne workflow restent intactes.
+    /// Scenario: `down_restaure_le_schema` (`m20261005_000003`) — QUATRE pas de `down`
+    /// (000016, 000015 identité, puis 000004 et 000003) : les colonnes `system_key`/
+    /// `system_version` et leur index unique n'existent plus, la table des agents et la chaîne
+    /// workflow restent intactes.
     #[tokio::test]
     async fn down_restaure_le_schema() {
         let db = real_db().await;
@@ -774,9 +781,9 @@ mod system_migrations {
                 .contains(&"system_key".to_string())
         );
 
-        crate::migration::Migrator::down(&db, Some(2))
+        crate::migration::Migrator::down(&db, Some(4))
             .await
-            .expect("two-step down succeeds (000004 then 000003)");
+            .expect("four-step down succeeds (000016, 000015, 000004, then 000003)");
 
         let columns = column_names(&db, "vanyline_agents").await;
         assert!(
@@ -794,6 +801,459 @@ mod system_migrations {
         assert!(
             table_sql(&db, "vanyline_agents").await.is_some(),
             "the agents table itself must survive"
+        );
+    }
+}
+
+/// Tests des migrations d'identité `m20261023_000001` (`vanyline_projects`) et
+/// `m20261023_000002` (`vanyline_sandboxes`), dérivés de leurs specs (`./m20261023_*.sdd`) et
+/// exécutés dans le harnais `real_db()` (sqlite en mémoire, FK réellement actives). Les
+/// insertions sont en SQL brut : ces tests visent le DDL seul, indépendamment des entités.
+/// Chaque assertion négative est précédée d'un témoin positif (sinon « table absente » ferait
+/// passer le test).
+#[cfg(test)]
+mod identity_migrations {
+
+    use sea_orm::{ConnectionTrait, DbErr, Statement, Value};
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
+
+    use crate::db::test_support::real_db;
+
+    /// Exécute une instruction SQL brute avec paramètres `?`.
+    async fn exec(db: &impl ConnectionTrait, sql: &str, values: Vec<Value>) -> Result<u64, DbErr> {
+        let stmt = Statement::from_sql_and_values(db.get_database_backend(), sql, values);
+        db.execute_raw(stmt).await.map(|res| res.rows_affected())
+    }
+
+    /// Valeur entière d'une requête scalaire (`COUNT(*)`, `IS NULL`…).
+    async fn scalar(db: &impl ConnectionTrait, sql: &str, values: Vec<Value>) -> i64 {
+        let stmt = Statement::from_sql_and_values(db.get_database_backend(), sql, values);
+        db.query_one_raw(stmt)
+            .await
+            .expect("scalar query runs")
+            .expect("scalar query returns a row")
+            .try_get_by_index::<i64>(0)
+            .expect("scalar decodes as integer")
+    }
+
+    /// Identifiant d'un utilisateur, via le chemin officiel miryad-core.
+    async fn user(db: &impl ConnectionTrait, subject: &str) -> i32 {
+        miryad_core::users::resolve_user(db, subject, None)
+            .await
+            .expect("user resolves")
+            .id
+    }
+
+    /// Colonnes de `PRAGMA table_info(<table>)` : `(nom, notnull, pk)` dans l'ordre `cid`.
+    /// Vide si la table n'existe pas.
+    async fn table_columns(db: &impl ConnectionTrait, table: &str) -> Vec<(String, i32, i32)> {
+        let stmt = Statement::from_string(
+            db.get_database_backend(),
+            format!("PRAGMA table_info({table})"),
+        );
+        db.query_all_raw(stmt)
+            .await
+            .expect("table_info is queryable")
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get_by_index::<String>(1).expect("name decodes"),
+                    row.try_get_by_index::<i32>(3).expect("notnull decodes"),
+                    row.try_get_by_index::<i32>(5).expect("pk decodes"),
+                )
+            })
+            .collect()
+    }
+
+    fn col(name: &str, notnull: i32, pk: i32) -> (String, i32, i32) {
+        (name.to_string(), notnull, pk)
+    }
+
+    async fn insert_project(
+        db: &impl ConnectionTrait,
+        owner: i32,
+        name: &str,
+    ) -> Result<u64, DbErr> {
+        exec(
+            db,
+            "INSERT INTO vanyline_projects (owner_id, name) VALUES (?, ?)",
+            vec![owner.into(), name.into()],
+        )
+        .await
+    }
+
+    async fn project_id(db: &impl ConnectionTrait, owner: i32, name: &str) -> i32 {
+        scalar(
+            db,
+            "SELECT id FROM vanyline_projects WHERE owner_id = ? AND name = ?",
+            vec![owner.into(), name.into()],
+        )
+        .await
+        .try_into()
+        .expect("project id fits in i32")
+    }
+
+    async fn insert_sandbox(
+        db: &impl ConnectionTrait,
+        owner: i32,
+        project: i32,
+        name: &str,
+        cr_name: &str,
+    ) -> Result<u64, DbErr> {
+        exec(
+            db,
+            "INSERT INTO vanyline_sandboxes (owner_id, project_id, name, cr_name) \
+             VALUES (?, ?, ?, ?)",
+            vec![owner.into(), project.into(), name.into(), cr_name.into()],
+        )
+        .await
+    }
+
+    // ----- vanyline_projects (m20261023_000001) ---------------------------------------------
+
+    /// Scenario: `ddl_applique_sur_une_vraie_base` (projects).
+    #[tokio::test]
+    async fn projects_ddl_applique_sur_une_vraie_base() {
+        let db = real_db().await;
+        assert_eq!(
+            table_columns(&db, "vanyline_projects").await,
+            vec![
+                col("id", 1, 1),
+                col("owner_id", 1, 0),
+                col("name", 1, 0),
+                col("missing_since", 0, 0),
+                col("created_at", 1, 0),
+            ]
+        );
+    }
+
+    /// Scenario: `unicite_owner_et_nom` (projects).
+    #[tokio::test]
+    async fn projects_unicite_owner_et_nom() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        let bob = user(&db, "bob").await;
+        insert_project(&db, alice, "demo")
+            .await
+            .expect("first project inserts");
+
+        let dup = insert_project(&db, alice, "demo").await;
+        let err = dup.expect_err("same (owner_id, name) must be rejected");
+        assert!(
+            err.to_string().contains("UNIQUE"),
+            "rejection must be the UNIQUE constraint, got: {err}"
+        );
+        insert_project(&db, bob, "demo")
+            .await
+            .expect("uniqueness is per owner, not global");
+    }
+
+    /// Scenario: `missing_since_nul_par_defaut_et_created_at_renseigne` (projects).
+    #[tokio::test]
+    async fn projects_missing_since_nul_par_defaut_et_created_at_renseigne() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "demo")
+            .await
+            .expect("insert with defaults");
+        let owner_demo: Vec<Value> = vec![alice.into(), "demo".into()];
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT missing_since IS NULL FROM vanyline_projects WHERE owner_id = ? AND name = ?",
+                owner_demo.clone(),
+            )
+            .await,
+            1,
+            "missing_since must default to NULL"
+        );
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT created_at IS NOT NULL FROM vanyline_projects WHERE owner_id = ? AND name = ?",
+                owner_demo,
+            )
+            .await,
+            1,
+            "created_at must be filled by the database default"
+        );
+    }
+
+    /// Scenario: `supprimer_l_utilisateur_emporte_ses_projets` (projects).
+    #[tokio::test]
+    async fn projects_supprimer_l_utilisateur_emporte_ses_projets() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "demo")
+            .await
+            .expect("project inserts");
+        let count = "SELECT COUNT(*) FROM vanyline_projects WHERE owner_id = ?";
+        assert_eq!(scalar(&db, count, vec![alice.into()]).await, 1, "control");
+
+        exec(
+            &db,
+            "DELETE FROM miryad_users WHERE id = ?",
+            vec![alice.into()],
+        )
+        .await
+        .expect("user deletes");
+        assert_eq!(
+            scalar(&db, count, vec![alice.into()]).await,
+            0,
+            "cascade must remove the project"
+        );
+    }
+
+    /// Scenario: `owner_inconnu_rejete` (projects).
+    #[tokio::test]
+    async fn projects_owner_inconnu_rejete() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "control")
+            .await
+            .expect("control: a known owner inserts");
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT COUNT(*) FROM miryad_users WHERE id = 99",
+                vec![]
+            )
+            .await,
+            0,
+            "precondition: no user 99"
+        );
+
+        let err = insert_project(&db, 99, "x")
+            .await
+            .expect_err("unknown owner must be rejected by the FK");
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "rejection must be the FK constraint, got: {err}"
+        );
+    }
+
+    /// Scenario: `down_supprime_la_table` (projects) — appel direct du `down` de la migration.
+    #[tokio::test]
+    async fn projects_down_supprime_la_table() {
+        use super::m20261023_000001_create_vanyline_projects::Migration;
+
+        let db = real_db().await;
+        assert!(
+            !table_columns(&db, "vanyline_projects").await.is_empty(),
+            "precondition: the table exists after up"
+        );
+
+        Migration
+            .down(&SchemaManager::new(&db))
+            .await
+            .expect("down succeeds");
+        assert!(
+            table_columns(&db, "vanyline_projects").await.is_empty(),
+            "down must drop vanyline_projects"
+        );
+    }
+
+    // ----- vanyline_sandboxes (m20261023_000002) --------------------------------------------
+
+    /// Scenario: `ddl_applique_sur_une_vraie_base` (sandboxes).
+    #[tokio::test]
+    async fn sandboxes_ddl_applique_sur_une_vraie_base() {
+        let db = real_db().await;
+        assert_eq!(
+            table_columns(&db, "vanyline_sandboxes").await,
+            vec![
+                col("id", 1, 1),
+                col("owner_id", 1, 0),
+                col("project_id", 1, 0),
+                col("name", 1, 0),
+                col("cr_name", 1, 0),
+                col("missing_since", 0, 0),
+                col("created_at", 1, 0),
+            ]
+        );
+    }
+
+    /// Scenario: `meme_nom_dans_deux_projets` (sandboxes) — cas qui échouait avant le 2026-10-23.
+    #[tokio::test]
+    async fn sandboxes_meme_nom_dans_deux_projets() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "a").await.expect("project a");
+        insert_project(&db, alice, "b").await.expect("project b");
+        let a = project_id(&db, alice, "a").await;
+        let b = project_id(&db, alice, "b").await;
+
+        insert_sandbox(&db, alice, a, "main", "a-main")
+            .await
+            .expect("main in a");
+        insert_sandbox(&db, alice, b, "main", "b-main")
+            .await
+            .expect("main in b: same display name, other project");
+    }
+
+    /// Scenario: `nom_unique_dans_un_projet` (sandboxes).
+    #[tokio::test]
+    async fn sandboxes_nom_unique_dans_un_projet() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "a").await.expect("project a");
+        let a = project_id(&db, alice, "a").await;
+        insert_sandbox(&db, alice, a, "main", "a-main")
+            .await
+            .expect("first sandbox inserts");
+
+        let err = insert_sandbox(&db, alice, a, "main", "a-main2")
+            .await
+            .expect_err("same (project_id, name) must be rejected");
+        assert!(
+            err.to_string().contains("UNIQUE"),
+            "rejection must be the UNIQUE constraint, got: {err}"
+        );
+        insert_sandbox(&db, alice, a, "other", "a-other")
+            .await
+            .expect("control: another name in the same project inserts");
+    }
+
+    /// Scenario: `cr_name_unique_par_proprietaire` (sandboxes).
+    #[tokio::test]
+    async fn sandboxes_cr_name_unique_par_proprietaire() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        let bob = user(&db, "bob").await;
+        insert_project(&db, alice, "a").await.expect("project a");
+        insert_project(&db, alice, "a-b")
+            .await
+            .expect("project a-b");
+        let a = project_id(&db, alice, "a").await;
+        let a_b = project_id(&db, alice, "a-b").await;
+        insert_sandbox(&db, alice, a, "b-c", "a-b-c")
+            .await
+            .expect("first sandbox inserts");
+
+        let err = insert_sandbox(&db, alice, a_b, "c", "a-b-c")
+            .await
+            .expect_err("same (owner_id, cr_name) must be rejected");
+        assert!(
+            err.to_string().contains("UNIQUE"),
+            "rejection must be the UNIQUE constraint, got: {err}"
+        );
+
+        insert_project(&db, bob, "a").await.expect("bob project a");
+        let bob_a = project_id(&db, bob, "a").await;
+        insert_sandbox(&db, bob, bob_a, "b-c", "a-b-c")
+            .await
+            .expect("cr_name uniqueness is per owner");
+    }
+
+    /// Scenario: `supprimer_le_projet_emporte_ses_sandboxes` (sandboxes).
+    #[tokio::test]
+    async fn sandboxes_supprimer_le_projet_emporte_ses_sandboxes() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "a").await.expect("project a");
+        let a = project_id(&db, alice, "a").await;
+        insert_sandbox(&db, alice, a, "main", "a-main")
+            .await
+            .expect("sandbox inserts");
+        let count = "SELECT COUNT(*) FROM vanyline_sandboxes WHERE project_id = ?";
+        assert_eq!(scalar(&db, count, vec![a.into()]).await, 1, "control");
+
+        exec(
+            &db,
+            "DELETE FROM vanyline_projects WHERE id = ?",
+            vec![a.into()],
+        )
+        .await
+        .expect("project deletes");
+        assert_eq!(
+            scalar(&db, count, vec![a.into()]).await,
+            0,
+            "cascade must remove the sandbox"
+        );
+    }
+
+    /// Scenario: `supprimer_l_utilisateur_emporte_tout` (sandboxes).
+    #[tokio::test]
+    async fn sandboxes_supprimer_l_utilisateur_emporte_tout() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "a").await.expect("project a");
+        let a = project_id(&db, alice, "a").await;
+        insert_sandbox(&db, alice, a, "main", "a-main")
+            .await
+            .expect("sandbox inserts");
+        let projects = "SELECT COUNT(*) FROM vanyline_projects WHERE owner_id = ?";
+        let sandboxes = "SELECT COUNT(*) FROM vanyline_sandboxes WHERE owner_id = ?";
+        assert_eq!(
+            scalar(&db, projects, vec![alice.into()]).await,
+            1,
+            "control"
+        );
+        assert_eq!(
+            scalar(&db, sandboxes, vec![alice.into()]).await,
+            1,
+            "control"
+        );
+
+        exec(
+            &db,
+            "DELETE FROM miryad_users WHERE id = ?",
+            vec![alice.into()],
+        )
+        .await
+        .expect("user deletes");
+        assert_eq!(scalar(&db, projects, vec![alice.into()]).await, 0);
+        assert_eq!(scalar(&db, sandboxes, vec![alice.into()]).await, 0);
+    }
+
+    /// Scenario: `projet_inconnu_rejete` (sandboxes).
+    #[tokio::test]
+    async fn sandboxes_projet_inconnu_rejete() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        insert_project(&db, alice, "a").await.expect("project a");
+        let a = project_id(&db, alice, "a").await;
+        assert_eq!(
+            scalar(
+                &db,
+                "SELECT COUNT(*) FROM vanyline_projects WHERE id = 99",
+                vec![],
+            )
+            .await,
+            0,
+            "precondition: no project 99"
+        );
+        insert_sandbox(&db, alice, a, "control", "a-control")
+            .await
+            .expect("control: a known project inserts");
+
+        let err = insert_sandbox(&db, alice, 99, "main", "x-main")
+            .await
+            .expect_err("unknown project must be rejected by the FK");
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "rejection must be the FK constraint, got: {err}"
+        );
+    }
+
+    /// Scenario: `down_supprime_la_table` (sandboxes) — appel direct du `down` de la migration.
+    #[tokio::test]
+    async fn sandboxes_down_supprime_la_table() {
+        use super::m20261023_000002_create_vanyline_sandboxes::Migration;
+
+        let db = real_db().await;
+        assert!(
+            !table_columns(&db, "vanyline_sandboxes").await.is_empty(),
+            "precondition: the table exists after up"
+        );
+
+        Migration
+            .down(&SchemaManager::new(&db))
+            .await
+            .expect("down succeeds");
+        assert!(
+            table_columns(&db, "vanyline_sandboxes").await.is_empty(),
+            "down must drop vanyline_sandboxes"
         );
     }
 }

@@ -46,6 +46,43 @@ Must:
   Maintenir le harnais `[workspace.lints]` du workspace cargo UNIQUE comme source de
   vérité des lints (`./tooling.sdd`) ; ne jamais introduire de sous-workspace cargo
   séparé qui échapperait au harnais.
+  Modèle de données Project/Sandbox (décision du 2026-10-23) : la CR Kubernetes reste la
+  SEULE golden source de leur `spec` et de leur `status` ; la base porte uniquement leur
+  IDENTITÉ, pour que les tables qui s'y rattachent (workflows, runs, contextes de chat)
+  puissent le faire par clé étrangère réelle et non par nom en chaîne. Contrat :
+  - Une ligne d'identité par Project (`owner_id`, `name`) et par Sandbox (`project_id`,
+    `name` = nom affiché, `cr_name` = `metadata.name` de la CR). Contraintes d'unicité en base :
+    `(owner_id, name)` pour les projets, `(project_id, name)` pour les sandboxes, `cr_name`
+    unique par Owner. Aucune colonne ne reflète `spec` ou `status`.
+  - `metadata.name` d'une sandbox est déterministe : `<projet>-<nom>` ; refus 422 (jamais de
+    troncature) si le résultat dépasse la limite d'un label DNS (63) puisqu'il sert d'hôte
+    d'ingress ; une violation d'unicité (base ou `AlreadyExists` du cluster) répond 409 avec un
+    message qui nomme la cause, jamais un 500.
+  - Création : ligne d'identité d'abord (la contrainte arbitre la collision), puis CR ; si la
+    CR échoue, la ligne est retirée. Suppression : CR d'abord, puis ligne. Les deux étapes
+    sont idempotentes. Nom, projet et propriétaire sont IMMUABLES après création.
+  - Toute table qui référence un projet ou une sandbox le fait par FK vers ces lignes
+    (`project_workflows`, `workflow_runs`, `chat_contexts`) ; le nom en chaîne n'est plus une
+    référence.
+  - La base se réconcilie TOUJOURS sur le cluster, jamais l'inverse (arbitrage du 2026-10-23) :
+    un réconciliateur de l'app compare les CRs et les lignes d'identité. Une CR sans ligne
+    (créée par CLI, `kubectl`, GitOps) est ADOPTÉE automatiquement : la ligne est créée, l'Owner
+    étant lu dans `spec.owner` ; si cet Owner n'a aucun lien utilisateur connu, la CR est
+    signalée (log + métrique) et non adoptée. Une ligne dont la CR a disparu est SUPPRIMÉE.
+  - Garde-fous de la suppression par réconciliation : une ligne n'est supprimée que sur un
+    NotFound confirmé par un GET de la CR concernée, jamais sur son absence d'un listing ; une
+    erreur ou un listing incomplet ne supprime rien et le passage est abandonné (journalisé).
+  - Délai de grâce de 180 s (arbitrage du 2026-10-23, paramètre de configuration de l'app) entre
+    la disparition constatée de la CR et la suppression de la ligne : la première constatation
+    pose `missing_since` sur la ligne, la suppression n'a lieu qu'à un passage dont l'horloge
+    est ≥ `missing_since` + 180 s ET qui reconstate l'absence ; si la CR réapparaît entre-temps,
+    `missing_since` est remis à NULL et l'historique est intact. `missing_since` en base (et non en
+    mémoire) rend le délai correct avec plusieurs réplicas et après un redémarrage de l'app.
+  - Cadence : un watch kube sur les Project et les Sandbox (celui des Sandbox existe déjà,
+    `app/src/ws/sandbox_state.sdd`) donne l'adoption et la détection d'absence quasi immédiates ;
+    un passage de resync complet toutes les 60 s (paramètre de configuration) rattrape tout ce que
+    le watch a pu manquer. La suppression effective tombe donc entre 180 s et 240 s après le
+    delete dans le cluster.
 
 Must not:
   Interpoler un champ de CRD dans une commande shell du controller : toute maintenance des
@@ -107,6 +144,37 @@ Tasks:
     LEVÉ — with_setup livré 0.1.5) ; RESTE « Restate comme sous-ressource de
     l'Application » = S6c : écrire le contrat RestateSpec dans `crds/src/lib.sdd` puis
     builders controller + activer le wiring commenté de S6b (bloc « BLOQUÉE CRDS »).
+  [ ] Identité Project/Sandbox en base (décision 2026-10-23, contrat dans `Must`) : à spécer puis
+    livrer dans l'ordre — migrations + entités `vanyline_projects`/`vanyline_sandboxes` (une
+    spec par fichier, avec backfill des CRs existantes), nommage `<projet>-<nom>` et 409 dans
+    `app/src/api/sandboxes.sdd` et `projects.sdd`, FK de `project_workflows`, `workflow_runs`,
+    `chat_contexts` (le `data` JSON de ce dernier cède la place à une colonne FK), réconciliateur,
+    puis `PUT` de modification (merge-patch de la CR, champs non destructifs) et amendement de
+    `frontend/src/components/dashboards/dashboards.sdd` (retrait du bouton « Paramètres » du
+    projet, édition projet/sandbox). Le controller n'est pas impacté par le nommage ; il l'est par
+    la modification d'une sandbox (condition `RestartPending`, cf. la tâche « option C »).
+  [x] Adoption et suppression par réconciliation (arbitrage 2026-10-23) : le cluster est la
+    golden source, la base le suit — création de ligne pour toute CR sans ligne, suppression de la
+    ligne d'une CR disparue (contrat dans `Must`).
+  [x] `ON DELETE CASCADE` sur toutes les FK vers les lignes d'identité (arbitrage 2026-10-23) :
+    `project_workflows`, `workflow_runs` (`project_id` ET `sandbox_id`), `chat_contexts` (donc
+    leurs conversations et messages) disparaissent avec l'identité. Un run de portée sandbox
+    est supprimé avec sa sandbox.
+  [x] Délai de grâce 180 s via `missing_since`, resync 60 s + watch (arbitrage 2026-10-23, contrat
+    dans `Must`). La colonne `missing_since` (nullable) fait partie des tables d'identité.
+  [?] Watch + resync 60 s, ou resync seul toutes les 30 s (moins de code, adoption jusqu'à 30 s
+    plus lente) ? Contrat provisoire du bloc `Must` : watch + resync 60 s.
+  [ ] Modification d'une sandbox (arbitrage 2026-10-23, « option C ») : possible en tout temps,
+    sans exiger de suspension et sans redémarrage automatique du Pod. Quand le changement
+    demande un redémarrage (toolchains, ressources, image, branche, et tout champ que le
+    controller classe ainsi dans `controller/src/sandbox.sdd`), le `status` de la sandbox le
+    reflète : condition `RestartPending` (jetée dès que le Pod a redémarré avec la spec courante)
+    et mention « redémarrage requis » dans l'UI. L'utilisateur applique le changement par son
+    stop/start existant. Choix de forme à relire : une CONDITION et non une nouvelle valeur de
+    `status.phase`, car l'IDE et les relais sont conditionnés par `phase == Running` et la
+    sandbox reste utilisable en attendant. Reste à spécer côté controller : détection de dérive
+    (empreinte de la spec utile portée par le Pod, comparée à la spec courante) et checkout de la
+    nouvelle branche au redémarrage.
   [ ] Agents système (`app/src/system_agents.sdd`) et écrans (`frontend/frontend.sdd` et specs liées).
   [ ] Autonomie des agents (`lib/src/autonomous.sdd`) et, sur décision, extraction de la
     config LLM (`llm-config/src/lib.sdd`, membre `llm-config` à ajouter au workspace).

@@ -1,0 +1,104 @@
+Spec: Naming
+
+Purpose:
+  Fonctions pures de nommage des objets Kubernetes de l'app (décision du 2026-10-23,
+  `/vanyline.sdd`, « Modèle de données Project/Sandbox »). Le nom affiché d'une sandbox est
+  unique PAR PROJET ; le `metadata.name` de sa CR est déterministe, `<projet>-<nom>`, pour que
+  l'unicité dans le namespace de l'Owner (partagé par tous ses projets) soit garantie par
+  construction plutôt que par chance, et qu'une collision se détecte avant tout appel au cluster.
+  Le nom technique sert aussi d'hôte d'ingress (`{name}.sandboxes.{host}`) : il doit être un label
+  DNS valide (RFC 1123, 63 caractères au plus). Module sans état, sans I/O, sans log. Les
+  consommateurs (routes de création, réconciliateur) arrivent dans des lots ultérieurs.
+
+Owns:
+  ./naming.rs
+
+Can modify:
+  ./main.rs — uniquement l'ajout de la ligne `mod naming;` (ordre alphabétique des `mod`).
+  ./main.sdd — uniquement la mention du nouveau module dans sa liste.
+
+Can read:
+  ./error.rs, ./error.sdd — conventions d'identifiants `VNL-XXX-NNN`.
+
+Exposes:
+  @MAX_DNS_LABEL — `pub const usize = 63`.
+  @NamingError — enum `thiserror`, `Debug` + `PartialEq` :
+    `Invalid { field: &'static str, value: String }` — Display `"VNL-NAM-001: invalid {field}
+      « {value} » (lowercase alphanumerics and '-', must start and end with an alphanumeric)"` ;
+    `TooLong { len: usize, max: usize }` — Display `"VNL-NAM-002: name too long ({len} > {max})"`.
+  @validate_label(field: &'static str, value: &str) -> Result<(), NamingError> — vérifie qu'une
+    valeur est un label DNS (RFC 1123) : non vide, `[a-z0-9-]`, commence et finit par un
+    alphanumérique ; sinon `Invalid`. Ne contrôle pas la longueur.
+  @sandbox_cr_name(project: &str, name: &str) -> Result<String, NamingError> — construit
+    `"{project}-{name}"` après avoir validé `project` (champ "project") puis `name` (champ
+    "name") avec @validate_label ; `TooLong { len, max: 63 }` si le résultat dépasse
+    @MAX_DNS_LABEL (jamais de troncature).
+  @display_name(project: &str, cr_name: &str) -> String — nom affiché d'une CR adoptée : retire
+    le préfixe `"{project}-"` de `cr_name` si le reste est non vide, sinon retourne `cr_name`
+    tel quel.
+
+Must:
+  Vérifier `project` avant `name` : l'erreur retournée désigne le premier champ invalide.
+  Retourner `TooLong` plutôt que tronquer : une troncature casserait l'unicité par construction.
+  Rester pur : aucun accès réseau/fichier, aucune horloge, aucun état ; les temporaires de
+    formatage sont admis (pas de contrainte d'allocation).
+  Respecter le harnais : aucun `unwrap`/`expect`/`panic!`/`println!` hors `cfg(test)`.
+  Documenter chaque item public.
+
+Must not:
+  Normaliser, mettre en minuscules ni « réparer » une entrée invalide : elle est refusée.
+  Consulter le cluster ou la base : l'unicité réelle est arbitrée par la base et par `AlreadyExists`.
+  Porter un code HTTP : le mappage 422/409 appartient aux routes (lot ultérieur).
+
+Depends on:
+  `thiserror` 2 (déjà dépendance de l'app).
+  ./error.sdd — convention des identifiants d'erreur. Les identifiants `VNL-NAM-001` et
+    `VNL-NAM-002` ne doivent exister nulle part ailleurs dans le dépôt (vérifier par `grep`).
+
+Tasks:
+  [ ] Écrire les tests des Scenario dans `#[cfg(test)] mod tests` de `./naming.rs`, les voir
+    échouer, puis implémenter ; ajouter `mod naming;` à `./main.rs`. Comme aucun consommateur de
+    production n'existe encore, porter un `#[allow(dead_code)]` justifié d'une ligne citant cette
+    spec sur le module, à retirer avec le premier consommateur.
+
+Done when:
+  Chaque Scenario est couvert par un test vert et la batterie de `/AGENTS.md` passe.
+
+Scenario: nom_technique_deterministe
+  Given le projet "demo" et le nom "main"
+  When on appelle @sandbox_cr_name
+  Then le résultat est `Ok("demo-main")`
+
+Scenario: meme_nom_dans_deux_projets
+  Given les projets "a" et "b" et le nom "main"
+  When on appelle @sandbox_cr_name pour chacun
+  Then les résultats sont "a-main" et "b-main", distincts
+
+Scenario: nom_invalide_refuse
+  Given les noms "Main", "ma_sandbox", "-x", "x-", "" et "a b"
+  When on appelle @sandbox_cr_name avec le projet "demo"
+  Then chacun retourne `Invalid { field: "name", .. }` dont le Display commence par "VNL-NAM-001"
+
+Scenario: projet_invalide_refuse_en_premier
+  Given le projet "Demo" et le nom "Main" (tous deux invalides)
+  When on appelle @sandbox_cr_name
+  Then l'erreur désigne `field: "project"`
+
+Scenario: longueur_maximale
+  Given un projet et un nom dont la concaténation `"{project}-{name}"` fait exactement 63
+    caractères, puis 64
+  When on appelle @sandbox_cr_name
+  Then 63 → `Ok` ; 64 → `TooLong { len: 64, max: 63 }` dont le Display commence par
+    "VNL-NAM-002" — aucune troncature
+
+Scenario: ambiguite_de_concatenation_assumee
+  Given le projet "a" avec le nom "b-c", et le projet "a-b" avec le nom "c"
+  When on appelle @sandbox_cr_name pour chacun
+  Then les deux retournent "a-b-c" — la collision est détectée plus tard par l'unicité
+    `(owner_id, cr_name)` de la base (409), pas ici
+
+Scenario: nom_affiche_d_une_cr_adoptee
+  Given le projet "demo"
+  When on appelle @display_name avec "demo-main", puis "autre", puis "demo-"
+  Then les résultats sont "main", "autre" et "demo-" (préfixe retiré seulement si le reste est
+    non vide)

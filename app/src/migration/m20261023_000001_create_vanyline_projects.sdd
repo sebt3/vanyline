@@ -1,0 +1,113 @@
+Spec: Migration m20261023_000001_create_vanyline_projects
+
+Purpose:
+  Quinzième migration de la chaîne de `./mod.sdd` : DDL de la table d'IDENTITÉ des Projects,
+  `vanyline_projects`. La CR Kubernetes `Project` reste la seule golden source de la spec et du
+  status (décision du 2026-10-23, `/vanyline.sdd`, bloc `Must` « Modèle de données
+  Project/Sandbox ») ; cette table ne porte que ce qui permet aux autres tables de s'y rattacher
+  par clé étrangère réelle : une clé (`id`), le propriétaire, le nom de la CR, et l'horodatage de
+  première absence constatée de la CR (`missing_since`, délai de grâce de 180 s de la
+  réconciliation). Fichier purement DDL : `up` = un `CREATE TABLE IF NOT EXISTS`, `down` = un
+  `DROP TABLE`. Contrat de schéma référencé par l'entité sœur `../db/entities/projects.sdd`
+  (correspondance colonne par colonne). L'orchestration (ordre, table de suivi
+  `seaql_migrations_app`, règle de régression sur `.index(...)`, interdit de modifier un `up`
+  appliqué) appartient à `./mod.sdd`.
+
+Owns:
+  ./m20261023_000001_create_vanyline_projects.rs
+
+Can read:
+  ./mod.rs — enregistrement dans `@Migrator::migrations`, test d'application.
+  ../db/test_support.rs — harnais `real_db()` (SQLite en mémoire ; sqlx-sqlite pose
+    `PRAGMA foreign_keys = ON`, les cascades sont donc réellement appliquées).
+  ../db/entities/projects.rs — consommateur du schéma.
+  ./m20260825_000010_create_vanyline_owner_links.rs — patron DDL de référence (FK vers
+    `miryad_users`, `ON DELETE CASCADE`).
+
+Exposes:
+  @Migration — `pub struct` du module privé `migration::m20261023_000001_create_vanyline_projects`,
+    `#[derive(DeriveMigrationName)]` (nom d'historique = stem du fichier).
+  @MigrationTrait::up / @MigrationTrait::down — seules méthodes du fichier.
+  @Project — enum privée `DeriveIden` : `Table` (iden littéral `vanyline_projects`), `Id`,
+    `OwnerId`, `Name`, `MissingSince`, `CreatedAt`.
+  @User — enum privée `DeriveIden` re-déclarant `miryad_users` / `id` (couplage nom-à-nom,
+    comme les autres migrations).
+
+Returns:
+  `@Result<(), @sea_orm::DbErr>` pour `up` et `down`, `DbErr` propagé brut (aucun `map_err`).
+
+Must:
+  Produire dans `up` exactement un `CREATE TABLE IF NOT EXISTS vanyline_projects`, rien d'autre
+    (pas de DML, pas de seed, pas d'index séparé).
+  Colonnes, dans cet ordre :
+    - `id` : `integer()` NOT NULL, `auto_increment()`, clé primaire ;
+    - `owner_id` : `integer()` NOT NULL — utilisateur miryad-core propriétaire (même sémantique
+      que `vanyline_project_workflows.owner_id`) ;
+    - `name` : `string()` NOT NULL — `metadata.name` de la CR `Project` ;
+    - `missing_since` : `timestamp_with_time_zone()` NULLABLE, sans défaut — NULL tant que la CR
+      existe ; posé par la réconciliation à la première absence constatée ;
+    - `created_at` : `timestamp_with_time_zone()` NOT NULL, défaut `current_timestamp`.
+  FK `owner_id` → `miryad_users(id)` `ON DELETE CASCADE` (aucun `ON UPDATE`).
+  Unicité composite `(owner_id, name)` posée DANS le `CREATE TABLE` par un `Index::create()`
+    nommé `uq_vanyline_projects_owner_name` portant `.unique()` (forme admise par `./mod.sdd`) :
+    c'est elle qui arbitre une collision de création (409 côté API, lot ultérieur).
+  Rester double-compatible PostgreSQL / SQLite : aucun `.custom(...)`, aucune branche par backend.
+  Implémenter `down` comme `DROP TABLE vanyline_projects` seul (sans `IF EXISTS`).
+
+Must not:
+  Ajouter une colonne qui reflète la `spec` ou le `status` de la CR (`repo_url`, `phase`,
+    `cloned`…) : deux golden sources interdites.
+  Utiliser `.index(...)` sans `.unique()` dans le `Table::create()` (régression Phase 3).
+  Insérer des lignes (le rattrapage de l'existant est fait par la réconciliation, pas par la
+    migration) ni émettre un DDL autre que le `CREATE TABLE` / `DROP TABLE`.
+  Modifier ce `up` une fois appliqué : toute évolution passe par une migration suivante.
+  Déclarer une logique applicative.
+
+Depends on:
+  `sea-orm-migration` 2, `sea-query` via le prelude, `async_trait`.
+  ./mod.sdd — position (quinzième), table de suivi, règles d'index.
+  ../db/entities/projects.sdd — contrat bilatéral entité ↔ schéma.
+  `@miryad_core::migration::Migrator` — crée `miryad_users`, doit précéder.
+
+Tasks:
+  [ ] Dériver les tests des Scenario ci-dessous dans `./mod.rs` (module de tests
+    `identity_migrations`, harnais `real_db()`), les voir échouer, puis écrire la migration.
+  [ ] Enregistrer la migration en quinzième position de `@Migrator::migrations` et mettre à jour
+    `./mod.sdd` (comptes « quatorze »→« seize » une fois la sœur 000002 ajoutée).
+
+Done when:
+  Chaque Scenario est couvert par un test vert et la batterie de `/AGENTS.md` passe.
+
+Scenario: ddl_applique_sur_une_vraie_base
+  Given une base SQLite réelle migrée par `real_db()`
+  When on lit `PRAGMA table_info(vanyline_projects)`
+  Then exactement les colonnes `id`, `owner_id`, `name`, `missing_since`, `created_at` dans cet
+    ordre ; `notnull` = 1 pour `id`, `owner_id`, `name`, `created_at` et 0 pour `missing_since` ;
+    `pk` = 1 pour `id` seul
+
+Scenario: unicite_owner_et_nom
+  Given un utilisateur 1 et un utilisateur 2 dans `miryad_users`, et une ligne
+    `vanyline_projects (owner_id = 1, name = 'demo')`
+  When on insère `(1, 'demo')` une seconde fois, puis `(2, 'demo')`
+  Then la première insertion est rejetée (contrainte unique) et la seconde réussit — l'unicité
+    est par propriétaire, pas globale
+
+Scenario: missing_since_nul_par_defaut_et_created_at_renseigne
+  Given un utilisateur 1 et l'insertion de `(owner_id = 1, name = 'demo')` sans autre colonne
+  When on relit la ligne
+  Then `missing_since` vaut NULL et `created_at` n'est pas NULL
+
+Scenario: supprimer_l_utilisateur_emporte_ses_projets
+  Given un utilisateur 1 avec une ligne `vanyline_projects`
+  When l'utilisateur est supprimé de `miryad_users`
+  Then la ligne de `vanyline_projects` a disparu (cascade réellement appliquée par le harnais)
+
+Scenario: owner_inconnu_rejete
+  Given une base migrée sans utilisateur 99
+  When on insère `(owner_id = 99, name = 'x')`
+  Then l'insertion est refusée par la FK
+
+Scenario: down_supprime_la_table
+  Given une base migrée par `real_db()` et un `SchemaManager` sur sa connexion
+  When le `down` de cette migration est appelé
+  Then `PRAGMA table_info(vanyline_projects)` ne retourne plus aucune ligne

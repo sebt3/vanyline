@@ -1,0 +1,114 @@
+Spec: Migration m20261023_000002_create_vanyline_sandboxes
+
+Purpose:
+  Seizième migration de la chaîne de `./mod.sdd` : DDL de la table d'IDENTITÉ des Sandboxes,
+  `vanyline_sandboxes`. Comme pour `vanyline_projects` (`./m20261023_000001_create_vanyline_projects.sdd`),
+  la CR `Sandbox` reste la seule golden source de sa spec et de son status ; la table ne porte que
+  l'identité nécessaire aux clés étrangères des tables qui s'y rattachent. Elle résout la
+  collision de noms constatée le 2026-10-23 : `name` (nom affiché) est unique PAR PROJET, tandis
+  que `cr_name` (`metadata.name` technique de la CR, `<projet>-<nom>`, cf. `../naming.sdd`) est
+  unique par propriétaire — la CR vit dans le namespace de l'Owner, partagé par tous ses projets.
+  Fichier purement DDL ; contrat de schéma de l'entité sœur `../db/entities/sandboxes.sdd`.
+
+Owns:
+  ./m20261023_000002_create_vanyline_sandboxes.rs
+
+Can read:
+  ./mod.rs, ../db/test_support.rs, ../db/entities/sandboxes.rs,
+  ./m20261023_000001_create_vanyline_projects.rs — la table référencée par la FK `project_id`.
+
+Exposes:
+  @Migration — `pub struct` (privée au module `migration`), `#[derive(DeriveMigrationName)]`.
+  @MigrationTrait::up / @MigrationTrait::down.
+  @Sandbox — enum privée `DeriveIden` : `Table` (iden `vanyline_sandboxes`), `Id`, `OwnerId`,
+    `ProjectId`, `Name`, `CrName`, `MissingSince`, `CreatedAt`.
+  @Project, @User — enums privées `DeriveIden` re-déclarant `vanyline_projects` / `id` et
+    `miryad_users` / `id`.
+
+Returns:
+  `@Result<(), @sea_orm::DbErr>`, `DbErr` propagé brut.
+
+Must:
+  Produire dans `up` exactement un `CREATE TABLE IF NOT EXISTS vanyline_sandboxes`, rien d'autre.
+  Colonnes, dans cet ordre :
+    - `id` : `integer()` NOT NULL, `auto_increment()`, clé primaire ;
+    - `owner_id` : `integer()` NOT NULL — utilisateur propriétaire (dénormalisé depuis le projet
+      pour porter l'unicité de `cr_name` par propriétaire) ;
+    - `project_id` : `integer()` NOT NULL ;
+    - `name` : `string()` NOT NULL — nom affiché, unique dans le projet ;
+    - `cr_name` : `string()` NOT NULL — `metadata.name` de la CR `Sandbox` ;
+    - `missing_since` : `timestamp_with_time_zone()` NULLABLE, sans défaut ;
+    - `created_at` : `timestamp_with_time_zone()` NOT NULL, défaut `current_timestamp`.
+  FK `owner_id` → `miryad_users(id)` `ON DELETE CASCADE`.
+  FK `project_id` → `vanyline_projects(id)` `ON DELETE CASCADE` : supprimer l'identité d'un
+    projet emporte celles de ses sandboxes (arbitrage 2026-10-23, `/vanyline.sdd`).
+  Deux unicités composites posées dans le `CREATE TABLE`, chacune par un `Index::create()` nommé
+    portant `.unique()` : `uq_vanyline_sandboxes_project_name` sur `(project_id, name)` et
+    `uq_vanyline_sandboxes_owner_cr_name` sur `(owner_id, cr_name)`.
+  Rester double-compatible PostgreSQL / SQLite ; `down` = `DROP TABLE vanyline_sandboxes` seul.
+  Être appliquée APRÈS `m20261023_000001` (la FK `project_id` en dépend).
+
+Must not:
+  Ajouter une colonne reflétant la spec ou le status de la CR (branche, toolchains, phase…).
+  Utiliser `.index(...)` sans `.unique()` dans le `Table::create()`.
+  Insérer des lignes (rattrapage = réconciliation) ni émettre un DDL autre que `CREATE TABLE` /
+    `DROP TABLE`.
+  Modifier ce `up` une fois appliqué.
+
+Depends on:
+  `sea-orm-migration` 2, `async_trait`.
+  ./mod.sdd — position (seizième).
+  ./m20261023_000001_create_vanyline_projects.sdd — table référencée, ordre.
+  ../db/entities/sandboxes.sdd — contrat bilatéral.
+  ../naming.sdd — construction de `cr_name`.
+
+Tasks:
+  [ ] Dériver les tests des Scenario dans `./mod.rs` (module `identity_migrations`), les voir
+    échouer, puis écrire la migration et l'enregistrer en seizième position.
+
+Done when:
+  Chaque Scenario est couvert par un test vert et la batterie de `/AGENTS.md` passe.
+
+Scenario: ddl_applique_sur_une_vraie_base
+  Given une base SQLite réelle migrée par `real_db()`
+  When on lit `PRAGMA table_info(vanyline_sandboxes)`
+  Then exactement les colonnes `id`, `owner_id`, `project_id`, `name`, `cr_name`, `missing_since`,
+    `created_at` dans cet ordre ; `missing_since` seule NULLABLE ; `pk` = 1 pour `id` seul
+
+Scenario: meme_nom_dans_deux_projets
+  Given un utilisateur 1 avec deux projets `a` et `b`
+  When on insère une sandbox `name = 'main', cr_name = 'a-main'` dans `a` puis
+    `name = 'main', cr_name = 'b-main'` dans `b`
+  Then les deux insertions réussissent (c'est le cas d'usage qui échouait avant le 2026-10-23)
+
+Scenario: nom_unique_dans_un_projet
+  Given une sandbox `name = 'main', cr_name = 'a-main'` dans le projet `a`
+  When on insère une seconde sandbox `name = 'main', cr_name = 'a-main2'` dans le même projet
+  Then l'insertion est rejetée (contrainte `(project_id, name)`)
+
+Scenario: cr_name_unique_par_proprietaire
+  Given un utilisateur 1 avec deux projets `a` et `a-b`, une sandbox `name = 'b-c', cr_name = 'a-b-c'`
+    dans `a`
+  When on insère `name = 'c', cr_name = 'a-b-c'` dans `a-b`
+  Then l'insertion est rejetée (contrainte `(owner_id, cr_name)`) ; un utilisateur 2 peut en
+    revanche avoir un `cr_name = 'a-b-c'`
+
+Scenario: supprimer_le_projet_emporte_ses_sandboxes
+  Given un projet avec une sandbox
+  When la ligne du projet est supprimée de `vanyline_projects`
+  Then la sandbox a disparu
+
+Scenario: supprimer_l_utilisateur_emporte_tout
+  Given un utilisateur avec un projet et une sandbox
+  When l'utilisateur est supprimé de `miryad_users`
+  Then les lignes de `vanyline_projects` et `vanyline_sandboxes` ont disparu
+
+Scenario: projet_inconnu_rejete
+  Given une base migrée sans projet 99
+  When on insère une sandbox avec `project_id = 99`
+  Then l'insertion est refusée par la FK
+
+Scenario: down_supprime_la_table
+  Given une base migrée par `real_db()`
+  When le `down` de cette migration est appelé
+  Then `PRAGMA table_info(vanyline_sandboxes)` ne retourne plus aucune ligne

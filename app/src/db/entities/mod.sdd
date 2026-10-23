@@ -2,7 +2,7 @@ Spec: Db Entities
 
 Purpose:
   Module `entities` de la couche base de données de l'`app` : registre déclaratif des
-  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les douze
+  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les quinze
   sous-modules d'entités — aucun comportement propre, aucune réexportation, aucune
   fonction utilitaire : le contrat table ↔ entité (colonnes, clé primaire, relations)
   vit dans chaque fichier enfant (specs séparées en cours de rédaction, règle
@@ -17,11 +17,14 @@ Owns:
   ./mod.rs
 
 Structure:
-  ./mod.rs — douze déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
-    `pub mod agents;`, `pub mod chat_contexts;`, `pub mod conversations;`,
+  ./mod.rs — quinze déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
+    `pub mod agents;`, `pub mod app_settings;`, `pub mod chat_contexts;`, `pub mod conversations;`,
     `pub mod llm_providers;`, `pub mod mcp_servers;`, `pub mod messages;`,
     `pub mod model_profiles;`, `pub mod owner_links;`, `pub mod project_workflows;`,
-    `pub mod skills;`, `pub mod toolsets;`, `pub mod workflow_runs;`.
+    `pub mod projects;`, `pub mod sandboxes;`, `pub mod skills;`, `pub mod toolsets;`,
+    `pub mod workflow_runs;`.
+  ./projects.sdd, ./sandboxes.sdd — entités d'identité `projects` / `sandboxes` (tables
+    `vanyline_projects` / `vanyline_sandboxes`), 2026-10-23.
   ./agents.sdd — entité `agents` (table `vanyline_agents`), spec à venir.
   ./chat_contexts.sdd — entité `chat_contexts` (table `vanyline_chat_contexts`), spec à venir.
   ./conversations.sdd — entité `conversations` (table `vanyline_conversations`), spec à venir.

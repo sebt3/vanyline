@@ -1,0 +1,72 @@
+Spec: Projects Identity Entity
+
+Purpose:
+  Entité SeaORM `projects` de l'`app` : déclaration pure de la table d'identité
+  `vanyline_projects` (schéma contractualisé par
+  `../../migration/m20261023_000001_create_vanyline_projects.sdd`). Elle représente l'IDENTITÉ
+  d'un Project (clé, propriétaire, nom de la CR, première absence constatée) et jamais sa spec ni
+  son status : la CR Kubernetes reste la golden source (`/vanyline.sdd`, « Modèle de données
+  Project/Sandbox »). Elle existe pour que `project_workflows`, `workflow_runs` et
+  `chat_contexts` puissent s'y rattacher par clé étrangère (lots ultérieurs). Pas de
+  `MiryadResource` : l'entité n'est PAS exposée par le CRUD générique, seul le code de l'app
+  (réconciliateur, routes projets) l'écrit. Aucun comportement : pas de fonction, pas de hook.
+
+Owns:
+  ./projects.rs
+
+Can read:
+  ./mod.rs — déclaration `pub mod projects;`.
+  ./workflow_runs.rs — patron d'entité (attributs, `ActiveModelBehavior`).
+  ../../migration/m20261023_000001_create_vanyline_projects.rs — schéma miroir.
+
+Exposes:
+  @Model — ligne de `vanyline_projects`, `#[derive(Clone, Debug, PartialEq, Serialize,
+    Deserialize, DeriveEntityModel)]`, `#[sea_orm(table_name = "vanyline_projects")]` :
+    `id: i32` (`primary_key`) ; `owner_id: i32` ; `name: String` ; `missing_since:
+    Option<DateTimeUtc>` ; `created_at: DateTimeUtc`.
+  @Entity, @ActiveModel, @Column, @PrimaryKey — générés ; `Column` porte `Id`, `OwnerId`,
+    `Name`, `MissingSince`, `CreatedAt`.
+  @Relation — enum vide (aucune relation déclarée tant que les accès sont des filtres explicites).
+  @ActiveModelBehavior — impl vide.
+
+Must:
+  Porter `table_name = "vanyline_projects"` littéral, aligné sur l'iden de la migration.
+  Aligner noms et types des champs sur les colonnes DDL (`missing_since` nullable → `Option`).
+  Documenter chaque champ et le type (`missing_docs` est `warn`).
+  Porter un `#[allow(dead_code)]` justifié d'une ligne citant cette spec tant que les
+    consommateurs (réconciliateur, routes) ne sont pas livrés (permis temporaire,
+    `/tooling.sdd`).
+
+Must not:
+  Ajouter un champ reflétant la spec ou le status de la CR.
+  Implémenter `MiryadResource` ni dériver `utoipa::ToSchema` sans extension de cette spec.
+  Déclarer une relation SeaORM vers `miryad_users`.
+
+Depends on:
+  `sea-orm` 2 (`DeriveEntityModel`), `serde`, `chrono` (via `DateTimeUtc`).
+  ../../migration/m20261023_000001_create_vanyline_projects.sdd — schéma (bilatéral).
+  ./mod.sdd — déclaration du module.
+
+Tasks:
+  [ ] Écrire les tests des Scenario (module `cfg(test)` de `./projects.rs`, base `real_db()`),
+    les voir échouer, puis l'entité.
+
+Done when:
+  Chaque Scenario est couvert par un test vert et la batterie de `/AGENTS.md` passe.
+
+Scenario: insertion_et_relecture
+  Given une base `real_db()` avec un utilisateur 1
+  When on insère via l'`ActiveModel` un projet `(owner_id = 1, name = "demo")`, `missing_since` et
+    `created_at` non fournis à l'application, puis on le relit par `Entity::find_by_id`
+  Then `name` vaut "demo", `missing_since` vaut `None`, `created_at` est renseigné par le défaut
+    de la base
+
+Scenario: marquage_et_effacement_de_l_absence
+  Given un projet existant
+  When on met `missing_since` à un instant puis à `None` par `ActiveModel`
+  Then chaque relecture reflète la valeur écrite
+
+Scenario: filtre_par_proprietaire_et_nom
+  Given deux utilisateurs ayant chacun un projet nommé "demo"
+  When on filtre par `Column::OwnerId` et `Column::Name`
+  Then une seule ligne est retournée, celle du bon propriétaire

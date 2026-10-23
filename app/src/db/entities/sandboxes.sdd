@@ -1,0 +1,64 @@
+Spec: Sandboxes Identity Entity
+
+Purpose:
+  Entité SeaORM `sandboxes` de l'`app` : déclaration pure de la table d'identité
+  `vanyline_sandboxes` (schéma : `../../migration/m20261023_000002_create_vanyline_sandboxes.sdd`).
+  Elle représente l'IDENTITÉ d'une Sandbox (clé, propriétaire, projet, nom affiché, nom
+  technique de la CR, première absence constatée) et jamais sa spec ni son status : la CR est la
+  golden source (`/vanyline.sdd`). Les clés étrangères des runs de workflow et des contextes de
+  chat s'y rattacheront dans un lot ultérieur. Pas de `MiryadResource`. Aucun comportement.
+
+Owns:
+  ./sandboxes.rs
+
+Can read:
+  ./mod.rs, ./projects.rs, ./workflow_runs.rs (patron),
+  ../../migration/m20261023_000002_create_vanyline_sandboxes.rs.
+
+Exposes:
+  @Model — ligne de `vanyline_sandboxes`, mêmes dérivations que `./projects.sdd`,
+    `#[sea_orm(table_name = "vanyline_sandboxes")]` : `id: i32` (`primary_key`) ; `owner_id: i32` ;
+    `project_id: i32` ; `name: String` (nom affiché, unique par projet) ; `cr_name: String`
+    (`metadata.name` de la CR, unique par propriétaire) ; `missing_since: Option<DateTimeUtc>` ;
+    `created_at: DateTimeUtc`.
+  @Entity, @ActiveModel, @Column, @PrimaryKey — générés.
+  @Relation — enum vide. @ActiveModelBehavior — impl vide.
+
+Must:
+  Porter `table_name = "vanyline_sandboxes"` littéral et aligner champs/types sur le DDL.
+  Documenter chaque champ et le type ; porter le `#[allow(dead_code)]` justifié (cf.
+    `./projects.sdd`) tant qu'aucun consommateur n'est livré.
+
+Must not:
+  Ajouter un champ reflétant la spec ou le status de la CR (branche, toolchains, phase).
+  Implémenter `MiryadResource`, dériver `ToSchema`, ni déclarer de relation SeaORM.
+
+Depends on:
+  `sea-orm` 2, `serde`, `chrono`.
+  ../../migration/m20261023_000002_create_vanyline_sandboxes.sdd — schéma (bilatéral).
+  ./projects.sdd — table référencée par `project_id`.
+
+Tasks:
+  [ ] Écrire les tests des Scenario (module `cfg(test)` de `./sandboxes.rs`), les voir échouer,
+    puis l'entité.
+
+Done when:
+  Chaque Scenario est couvert par un test vert et la batterie de `/AGENTS.md` passe.
+
+Scenario: insertion_et_relecture
+  Given une base `real_db()` avec un utilisateur 1 et un projet "a"
+  When on insère une sandbox `(owner_id, project_id, name = "main", cr_name = "a-main")` puis on
+    la relit
+  Then tous les champs valent ce qui a été écrit, `missing_since` vaut `None`, `created_at` est
+    renseigné
+
+Scenario: meme_nom_affiche_dans_deux_projets
+  Given deux projets "a" et "b" du même utilisateur
+  When on insère "main" dans chacun avec `cr_name` "a-main" et "b-main"
+  Then les deux lignes existent ; filtrer par `Column::ProjectId` et `Column::Name` retourne
+    chaque fois la ligne du bon projet
+
+Scenario: collision_de_cr_name_rejetee
+  Given une sandbox de cr_name "a-main" pour un utilisateur
+  When on insère une autre sandbox du même utilisateur avec le même `cr_name`
+  Then l'insertion échoue (contrainte unique)
