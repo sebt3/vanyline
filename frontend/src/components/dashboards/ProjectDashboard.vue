@@ -298,7 +298,6 @@ async function deleteSandbox(name: string) {
             Nouvelle sandbox
           </button>
           <button class="btn btn-back" @click="router.push('/')">Retour</button>
-          <button class="btn btn-settings" @click="router.push('/settings')">Paramètres</button>
           <button
             class="btn btn-assistant"
             :aria-expanded="assistantOpen"
@@ -553,7 +552,6 @@ h1 {
 }
 
 .page-actions .btn-back,
-.page-actions .btn-settings,
 .page-actions .btn-assistant {
   background: var(--surface-2);
   color: var(--text);

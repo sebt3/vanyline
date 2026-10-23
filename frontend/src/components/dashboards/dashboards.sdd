@@ -15,6 +15,8 @@ Purpose:
 Owns:
   ./HomeDashboard.vue
   ./ProjectDashboard.vue
+  ./HomeDashboard.spec.ts
+  ./ProjectDashboard.spec.ts
   ./viewport.ts
 
 Can read:
@@ -64,7 +66,8 @@ Must:
 
   Habillage de la refonte (2026-10-21, cf. ../shell/shell.sdd) : les deux écrans s'affichent dans la
     coquille commune (rail / barre d'onglets fournis par ./App.vue) et n'utilisent que les jetons de
-    `theme.css`. Plus de bouton « Paramètres » sur l'accueil (le rail le porte) ; le bouton
+    `theme.css`. Plus de bouton « Paramètres » sur l'accueil NI sur le projet (le rail porte l'accès
+    aux réglages globaux ; l'ancien bouton du projet y menait par erreur) ; le bouton
     « Assistant » reste dans l'en-tête de page et ouvre `AssistantPanel` (colonne à droite à partir
     de `md`, feuille en dessous) qui enveloppe `ContextChat` — plus de panneau d'assistant propre à
     chaque dashboard.
@@ -146,6 +149,12 @@ Scenario: accueil_cartes_sans_tableau
   Then trois cartes (aucun élément `table`), l'état de clonage visible sur la carte concernée, et
     aucun bouton « Paramètres »
 
+Scenario: projet_sans_bouton_parametres
+  Given ProjectDashboard d'un projet
+  When l'écran s'affiche
+  Then aucun bouton « Paramètres » (ni classe `.btn-settings`) n'est présent dans l'en-tête, et
+    « Retour » y est toujours
+
 Scenario: assistant_dans_le_panneau_commun
   Given HomeDashboard ou ProjectDashboard
   When l'utilisateur clique sur « Assistant »
@@ -157,5 +166,6 @@ Tasks:
     jetons de thème. Arbitrages : libellés conservés « IDE » (Scenario deux_actions) et « En cours »
     (clonage) ; l'accueil lit aussi `/api/sandboxes` pour les pastilles (rafraîchi par le hub
     d'événements) ; pas d'état d'erreur de clonage ni de progression mesurée (l'API ne fournit que
-    `status.cloned`) ; « Paramètres » et « Retour » restent dans l'en-tête du projet.
+    `status.cloned`) ; « Retour » reste dans l'en-tête du projet. Le bouton « Paramètres » du projet est RETIRÉ
+    (2026-10-23) : il ouvrait la configuration globale, déjà accessible depuis le rail.
   [ ] Vérification navigateur (390 px / 1280 px) au smoke test : non faite.

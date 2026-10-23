@@ -332,7 +332,7 @@ describe('ProjectDashboard', () => {
     expect(router.currentRoute.value.path).toBe('/p/foo');
   });
 
-  it('cliquer Retour → / ; cliquer Paramètres → /settings', async () => {
+  it('cliquer Retour → /', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     routeFetch(fetchSpy, [
       mockProjectFetch('foo'),
@@ -356,13 +356,30 @@ describe('ProjectDashboard', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
     expect(router.currentRoute.value.path).toBe('/');
+  });
 
-    // Paramètres
-    const settingsBtn = wrapper.find('.btn-settings');
-    await settingsBtn.trigger('click');
+  it('projet_sans_bouton_parametres : aucun bouton Paramètres dans l\'en-tête, Retour présent', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo'),
+      { url: '/api/sandboxes', method: 'GET', body: [] },
+    ]);
+
+    const router = createTestRouter();
+    await router.push('/p/foo');
+    await router.isReady();
+
+    const wrapper = mount(ProjectDashboard, {
+      global: { plugins: [router] },
+      props: { projectName: 'foo' },
+    });
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
-    expect(router.currentRoute.value.path).toBe('/settings');
+
+    expect(wrapper.find('.btn-settings').exists()).toBe(false);
+    const labels = wrapper.findAll('button').map((b) => b.text().trim());
+    expect(labels).not.toContain('Paramètres');
+    expect(wrapper.find('.btn-back').exists()).toBe(true);
   });
 
   it('création en modale : dialog apparaît → remplir Nom + Branche → POST avec project: projectName → dialog fermé', async () => {
