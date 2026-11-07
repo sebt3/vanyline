@@ -112,6 +112,14 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
     - **Source:** décision du développeur, 2026-11-07
     - **Verified by:** `AC-5`
 
+## Paysage des Solutions
+
+- `cli/hote` : l'hôte lymaille (stockage par fichiers, secrets, contexte dérivé, jeton d'Owner, journal d'audit). Écrite.
+- `cli/chat` : le TUI, l'adaptateur d'événements, `chat --context --sandbox`. À écrire.
+- `cli/batch` : `run` et `script`. À écrire.
+- `cli/sync` : `sync push` et `sync pull` de `.vanyline/`. À écrire.
+- `cli/objets` : les commandes `owner`, `project` et `sandbox`. À écrire.
+
 ## Décisions du domaine
 
 - **DEC-1 - Le serveur RPC est conservé**
@@ -183,7 +191,10 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 
 - **DEC-11 - La synchronisation de `.vanyline/` est explicite, dans deux sens séparés**
     - **Context:** `.vanyline/` existe en deux copies, locale et dans le worktree de la sandbox, et l'agent peut y écrire
-      pendant une session. La synchronisation est aussi ce qui permet l'échange avec `app` (`DEC-4`).
+      pendant une session. Cas d'usage final : deux développeurs travaillent sur des projets communs, chacun sur sa propre
+      infrastructure et sa propre instance d'`app` ; le partage de leurs configurations passe par le `.vanyline/` du
+      projet, versionné dans git. L'importer, en CLI ou dans `app`, est par définition une action humaine (ou d'un agent de
+      configuration non productif). La synchronisation est aussi ce qui permet l'échange avec `app` (`DEC-4`).
     - **Decision:** deux commandes lancées par l'utilisateur, `sync push` et `sync pull`, jamais de réconciliation
       automatique : ce que l'agent écrit en contexte productif ne remonte en local que par une action humaine, après
       avoir vu le diff (séparation des rôles, `app#DEC-3`). Le périmètre est tout `.vanyline/`, sans secrets : ceux-ci
