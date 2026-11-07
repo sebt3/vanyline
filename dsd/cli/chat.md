@@ -100,6 +100,13 @@ en cours de session.
   son contexte.
     - **Source:** `app#DEC-3`, `agent-sessions#BR-9`
 
+- **FR-12 - MUST:** Avec `--sandbox`, la barre d'état affiche le nombre de fichiers modifiés dans le worktree de la sandbox,
+  lu par `GET /git/status` avec le jeton d'Owner après chaque tour ; sans sandbox, elle n'affiche rien. Le raisonnement
+  du modèle n'est pas affiché pendant le tour. Les sous-agents apparaissent comme des lignes de statut rafraîchies par
+  sondage du registre des runs de lymaille.
+    - **Source:** décision du développeur, 2026-11-07
+    - **Verified by:** `AC-8`
+
 - **FR-11 - MUST:** À la sortie, le terminal est restauré dans tous les cas (normale, erreur, panique, signal), puis une
   dernière ligne donne l'identifiant de la session et la commande de reprise.
     - **Source:** comportement actuel conservé (`SpecDD /cli/src/tui/mod.sdd`)
@@ -109,8 +116,7 @@ en cours de session.
 
 Le TUI garde ses six modules. La frontière avec lymaille est un `EventSink` (`TuiSink`) qui transmet les `Event` de la
 session à la boucle sous forme d'`Action`. Le modèle de transcription change : l'élément « appel d'outil » devient
-« exécution de script » (`FR-5`), l'élément « sous-agent » est conservé tant que les événements de délégation le permettent
-(`OI-2`). La boucle lance un tour sur un `TurnRunner` de lymaille dans une tâche dédiée ; un seul tour à la fois (`FR-2`
+« exécution de script » (`FR-5`), l'élément « sous-agent » devient une ligne de statut sondée (`FR-12`). La boucle lance un tour sur un `TurnRunner` de lymaille dans une tâche dédiée ; un seul tour à la fois (`FR-2`
 passe par l'entrée utilisateur, pas par un second tour). L'éditeur et le rendu markdown ne changent pas.
 
 ## Décisions
@@ -134,28 +140,36 @@ remplacer : `SpecDD /cli/src/chat.sdd` (la boucle REPL et le one-shot passent à
 Le mode REPL non plein écran disparaît avec `chat.rs` : `run` couvre l'usage sans TUI. Les options `--toolbox`, `-m`,
 `-t` et `--agent` du chat sont retirées ou déplacées (`--toolbox` devient `--sandbox`, `-m` et `-t` vont à `run`).
 
+- **DEC-2 - Pas de raisonnement en direct ; sous-agents par sondage**
+    - **Context:** lymaille 0.2.0 conserve le raisonnement dans l'historique mais n'émet aucun événement de flux ; les
+      sous-agents n'émettent que `RunEnded` et `RunInterrupted`.
+    - **Decision:** le TUI n'affiche pas le raisonnement pendant le tour et sonde le registre des runs pour les
+      sous-agents. Aucune demande à lymaille pour l'instant.
+    - **Source:** décision du développeur, 2026-11-07
+
+- **DEC-3 - L'état sauvegardé par lymaille fait foi, annulation comprise**
+    - **Decision:** un tour annulé est sauvegardé par lymaille (issue `Cancelled`, réponse finale vide) ; la CLI n'
+      ajoute aucune règle de non-sauvegarde et la transcription affiche l'interruption.
+    - **Consequences:** la reprise connaît les scripts déjà exécutés et les variables du pad, dont les effets sur la
+      sandbox ont eu lieu.
+    - **Alternatives:** ne pas sauvegarder un tour annulé, comme l'ancien TUI (écarté : la session reprise ignorerait des
+      actions réellement faites).
+    - **Source:** décision du développeur, 2026-11-07 ; `agent-sessions/session#FR-5`
+
 ## Acceptation et vérification
 
 - **AC-1:** `chat --context <projet>` sans terminal échoue avec une erreur d'usage ; avec un terminal, la session s'ouvre
   sur le contexte demandé.
 - **AC-2:** Un message envoyé pendant un tour actif n'ouvre pas de second tour et apparaît dans la transcription marqué
   comme envoyé pendant le tour.
-- **AC-3:** Ctrl+C pendant un tour l'annule, la transcription garde le texte déjà reçu, et le TUI repasse au repos.
+- **AC-3:** Ctrl+C pendant un tour l'annule, la transcription garde le texte déjà reçu, le TUI repasse au repos, et la
+  session reprise ensuite connaît les scripts déjà exécutés.
 - **AC-4:** Un tour qui exécute un script affiche une ligne de statut ; la déplier montre le script complet et sa sortie.
 - **AC-5:** `/agent` produit une notice « commande inconnue » ; `//ceci` envoie le message `/ceci`.
 - **AC-6:** `chat -c --context <projet>` reprend la dernière session de ce contexte avec son historique affiché.
+- **AC-8:** Après un tour qui modifie un fichier de la sandbox, la barre d'état montre un fichier modifié ; sans
+  `--sandbox`, elle ne montre rien.
 - **AC-7:** Un signal ou une panique restaure le terminal avant tout autre affichage.
-
-## Open Issues
-
-- **OI-1:** **Résumé git dans la barre d'état.** Le TUI actuel lance `git diff --shortstat` dans le répertoire courant ;
-  avec une sandbox, le code modifié est dans son worktree, pas en local. Source du résumé : le répertoire local, le relais
-  git de la sandbox (`/git/*`), ou rien. **TBD :** non repris tant que non tranché.
-- **OI-2:** **Raisonnement et sous-agents.** Je n'ai pas relevé dans `EventKind` de lymaille d'événement de fragment de
-  raisonnement ni de progression d'un sous-agent (la délégation a ses propres types : `RunProgress`, `WatchEvent`).
-  L'affichage replié du raisonnement et l'imbrication des sous-agents dépendent de ce qui est exposé. **TBD.**
-- **OI-3:** **Tour annulé.** Le TUI actuel ne persiste pas un tour annulé ; lymaille a sa propre règle de sauvegarde
-  d'état. Aligner la CLI sur lymaille, ou garder la règle actuelle. **TBD.**
 
 ## Références
 
