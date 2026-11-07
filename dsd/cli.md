@@ -98,15 +98,16 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 
 - **FR-4 - MUST:** `vanyline script <fichier.rhai> --context <projet> --sandbox <nom>` exécute le script avec les
   modules du MCP de la sandbox, sans LLM. Le résultat du script va sur la sortie standard, les erreurs sur la sortie
-  d'erreur, et le code de retour reflète le succès. Le délai d'exécution des commandes est configurable.
+  d'erreur, et le code de retour reflète le succès. Le délai d'une commande de la sandbox est fixé par le script lui-même
+  (`cli/batch#DEC-2`).
     - **Source:** décision du développeur, 2026-11-07
 
 - **FR-5 - MUST:** La CLI permet de lister, reprendre et supprimer ses sessions : lymaille laisse ces opérations à l'hôte.
     - **Source:** `lymaille` `agent-sessions#CON-1`
 
 - **FR-6 - MUST:** `vanyline sync push` copie le `.vanyline/` local vers le worktree de la sandbox, et `vanyline sync pull`
-  le copie de la sandbox vers le local, par le MCP de la sandbox (`read_file`, `write_file`, `delete_file`,
-  `list_directory`). Si les deux copies ont divergé depuis la dernière synchronisation, la commande n'écrit rien et
+  le copie de la sandbox vers le local, par l'accès fichier de la sandbox (`/ws/fs`, lecture brute), avec un ticket obtenu par
+  le jeton d'Owner (`cli/sync#DEC-1`). Si les deux copies ont divergé depuis la dernière synchronisation, la commande n'écrit rien et
   montre le diff ; `--force-local` ou `--force-remote` tranche explicitement. La CLI refuse de synchroniser un fichier
   qui contient une valeur ressemblant à un secret.
     - **Source:** décision du développeur, 2026-11-07
@@ -117,7 +118,7 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 - `cli/hote` : l'hôte lymaille (stockage par fichiers, secrets, contexte dérivé, jeton d'Owner, journal d'audit). Écrite.
 - `cli/chat` : le TUI, l'adaptateur d'événements, `chat --context --sandbox`. Écrite.
 - `cli/batch` : `run` et `script`. Écrite.
-- `cli/sync` : `sync push` et `sync pull` de `.vanyline/`. À écrire.
+- `cli/sync` : `sync push` et `sync pull` de `.vanyline/`. Écrite.
 - `cli/objets` : les commandes `owner`, `project` et `sandbox`. À écrire.
 
 ## Décisions du domaine

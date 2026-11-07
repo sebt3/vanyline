@@ -43,15 +43,22 @@ approbation en cours de session.
   une décision de la CLI, par le handle d'annulation.
     - **Source:** `agent-sessions/session#FR-6`
 
+- **CON-3:** `execute_command` a un paramètre `timeout_secs` par appel (`0` : aucun délai), annoncé « default 30 » dans son
+  schéma ; une absence de paramètre donne pourtant 30 dans l'ancien CLI et aucun délai dans la sandbox
+  (`SpecDD /tools/src/mcp.sdd`, tâche `[?]`). Ce défaut incohérent relève de `tools` et de `sandbox`, non de la CLI.
+    - **Source:** `SpecDD /tools/src/mcp.sdd`
+
 - **CON-2:** Une valeur de secret ne passe jamais en paramètre de ligne de commande : elle apparaîtrait dans l'historique du
   shell et la liste des processus.
     - **Source:** `cli/hote#CON-3`
 
 ## Exigences fonctionnelles
 
-- **FR-1 - MUST:** `vanyline run <message> --context <projet> [--sandbox <nom>]` ouvre une session neuve par `cli/hote`
+- **FR-1 - MUST:** `vanyline run <message> --context <projet> [--sandbox <nom>]` ouvre une session par `cli/hote`
   (`hote#FR-7`), exécute un seul tour avec l'agent du contexte et rend la réponse. Le message est lu sur l'entrée standard
-  quand l'argument vaut `-`. La session est sauvegardée et son identifiant est écrit sur la sortie d'erreur.
+  quand l'argument vaut `-`. Sans option la session est neuve ; `-c/--continue` reprend la dernière session du contexte et
+  `--resume <identifiant>` une session précise, comme en `chat` (`chat#FR-9`). La session est sauvegardée et son
+  identifiant est écrit sur la sortie d'erreur.
     - **Source:** `cli#FR-3` ; décision du développeur, 2026-11-07
     - **Verified by:** `AC-1`
 
@@ -88,6 +95,10 @@ approbation en cours de session.
     - **Source:** `cli#FR-4`
     - **Verified by:** `AC-3`
 
+- **FR-9 - MUST:** `script` ne fixe aucun délai par commande de la sandbox : un script (ou un agent) passe `timeout_secs`
+  dans son appel d'`execute_command` quand il en a besoin. La CLI n'impose que le délai global de `-t` (`FR-7`).
+    - **Source:** décision du développeur, 2026-11-07 ; `cli#FR-4`
+
 - **FR-8 - MUST:** Codes de sortie, communs à `run` et `script` : 0 succès ; 1 échec du tour ou du script ; 2 usage invalide ;
   3 délai dépassé ; 130 interruption par l'utilisateur.
     - **Source:** décision du développeur, 2026-11-07
@@ -116,6 +127,14 @@ codes de sortie (`FR-8`) à partir de l'issue de lymaille (`Valid`, `Failed`, `C
       (écarté : une règle de plus sans besoin avéré).
     - **Source:** décision du développeur, 2026-11-07
 
+- **DEC-2 - Le délai d'une commande de la sandbox est l'affaire du script, pas de la CLI**
+    - **Context:** `execute_command` prend déjà `timeout_secs` par appel ; ajouter une option de la CLI exigerait de
+      surcharger les fonctions MCP générées par lymaille.
+    - **Decision:** aucune option de délai par commande dans la CLI ; `-t` borne l'ensemble.
+    - **Alternatives:** option `--command-timeout` qui injecte un défaut (écartée : un wrapper de plus) ; attendre un défaut
+      unique dans la sandbox (écartée : bloquerait `script`).
+    - **Source:** décision du développeur, 2026-11-07
+
 ## Réalisation SpecDD
 
 À écrire sous `cli/src/` (**ASSUMPTION** de découpage) : une spec pour `run`, une pour `script`, une pour les codes de
@@ -136,15 +155,8 @@ timeouts cessent d'être portés par `VNL-CLI-001` mais par le code de sortie 3.
 - **AC-3:** Un tour ou un script plus long que `-t` est annulé et la commande sort avec le code 3 ; Ctrl+C sort avec 130.
 - **AC-4:** Un script correct écrit son texte et sort avec 0 ; un script en erreur écrit la classe et la position sur la
   sortie d'erreur et sort avec 1.
+- **AC-6:** `run -c` après un premier `run` sur le même contexte reprend la session : l'agent connaît l'échange précédent.
 - **AC-5:** `--param api_key=<valeur ressemblant à un secret>` est refusé avant toute exécution.
-
-## Open Issues
-
-- **OI-1:** **Délai d'exécution des commandes de la sandbox.** `execute_command` a un délai par défaut de 30 s, trop court
-  pour un build ; `cli#FR-4` demande qu'il soit configurable. Reste à fixer le mécanisme (option de la CLI transmise au
-  module, ou réglage de la sandbox) et son nom. **TBD.**
-- **OI-2:** **Reprise de session en `run`.** `run` ouvre toujours une session neuve ; une conversation en plusieurs appels
-  en batch exigerait `--resume`. **TBD** : à ajouter si un besoin apparaît.
 
 ## Références
 
