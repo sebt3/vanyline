@@ -173,7 +173,7 @@ Hors périmètre, par décision :
 
 ## Paysage des Solutions (proposition de découpage)
 
-Aucune Solution n'est écrite ; recommandation à discuter.
+Huit Solutions sont écrites (reverse depuis les specs existantes, 2026-11-07) ; `sandbox/threat-model` reste à écrire avec le développeur.
 
 - `sandbox/runtime` : image de base, toolchains, injection d'environnement, exécution des commandes, venv.
 - `sandbox/access` : jeton d'Owner, tickets, ports principal et d'exploitation.
