@@ -112,8 +112,8 @@ Hors périmètre, par décision :
     - **Verified by:** `AC-2`
 
 - **BR-5 - MUST:** Une toolchain devient utilisable par injection d'environnement au démarrage (`PATH`,
-  `LD_LIBRARY_PATH`, variables propres à la toolchain), jamais par magie ; ce qui doit être inscriptible est hors du
-  volume, dans le PVC de l'Owner.
+  `LD_LIBRARY_PATH`, variables propres à la toolchain), posée par le controller, jamais par magie ; ce qui doit être
+  inscriptible est hors du volume (par exemple `CARGO_HOME` dans le cache du Project).
     - **Source:** `AGENTS.md`, composant sandbox
     - **Verified by:** `AC-3`
 
@@ -242,8 +242,9 @@ ne les amende pas. L'auth par jeton d'Owner est contractée mais pas entièremen
   confiance** (`app#BR-3`). **TBD :** règle à écrire.
 - **OI-4:** **Outillage SpecDD (`FR-6`).** Quelle image toolchain l'embarque, à quelle version, et comment le MCP le
   présente à l'agent. **TBD.**
-- **OI-5:** **Spec d'`auth` partiellement livrée.** Reste à implémenter ce que `vanyline.sdd` liste comme chantier ouvert
-  (« auth Owner-SA seule »). **TBD :** ordonnancement.
+- **OI-5:** **Statut de l'`auth`.** `SpecDD /sandbox/src/auth.sdd` et `SpecDD /sandbox/src/lib.sdd` la marquent faite et le
+  code câble `require_auth` ; `vanyline.sdd` garde le chantier « auth Owner-SA seule » en `[ ]`. Décidé le 2026-11-07 : faire
+  passer le validator, puis cocher le chantier et fermer cet Open Issue. **TBD :** passage du validator à planifier.
 
 ## Références
 

@@ -32,8 +32,8 @@ Must:
     `POST /git/stage`, `POST /git/unstage`, `POST /git/commit`, `GET /git/branches`,
     `POST /git/branches`, `POST /git/checkout`, `DELETE /git/branches/{name}`,
     `POST /git/push`, `GET /git/log`, `GET /git/ssh-key`, `POST /git/ssh-key`,
-    `POST /git/merge`, `POST /git/merge/abort`, `POST /code-health/run`,
-    `GET /code-health/runs/{run_id}`, `GET /code-health/latest` (./health.sdd),
+    `POST /git/merge`, `POST /git/merge/abort`, `GET /code-health`,
+    `POST /code-health/refresh` (./health.sdd),
     `POST /ws/ticket`.
     AUCUNE route publique sur ce port : ni `/health`, ni `/metrics`, ni métadonnées OAuth —
     ils sont sur le port d'exploitation (@build_ops_app, plus bas).
@@ -138,7 +138,7 @@ Exposes:
   Modules publics du crate (racine de modules, chacun sous sa spec) : @auth, @config, @git,
     @lsp, @lsp_client, @maint, @mcp, @telemetry, @tools_impl, @venv, @ws.
   @AppState — état partagé (`config`, `auth`, `tickets`, `lsp`, `fs_events`, `fs_flush`, et
-    le registre des runs de santé de ./health.sdd), `Clone`.
+    l'état de santé du code de ./health.sdd), `Clone`.
   @LspManager — réexportation de @crate::lsp::LspManager à la racine du crate.
   @FS_EVENTS_CAPACITY (`64`), @fs_events_channel, @FS_FLUSH_TIMEOUT_SECS (`2`),
     @fs_push_channels.

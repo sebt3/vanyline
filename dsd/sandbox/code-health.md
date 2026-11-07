@@ -205,6 +205,12 @@ Presets (SpecDD /health/src/checks.sdd, Returns) :
     - **Decision:** champ absent, valeur ou `null` (double `Option` avec désérialisation dédiée) ; `null` n'est jamais refusé (FR-5).
     - **Source:** SpecDD /sandbox/src/health.sdd, Tasks `[x]` 2026-10-14.
 
+- **DEC-11 - L'état unique `GET /code-health` et `POST /code-health/refresh` fait foi**
+    - **Context:** `SpecDD /sandbox/src/lib.sdd` listait une table avec `POST /code-health/run`, `GET /code-health/runs/{run_id}`, `GET /code-health/latest` et un registre de runs ; le code (`sandbox/src/lib.rs`) et `SpecDD /sandbox/src/health.sdd` portent un état unique `CodeHealth` lu par `GET /code-health` et recalculé par `POST /code-health/refresh`. Les consommateurs (nœud `gate` d'`app`, relais, `mcp_domain`) n'appellent que ces deux routes.
+    - **Decision:** le contrat est l'état unique de `health.sdd` ; la table de `lib.sdd` est corrigée en conséquence. Un registre de runs n'est pas promis.
+    - **Consequences:** l'historique des runs n'existe pas ; s'il devient un besoin, il sera une évolution décidée à part.
+    - **Source:** décision du développeur, 2026-11-07 ; `AGENTS.md` (« état toujours disponible, recalcul après un délai de calme »)
+
 ## Réalisation SpecDD
 
 - `SpecDD /sandbox/src/health.sdd` : cycle de vie, routes, outil MCP (FR-1 à FR-12, DEC-4, DEC-5, DEC-10). Implémentation : `sandbox/src/health.rs`, tests `sandbox/tests/health.rs`.
@@ -240,7 +246,6 @@ Presets (SpecDD /health/src/checks.sdd, Returns) :
 
 ## Open Issues
 
-- **OI-1 - Conflit d'autorité sur les routes et le registre (bloquant).** `SpecDD /sandbox/src/lib.sdd` (Must, table dite « exacte ») liste `POST /code-health/run`, `GET /code-health/runs/{run_id}` et `GET /code-health/latest`, et décrit un « registre des runs » dans `AppState`. `SpecDD /sandbox/src/health.sdd` et l'implémentation portent `GET /code-health` et `POST /code-health/refresh`, avec un état unique. **TBD :** arbitrage de l'Opérateur requis avant toute synchronisation ; aucun des deux n'est tranché ici.
 - **OI-2 - Deux types `HealthError` et deux jeux d'identifiants.** La crate définit `HealthError::InvalidRef` en `VNL-HLT-007` (`health/src/error.rs`). Le sandbox définit son propre `HealthError` (`VNL-SBX-CH-001` à `006`, dont `RefCheckUnavailable`, `sandbox/src/health.rs`). `SpecDD /sandbox/src/health.sdd` écrit « corps = `@Display` verbatim » ; `CH-003` n'existe dans aucune spec de crate. **TBD :** nom et périmètre de chaque enum, identifiant rendu en HTTP.
 - **OI-3 - Règle « ne pas écrire dans `root` » contre les outils.** `SpecDD /health/src/runner.sdd` (Must) interdit toute écriture dans `root`, mais `cargo` écrit `target/` par défaut et `ts-coverage-provider` lance `npm install` dans le workspace. `CARGO_TARGET_DIR` n'est pas contracté (runner, Tasks). **TBD :** la règle vise-t-elle `git status` seul, et où vont les artefacts de build ?
 - **OI-4 - Réécriture de `after` après expansion.** `ts-coverage` dépend de `ts-coverage-provider`. Après expansion, les ids deviennent `<id>:<workspace>` (checks.sdd), mais la réécriture de `after` n'est spécifiée nulle part. **TBD.**

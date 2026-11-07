@@ -180,6 +180,12 @@ execute_command ─────────────────► cwd confi
     - **Decision:** utilisateur `vanyline` UID 1000, `--home-dir /home/vanyline`, sans `--create-home`.
     - **Source:** `sandbox/Dockerfile` (commentaires) ; SpecDD /controller/src/owner.sdd (`HOME_MOUNT_PATH`)
 
+- **DEC-7 - Le code du controller fait foi pour l'environnement d'exécution**
+    - **Context:** `sandbox#BR-5` laisse entendre que la sandbox injecte l'environnement des toolchains ; `AGENTS.md` et `sandbox#BR-5` placent `CARGO_HOME` dans le PVC de l'Owner ; le manifeste de test pose `/workspace` et `/workspace/.cargo`. Le PVC home de l'Owner est petit (1Gi par défaut) alors qu'un cache cargo pèse des Gio.
+    - **Decision:** l'environnement des toolchains est injecté par le controller (`SpecDD /controller/src/sandbox.sdd`, presets de `controller/src/sandbox.rs`), pas par le serveur de la sandbox ; `CARGO_HOME` est `/project-cache/cargo`, dans le cache du Project partagé par ses sandboxes ; la racine de confinement est `/home/vanyline/workspace`. Les documents et le manifeste de test (`deploy/sandbox/sandbox-test.yaml`) sont alignés sur ce comportement.
+    - **Consequences:** `sandbox#BR-5` et `AGENTS.md` sont à corriger ; le manifeste de test est à aligner.
+    - **Source:** décision du développeur, 2026-11-07 ; SpecDD /controller/src/sandbox.sdd
+
 ## Réalisation SpecDD
 
 - `SpecDD /sandbox/src/venv.sdd` → `sandbox/src/venv.rs` (FR-8 à FR-10).
@@ -217,8 +223,6 @@ Vérification actuelle : tests de `venv.rs`, des presets (`controller/src/sandbo
 
 ## Open Issues
 
-- **OI-1 - Emplacement de `CARGO_HOME` (TBD) :** `AGENTS.md` (sandbox) et `sandbox#BR-5` / `sandbox#AC-3` placent cargo dans le PVC de l'Owner ; `controller/src/sandbox.sdd` pose `CARGO_HOME=/project-cache/cargo` (cache du Project, sous-chemin du PVC workspace) ; `deploy/sandbox/sandbox-test.yaml` pose `/workspace/.cargo`. Le preset `rust` ne pose pas la variable. Voisin de `workspaces/sandboxes#OI-14`.
-- **OI-2 - Racine de confinement (TBD) :** `config.sdd` et le controller (`VNL_SANDBOX_ROOT=/home/vanyline/workspace`) divergent de `deploy/sandbox/sandbox-test.yaml` (`/workspace`) ; la mise à jour du manifeste est une Tâche non cochée de `config.sdd`.
 - **OI-3 - Timeout par défaut de `execute_command` (TBD) :** `command.sdd` fixe le défaut serde à 0 (illimité) ; le schéma MCP annonce « default 30 » ; le harnais CLI force 30 ; le dispatch sandbox ne force rien. Sans `timeout_secs`, aucune limite (question ouverte dans `command.sdd`).
 - **OI-4 - Images du manifeste de test (TBD) :** `deploy/sandbox/sandbox-test.yaml` monte `docker.io/library/rust:slim-trixie` et `node:trixie-slim`, et non les images `vanyline-toolchains-*` publiées. Fixture obsolète ou contrat voulu ?
 - **OI-5 - Version de l'image python (TBD) :** `toolchains/python/Dockerfile` utilise `python:3.14-slim-trixie` ; son commentaire et `docs/architecture.md` disent `3.13`.

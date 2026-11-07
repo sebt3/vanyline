@@ -130,6 +130,12 @@ Composants : registre `Jobs` dans `@AppState`, sur le modèle de `@CodeHealth` ;
     - **Decision:** `/jobs` ne filtre pas le contenu du script ; la liste de ce que l'agent ne doit jamais faire est dans `sandbox#OI-1`.
     - **Source:** SpecDD /sandbox/src/jobs.sdd, Purpose ; `sandbox#BR-9`, `sandbox#DEC-3`, `app#DEC-3`
 
+- **DEC-7 - L'idempotence de `POST /jobs` est bornée à la vie du registre**
+    - **Context:** le registre est en mémoire ; l'éviction retire les jobs terminés au-delà de 20 (`MAX_FINISHED_KEPT`) ; le nœud `shell` d'`app` rejoue un step après un crash du moteur de workflow.
+    - **Decision:** l'idempotence sur `job_id` vaut tant que le job est dans le registre (jobs en cours et 20 jobs terminés), donc pendant la vie du pod. Un rejeu après éviction ou après redémarrage du pod peut relancer le script ; ce risque résiduel est assumé et nommé, et la spec ne promet pas davantage.
+    - **Consequences:** l'énoncé « ne lance jamais un second processus » de `SpecDD /sandbox/src/jobs.sdd` est à reformuler.
+    - **Source:** décision du développeur, 2026-11-07
+
 ## Réalisation SpecDD
 
 - `SpecDD /sandbox/src/jobs.sdd` : `sandbox/src/jobs.rs` (Owns), tests `sandbox/tests/jobs.rs` (FR-1 à FR-12).
@@ -152,7 +158,6 @@ Composants : registre `Jobs` dans `@AppState`, sur le modèle de `@CodeHealth` ;
 
 ## Open Issues
 
-- **OI-1 - Idempotence après éviction:** `Must` interdit un second processus, mais l'éviction au-delà de 20 retire le `job_id` du registre (Observed in: `sandbox/src/jobs.rs`) ; un `POST` ultérieur relance un processus. **TBD.**
 - **OI-2 - Rejeu avec corps différent:** la spec ne dit rien d'un `job_id` connu avec un `script`, `cwd` ou `env` différent ; le code rend 200. **TBD :** 200 seulement pour un corps identique, ou 409.
 - **OI-3 - Configurabilité du timeout maximal:** `Handles` dit « plafond configurable à 24 h », `Tasks` (DÉCIDÉ 2026-10-14) dit « configurables seulement sur besoin réel ». **TBD :** lequel fait foi.
 - **OI-4 - Préfixe absent sur `DELETE /jobs`:** `Exposes` dit « un préfixe vide est refusé » et « préfixe ABSENT = préfixe vide ». La lecture naturelle est 400 ; un préfixe absent annulerait tout sous une autre lecture. **TBD :** écrire le 400.
