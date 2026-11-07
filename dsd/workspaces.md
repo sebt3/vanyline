@@ -139,6 +139,8 @@ Hors périmètre, par décision :
 - `workspaces/network` : politiques réseau d'entrée et de sortie.
 - `workspaces/application` : déploiement d'`app` et de Restate.
 - `workspaces/identity` : lignes d'identité en base, adoption et suppression par réconciliation (réalisée dans `app`).
+- `workspaces/client` : la librairie d'interface avec le cluster et les sandboxes (`vanyline-lib`), partagée par `app` et la
+  CLI (`DEC-3`). À écrire.
 
 ## Décisions du domaine
 
@@ -150,6 +152,18 @@ Hors périmètre, par décision :
 - **DEC-2 - Quatre CRDs, une par état désiré distinct**
     - **Decision:** Owner, Project, Sandbox, Application, réconciliés en parallèle par un seul controller.
     - **Source:** `docs/architecture.md`, section « Opérateur Kubernetes »
+
+- **DEC-3 - `vanyline-lib` est la librairie d'interface avec le cluster et les sandboxes**
+    - **Context:** `vanyline-lib` portait le moteur LLM du monorepo, qui part (`app#DEC-1`) ; elle porte aussi le client
+      Kubernetes (`VnyK8sClient`, jeton d'Owner par TokenRequest), indépendant du LLM. `app` (relais de ticket, de git et de
+      santé du code) et la CLI (ticket, `/ws/fs`, `/git/status`, connexion MCP) appellent la même sandbox avec le même jeton.
+    - **Decision:** `vanyline-lib` reste, réduite à cette interface : le client Kubernetes et le client de la sandbox. Tout
+      code commun à `app` et à la CLI pour parler au cluster ou à une sandbox y vit, plutôt que d'être écrit deux fois. Sa
+      partie LLM (sessions, événements, MCP préfixé, modèles) est retirée au profit de lymaille.
+    - **Consequences:** la spec racine de la crate (`SpecDD /lib/src/lib.sdd`, qui la décrit encore comme cœur LLM, MCP et chat)
+      est à réécrire avant tout retrait. Le périmètre exact du client de la sandbox est à fixer dans la Solution
+      `workspaces/client`.
+    - **Source:** décision du développeur, 2026-11-07
 
 ## Transition et migration
 

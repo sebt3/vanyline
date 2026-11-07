@@ -206,6 +206,12 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
       fichiers non suivis).
     - **Source:** décision du développeur, 2026-11-07
 
+- **DEC-12 - Le client de la sandbox vit dans `vanyline-lib`**
+    - **Decision:** le code commun à la CLI et à `app` pour parler à une sandbox (ticket, accès fichier, git, MCP) et au
+      cluster (jeton d'Owner) est dans `vanyline-lib`, pas dans `cli`. La CLI l'utilise ; elle n'en garde que l'orchestration
+      de ses commandes.
+    - **Source:** décision du développeur, 2026-11-07 ; `workspaces#DEC-3`
+
 ## Transition et migration
 
 Les specs existantes de `cli/` décrivent l'état actuel (environ 16 700 lignes, surtout le chat et le TUI). Le TUI reste,
