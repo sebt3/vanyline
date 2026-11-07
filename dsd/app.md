@@ -386,10 +386,12 @@ le contexte, pas par une approbation en session ».
   dépôt voisin ; à confirmer au premier usage.
 - **OI-6:** **Outillage SpecDD dans la boîte à outils JS de la sandbox** (`FR-10`) : exigence portée par
   `sandbox#FR-6`, questions ouvertes dans `sandbox#OI-4`.
-- **OI-7:** **Transfert des agents et skills avec la CLI** (`cli#DEC-4`). La CLI est un hôte lymaille autonome ; seules
-  les définitions d'agents et de skills circulent entre elle et `app`, et ce transfert (import et export, dans les deux
-  sens) est de la responsabilité d'`app`. Format partagé porté par lymaille ; support (fichier, dépôt) et déclenchement
-  par action humaine hors session (séparation des rôles de `DEC-3`) : **TBD.**
+- **OI-7:** **Transfert du niveau partagé avec la CLI** (`cli#DEC-4`, `cli#DEC-11`). La CLI est un hôte lymaille autonome ;
+  tout le niveau partagé de `.vanyline/` (agents, skills, profils, providers, ContextType, ToolsetContext) circule entre
+  elle et `app`, sans secrets, et ce transfert (import et export, dans les deux sens) est de la responsabilité d'`app`.
+  Bornes à contractualiser : aucun secret, rien d'effectif avant promotion par une action humaine hors session après
+  revue (séparation des rôles, `DEC-3`), les droits ne venant jamais du workspace seul. Format porté par lymaille ;
+  support exact et déclenchement : **TBD.**
 
 ## Références
 

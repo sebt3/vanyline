@@ -135,12 +135,16 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
       workspace avec `vanyline-lib` ; la partie utile à la CLI est reportée dans `cli`.
     - **Source:** décision du développeur, 2026-11-07
 
-- **DEC-4 - Seuls agents et skills sont transférables entre la CLI et `app`**
-    - **Decision:** les définitions d'agents et de skills, au format lymaille, se transfèrent entre la CLI et `app`
-      (le support de l'échange est le `.vanyline/` de la sandbox, `DEC-11`). Le
-      transfert (import et export) est de la responsabilité d'`app`, dans les deux sens ; la CLI l'ignore. Providers,
-      modèles, serveurs MCP, toolsets accordés et sessions ne voyagent pas.
-    - **Source:** décision du développeur, 2026-11-07
+- **DEC-4 - Tout le niveau partagé se transfère entre la CLI et `app`, sans secrets, par promotion humaine**
+    - **Context:** la synchronisation de `.vanyline/` (`DEC-11`) est le support de l'échange avec `app` ; la limiter aux
+      agents et skills n'avait pas de sens, puisque le dossier contient aussi les profils, providers, ContextType et
+      ToolsetContext partagés.
+    - **Decision:** tout ce que contient le niveau partagé (agents, skills, profils, providers, ContextType,
+      ToolsetContext) se transfère entre la CLI et `app`. Le transfert (import et export, dans les deux sens) est de la
+      responsabilité d'`app` ; la CLI l'ignore. Deux bornes : les secrets n'y sont jamais (`DEC-9`, seuls des noms de
+      secrets, résolus par chaque hôte), et rien de ce qui vient d'un workspace n'est effectif côté hôte avant une
+      promotion par une action humaine hors session, après revue. Les sessions et les secrets ne voyagent pas.
+    - **Source:** décision du développeur, 2026-11-07 (révise la version du même jour limitée aux agents et skills)
 
 - **DEC-5 - Le contexte est un Project**
     - **Decision:** `--context` désigne un Project, cohérent avec le modèle d'`app` ; la sandbox est un paramètre
