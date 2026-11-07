@@ -173,7 +173,7 @@ Hors périmètre, par décision :
 
 ## Paysage des Solutions (proposition de découpage)
 
-Huit Solutions sont écrites (reverse depuis les specs existantes, 2026-11-07) ; `sandbox/threat-model` reste à écrire avec le développeur.
+Les neuf Solutions sont écrites : huit en reverse depuis les specs existantes, `sandbox/threat-model` avec le développeur (2026-11-07).
 
 - `sandbox/runtime` : image de base, toolchains, injection d'environnement, exécution des commandes, venv.
 - `sandbox/access` : jeton d'Owner, tickets, ports principal et d'exploitation.
@@ -234,10 +234,11 @@ ne les amende pas. L'auth par jeton d'Owner est contractée mais pas entièremen
 
 ## Open Issues
 
-- **OI-1:** **Liste de ce que l'agent de code ne doit jamais pouvoir faire.** À écrire noir sur blanc (`BR-9`). Elle doit
-  traiter la clé SSH de l'Owner présente dans le pod, le réseau sortant libre par défaut, les quotas et l'isolation
-  noyau. **TBD :** à rédiger en session dédiée.
-- **OI-2:** **Isolation noyau** (RuntimeClass gVisor ou Kata) : à examiner côté controller. **TBD.**
+- **OI-1:** **Liste de ce que l'agent de code ne doit jamais pouvoir faire.** Traitée par `sandbox/threat-model` (`DEC-1` : deux
+  interdits garantis, le reste en bornes par défaut). Reste à confirmer la qualification des interdits non retenus
+  (`sandbox/threat-model#OI-6`). **TBD.**
+- **OI-2:** **Isolation noyau** (RuntimeClass gVisor ou Kata) : champ optionnel décidé (`sandbox/threat-model#FR-6`) ; reste à le
+  spécifier côté controller et CRD. **TBD.**
 - **OI-3:** **Un workflow privilégié qui ouvre le même workspace lit des instructions écrites par un contexte de moindre
   confiance** (`app#BR-3`). **TBD :** règle à écrire.
 - **OI-4:** **Outillage SpecDD (`FR-6`).** Quelle image toolchain l'embarque, à quelle version, et comment le MCP le
