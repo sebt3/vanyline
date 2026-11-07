@@ -203,12 +203,14 @@ dans la section controller et `docs/architecture.md` (section `vanyline-maint`).
 
 Toolchains : images OCI standard (ex: `rust:slim-trixie`, `node:trixie-slim`) montées via
 `volumes[].image` (feature K8s native, GA depuis v1.36, prérequis : v1.31+). Une toolchain
-devient utilisable par **injection d'env au démarrage**, jamais par magie :
+devient utilisable par **injection d'env au démarrage** (posée par le controller, presets de
+`controller/src/sandbox.rs`), jamais par magie :
 - `PATH` → `…/usr/local/bin` (ou `cargo/bin`) du volume
 - `LD_LIBRARY_PATH` → `…/usr/lib/<arch>-linux-gnu` du volume (le loader du base ne trouve pas
   les libs du volume sinon — ex: `libatomic.so.1` pour node)
 - **env spécifiques par toolchain** (ex: rust → `RUSTUP_HOME` sur le volume ;
-  `CARGO_HOME` writable **hors volume**, dans le PVC du Owner car le volume est read-only)
+  `CARGO_HOME` writable **hors volume**, dans le cache du Project (`/project-cache/cargo`) car le
+  volume est read-only)
 
 Les outils de vérification de la santé du code (`cargo-llvm-cov`, `ruff`, `hadolint`, …) doivent
 être présents dans les images toolchain, à versions épinglées.
