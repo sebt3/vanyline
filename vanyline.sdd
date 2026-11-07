@@ -96,6 +96,9 @@ Must not:
   Écrire dans `deploy/`, `toolchains/` ou `docs/` sans que la spec concernée (ou une
   demande explicite de Sébastien) l'autorise.
 
+Forbids:
+  /spikes
+
 Tasks:
   [x] SUPPRESSION DE L'EXTENSION VS CODE (2026-10-04) : retirer `ext/` (code, `package.json`,
     `cli-version.txt`), son entrée du workspace npm racine, le job `ext` de
