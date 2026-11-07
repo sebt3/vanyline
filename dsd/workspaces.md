@@ -139,6 +139,7 @@ Hors périmètre, par décision :
 - `workspaces/network` : politiques réseau d'entrée et de sortie.
 - `workspaces/application` : déploiement d'`app` et de Restate.
 - `workspaces/identity` : lignes d'identité en base, adoption et suppression par réconciliation (réalisée dans `app`).
+- `workspaces/controller` : câblage du binaire `vanyline-controller` (démarrage des reconcilers, erreurs `VNL-CTL-*`).
 - `workspaces/client` : la librairie d'interface avec le cluster et les sandboxes (`vanyline-lib`), partagée par `app` et la
   CLI (`DEC-3`). À écrire.
 
