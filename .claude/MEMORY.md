@@ -75,6 +75,19 @@ branche (~32 commits, rien poussé). Étape 9 `llm-config` en attente d'une déc
 périmètre `[?]`. La **passe d'arbitrage Sébastien** sur les `[?]` (liste dans le fichier
 mémoire, E1 jeton sandbox MCP en tête) conditionne les dernières tâches `[ ]` restantes.
 
+**Mise à jour (2026-11-03) — réorientation du harnais LLM** : le tooling LLM d'état-final
+(`lib`, agents système, `llm-config`) ne répond pas à la base de harness voulue. Direction :
+**lymaille** (crate publiée, `~/projets/lymaille`) devient le cœur générique, intégré dans `app`
+(miryad-core l'intègre aussi) ; vanyline reste le harnais dédié au code (sandbox, controller,
+health inchangés). Pas d'approbation en session, limites posées avant par le **contexte**
+(Project/Sandbox) et non par un choix d'agent. **DSD** (Domain Definition → Solution Design) à
+installer dans vanyline : **c'est le chantier de la prochaine session**, rien n'est encore écrit
+côté specs ni code. Un spike (`spikes/lymaille-sandbox/`, non suivi) a validé que le setup marche
+sur une sandbox réelle avec Qwen3.6 (la syntaxe Rhai s'apprend par le prompt ; la persistance du
+pad reste à mesurer). Détail, décisions, résultats des essais, reste à faire et nettoyage :
+`.claude/memory/reorientation-lymaille-dsd-2026-11.md`. La branche état-final (étapes 8 et 9)
+est à trier avant tout push.
+
 ---
 
 ## Index — fondations et features livrées
@@ -85,6 +98,8 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 
 | Fichier | Contenu |
 |---|---|
+| `.claude/memory/reorientation-lymaille-dsd-2026-11.md` | **Réorientation du harnais LLM (2026-11-03), ouverte.** lymaille = cœur générique intégré dans `app`, vanyline = harnais dédié code ; contexte (Project/Sandbox) comme seul sélecteur de session, pas d'approbation en session ; modèle de menace de l'agent de code (effets bornés au niveau du pod) ; séparation stricte des rôles config/production. Spike lymaille×sandbox : le setup marche (données brutes non conservées, issues lymaille #1–#4 ouvertes). DSD installé, **ébauche `dsd/app.md` écrite (domaine `app` seul)**. **Domaine `cli` complet le 2026-11-07 : `dsd/cli.md` + 5 Solutions `dsd/cli/*` (hôte lymaille permanent, TUI conservé, `script`, `sync` de `.vanyline/`), inventaire dans `inventaire-vanyline-lymaille-2026-11.md`.** **Reste : discuter `dsd/app.md` puis écrire ses Solutions une à une**, session miryad-core (note de cadrage dans son dépôt), domaines sandbox (dont outillage SpecDD dans la toolbox JS)/controller/health plus tard, inventaire vanyline↔lymaille, tri de la branche état-final |
+| `.claude/memory/inventaire-vanyline-lymaille-2026-11.md` | **Inventaire vanyline↔lymaille (2026-11-07, à confirmer).** ~18 k lignes à retirer (lib sauf `k8s.rs`, cfgstore, agents système, ws/chat, conversations…), à conserver (sandbox, controller, crds, health, tools, mcp_domain), à réaligner (entités DB LLM, protocol, ui). **`lib` reste, allégée de sa partie LLM : c'est la librairie d'interface cluster/sandboxes (`k8s.rs`), décision du 2026-11-07 ; piste : y mettre aussi le client de la sandbox, partagé cli/app.** |
 | `.claude/memory/architecture-fondations.md` | Quatre composants, auth sandbox (JWT/SA TokenReview), toolchains K8s image volumes, kydah-code comme client |
 | `.claude/memory/harness-core.md` | Cœur LLM/MCP name-keyed de `vanyline-lib` (`ConfigStore`, `ChatEvent`, `SessionContext`) |
 | `.claude/memory/cli-harness.md` | Stockage CLI natif YAML deux couches (global + workspace) |
