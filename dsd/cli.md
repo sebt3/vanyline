@@ -119,7 +119,7 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 - `cli/chat` : le TUI, l'adaptateur d'événements, `chat --context --sandbox`. Écrite.
 - `cli/batch` : `run` et `script`. Écrite.
 - `cli/sync` : `sync push` et `sync pull` de `.vanyline/`. Écrite.
-- `cli/objets` : les commandes `owner`, `project` et `sandbox`. À écrire.
+- `cli/objets` : les commandes `owner`, `project` et `sandbox`. Écrite.
 
 ## Décisions du domaine
 

@@ -89,8 +89,7 @@ d'Owner est accepté.
     - **Verified by:** `AC-4`
 
 - **FR-7 - MUST:** Un chemin rendu par la sandbox qui sort de `.vanyline/` (composante `..`, chemin absolu, lien) est refusé
-  avant toute écriture locale. Un fichier qui n'est pas du texte UTF-8, ou qui dépasse la taille maximale, est refusé et
-  nommé.
+  avant toute écriture locale. Un fichier qui n'est pas du texte UTF-8, ou qui dépasse 256 Kio, est refusé et nommé.
     - **Source:** `agent-sessions#BR-9` (le contenu du workspace est de moindre confiance)
     - **Verified by:** `AC-5`
 
@@ -98,6 +97,12 @@ d'Owner est accepté.
   partiel.
     - **Source:** `CON-2`
     - **Verified by:** `AC-6`
+
+- **FR-10 - MUST:** Avant d'écrire, `sync pull` (comme `push`) imprime la liste des fichiers qu'il va créer, modifier ou supprimer.
+  `--dry-run` s'arrête à cette liste sans rien écrire, et `--diff` y ajoute le diff de chaque fichier. Aucune confirmation
+  interactive n'est demandée.
+    - **Source:** décision du développeur, 2026-11-07
+    - **Verified by:** `AC-8`
 
 - **FR-9 - MUST:** Une écriture interrompue en cours de route laisse chaque fichier entier, ancien ou nouveau (écriture
   atomique des deux côtés), et la liste de `FR-3` ne mentionne que les fichiers réellement copiés.
@@ -117,8 +122,8 @@ Un arbre local et un arbre distant sont chacun listés puis lus en brut, avec le
 locale, copie distante, liste de la dernière synchronisation) produit pour chaque chemin une action : rien, copier, supprimer
 ou diverger. Les divergences arrêtent tout avant la première écriture ; sinon les actions s'exécutent, puis la liste de
 `FR-3` est mise à jour. La liste vit dans le répertoire d'état de `cli/hote` (`$HOME/.local/state/vanyline/`), un fichier
-par couple dépôt et sandbox (**ASSUMPTION** de disposition). Taille maximale d'un fichier : 256 Kio, comme la limite des
-skills de lymaille (**ASSUMPTION**, à confirmer).
+par couple dépôt et sandbox (**ASSUMPTION** de disposition). La taille maximale d'un fichier, 256 Kio, est celle de la plus grande limite de
+lymaille (un `SKILL.md`) et protège la mémoire de la CLI et de la sandbox (`CON-4`).
 
 ## Décisions
 
@@ -136,6 +141,13 @@ skills de lymaille (**ASSUMPTION**, à confirmer).
 À écrire sous `cli/src/` (**ASSUMPTION** de découpage) : le client `/ws/fs` et l'obtention du ticket, la comparaison à trois,
 la liste des empreintes, les commandes `sync push` et `sync pull`.
 
+- **DEC-2 - La revue avant `pull` est un geste explicite, sans interaction**
+    - **Context:** sans divergence, `pull` écrivait sans rien montrer un contenu qu'un agent a pu écrire.
+    - **Decision:** liste des fichiers toujours imprimée, `--dry-run` pour s'arrêter avant d'écrire, `--diff` pour les diffs.
+    - **Alternatives:** confirmation si terminal (écartée : comportement différent selon le pipe) ; diff obligatoire sans
+      question (écartée : la revue arrive après coup).
+    - **Source:** décision du développeur, 2026-11-07
+
 ## Acceptation et vérification
 
 - **AC-1:** Après `sync push` sur une sandbox sans `.vanyline/`, chaque fichier du dossier local existe dans le worktree, octet
@@ -146,6 +158,8 @@ la liste des empreintes, les commandes `sync push` et `sync pull`.
 - **AC-4:** Un fichier contenant une valeur ressemblant à un secret fait refuser tout le `push`, sans aucune écriture.
 - **AC-5:** Un chemin `../x` rendu par `list` ou un fichier non UTF-8 fait refuser le `pull` avant toute écriture locale.
 - **AC-6:** Un `.vanyline/` de plus de 200 entrées fait échouer `sync` au lieu de n'en copier qu'une partie.
+- **AC-8:** `sync pull --dry-run` imprime la liste des changements et n'écrit aucun fichier ; sans `--dry-run`, la même liste est
+  imprimée avant l'écriture.
 - **AC-7:** Une coupure pendant `push` laisse chaque fichier entier, et le `push` suivant reprend sans signaler de divergence
   sur les fichiers déjà copiés.
 
@@ -155,12 +169,6 @@ la liste des empreintes, les commandes `sync push` et `sync pull`.
   sous-répertoire. Peu probable pour de la configuration, mais à surveiller (`FR-8` en protège).
 - Le canal repose sur l'éditeur web de la sandbox : un changement de son protocole casse `sync`. Sa spec et celle de la CLI
   doivent se référencer mutuellement.
-
-## Open Issues
-
-- **OI-1:** **Revue avant `pull`.** Faut-il un `--dry-run` qui montre ce que ferait la commande sans écrire, et/ou une
-  confirmation avant d'écrire en local ? Sans divergence, `pull` écrit sans montrer de diff. **TBD.**
-- **OI-2:** **Taille maximale d'un fichier** (`256 Kio` proposé) : à valider. **TBD.**
 
 ## Références
 
