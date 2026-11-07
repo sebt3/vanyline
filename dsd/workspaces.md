@@ -166,6 +166,10 @@ Hors périmètre, par décision :
       `workspaces/client`.
     - **Source:** décision du développeur, 2026-11-07
 
+- **DEC-4 - Le redémarrage requis d'une sandbox est une condition `RestartPending`**
+    - **Decision:** une modification qui demande un redémarrage est signalée par une condition `RestartPending` du status de la Sandbox, sans changer sa phase ; elle disparaît quand le Pod a redémarré avec la spec courante. Détails dans `workspaces/sandboxes#DEC-10`.
+    - **Source:** décision du développeur, 2026-11-07
+
 ## Transition et migration
 
 Les specs existantes du controller et des CRDs décrivent l'état actuel ; certaines portent encore un modèle à namespace
@@ -186,8 +190,6 @@ unique (tâche ouverte « Un Owner = un namespace » de `vanyline.sdd`). La desc
 
 ## Open Issues
 
-- **OI-1:** **Forme du signal de redémarrage requis** : `RestartPending` en condition ou en phase (`vanyline.sdd`, tâche ouverte, choix « à
-  relire »). **TBD.**
 - **OI-2:** **Watch + resynchronisation à 60 s, ou resynchronisation seule à 30 s ?** Contrat provisoire dans
   `vanyline.sdd`. **TBD.**
 - **OI-3:** **Isolation noyau et quotas des sandboxes** (`sandbox#OI-1`, `sandbox#OI-2`) : leur réalisation relève du

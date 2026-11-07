@@ -156,15 +156,22 @@ Tasks:
     `frontend/src/components/dashboards/dashboards.sdd` (retrait du bouton « Paramètres » du
     projet, édition projet/sandbox). Le controller n'est pas impacté par le nommage ; il l'est par
     la modification d'une sandbox (condition `RestartPending`, cf. la tâche « option C »).
-  [x] Adoption et suppression par réconciliation (arbitrage 2026-10-23) : le cluster est la
+  [ ] Adoption et suppression par réconciliation (arbitrage 2026-10-23, rouvert le 2026-11-07 : aucun
+    réconciliateur n'a de spec ni de code ; le contrat de `Must` seul est écrit) : le cluster est la
     golden source, la base le suit — création de ligne pour toute CR sans ligne, suppression de la
     ligne d'une CR disparue (contrat dans `Must`).
-  [x] `ON DELETE CASCADE` sur toutes les FK vers les lignes d'identité (arbitrage 2026-10-23) :
+  [ ] `ON DELETE CASCADE` sur toutes les FK vers les lignes d'identité (arbitrage 2026-10-23, rouvert le
+    2026-11-07 : migrations et entités écrites, synthèse du validator au vert à produire) :
     `project_workflows`, `workflow_runs` (`project_id` ET `sandbox_id`), `chat_contexts` (donc
     leurs conversations et messages) disparaissent avec l'identité. Un run de portée sandbox
     est supprimé avec sa sandbox.
-  [x] Délai de grâce 180 s via `missing_since`, resync 60 s + watch (arbitrage 2026-10-23, contrat
+  [ ] Délai de grâce 180 s via `missing_since` (rouvert le 2026-11-07 : colonne écrite, comportement du
+    réconciliateur non spécifié), resync 60 s + watch (arbitrage 2026-10-23, contrat
     dans `Must`). La colonne `missing_since` (nullable) fait partie des tables d'identité.
+  [ ] Spécifier puis implémenter le réconciliateur d'identité (`app/src/identity.sdd`, à créer, décidé le
+    2026-11-07 : parcours des CR `Owner` du namespace d'application puis des namespaces `<app-ns>-<owner>`,
+    cf. `dsd/workspaces/identity.md#DEC-5`) ; traduire kube `AlreadyExists` en 409 et `Invalid` en 422 dans
+    `app/src/error.rs` avec pré-validation du nom (`DEC-6`), et réécrire les Scenarios de `app/src/api/` qui figent le 500.
   [?] Watch + resync 60 s, ou resync seul toutes les 30 s (moins de code, adoption jusqu'à 30 s
     plus lente) ? Contrat provisoire du bloc `Must` : watch + resync 60 s.
   [ ] Modification d'une sandbox (arbitrage 2026-10-23, « option C ») : possible en tout temps,

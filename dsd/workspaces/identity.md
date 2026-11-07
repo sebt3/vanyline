@@ -35,7 +35,7 @@ Hors périmètre : le contenu de `spec` et `status` des CR (`workspaces/projects
 Actuel (constat sur les fichiers, aucun test exécuté) :
 - Les migrations `m20261023_000001_create_vanyline_projects` et `m20261023_000002_create_vanyline_sandboxes`, ainsi que les entités `projects` et `sandboxes`, existent avec leurs specs. Leurs tâches d'implémentation sont ouvertes (`[ ]`).
 - Aucune spec d'API n'écrit de ligne d'identité : `app/src/api/projects.sdd` et `app/src/api/sandboxes.sdd` ne citent ni `vanyline_projects` ni `vanyline_sandboxes` dans leurs effets de bord.
-- `app/src/api/sandboxes.sdd` ne valide pas le nom avant le POST, et une collision `AlreadyExists` répond 500 (OI-4).
+- `app/src/api/sandboxes.sdd` ne valide pas le nom avant le POST, et une collision `AlreadyExists` répond 500 ; `DEC-6` impose 409 et 422.
 - Aucun réconciliateur n'a de spec dans `app/src/`.
 - `app/src/ws/sandbox_state.sdd` observe les Sandbox d'un namespace d'application unique, modèle antérieur à « un Owner = un namespace » (OI-6).
 
@@ -45,7 +45,7 @@ Cible (`vanyline.sdd`, Tasks et Must) :
 - marquage `missing_since` et suppression après 180 s (FR-2 à FR-4) ;
 - FK des tables de workflow et de chat sur ces lignes (hors périmètre).
 
-Statut des tâches `vanyline.sdd` : « Adoption et suppression par réconciliation » et « Délai de grâce 180 s » sont cochées `[x]`, alors qu'aucun réconciliateur n'est spécé (OI-8).
+Statut des tâches `vanyline.sdd` : « Adoption et suppression par réconciliation » et « Délai de grâce 180 s » étaient cochées `[x]` (rouvertes le 2026-11-07), alors qu'aucun réconciliateur n'est spécé (OI-8).
 
 ## Hypothèses, contraintes et dépendances
 
@@ -100,7 +100,7 @@ Statut des tâches `vanyline.sdd` : « Adoption et suppression par réconciliati
 
 - **FR-10 - MUST:** Une violation d'unicité, en base ou par `AlreadyExists` du cluster, répond 409 avec un message qui nomme la cause, jamais 500.
     - **Source:** `vanyline.sdd`, Must.
-    - **Statut :** contesté, voir OI-4. Les API specs actuelles répondent 500.
+    - **Statut :** décidé (`DEC-6`) ; les specs d'API actuelles répondent encore 500 et sont à réécrire.
     - **Verified by:** `AC-8`
 
 ## Sécurité
@@ -147,7 +147,7 @@ Flux :
 Cas d'erreur :
 - Erreur de GET ou de listing pendant la réconciliation : aucune suppression, passage abandonné et journalisé (FR-4).
 - POST de CR en échec après insertion : ligne retirée (FR-5).
-- Violation d'unicité : 409 attendu (FR-10), réponse actuelle 500 (OI-4).
+- Violation d'unicité : 409 attendu (FR-10), réponse actuelle 500, à corriger (`DEC-6`).
 - Suppression d'une ligne `vanyline_projects` : cascade sur ses lignes `vanyline_sandboxes`, même si leurs CR existent encore (OI-2).
 
 ## Décisions
@@ -173,6 +173,18 @@ Cas d'erreur :
     - **Decision:** `missing_since` est une colonne de la table d'identité, et non un état en mémoire.
     - **Source:** `vanyline.sdd`, Must (Délai de grâce 180 s).
 
+- **DEC-5 - Le réconciliateur parcourt les Owners du namespace d'application**
+    - **Context:** `lib/src/k8s.sdd` interdit tout listage cluster-wide. Le RBAC donne à l'app un Role dans son namespace d'application (CR `Owner` et `Application`) et un RoleBinding `vanyline-app` dans chaque namespace d'Owner (list et watch sur projects et sandboxes).
+    - **Decision:** le réconciliateur liste les CR `Owner` du namespace d'application, puis liste les Projects et Sandboxes dans `<app-ns>-<owner>` (nommage de `vanyline-crds`) pour chacun. Il ne voit que les Owners qui ont le RoleBinding de délégation (`workspaces/owners#FR-12`). Un Owner sans lien utilisateur connu n'est adopté qu'une fois le lien établi (`workspaces#BR-4`).
+    - **Alternatives:** parcourir les lignes `owner_links` (écartée : retarde l'adoption d'un Owner créé par GitOps) ; un ClusterRole pour l'app (écartée : contredit l'isolation par namespace d'Owner).
+    - **Source:** décision du développeur, 2026-11-07 ; `deploy/controller/controller.yaml` ; SpecDD /lib/src/k8s.sdd
+
+- **DEC-6 - Les codes 409 et 422 sont rendus par `app/src/error.rs` et une pré-validation**
+    - **Context:** toute erreur kube non-NotFound sort aujourd'hui en 500 `VNL-K8S-002`, et le frontend affiche le message kube brut ; `workspaces#AC-3` exige 422 pour un nom trop long et 409 pour une collision.
+    - **Decision:** `AlreadyExists` devient 409 et `Invalid` devient 422 dans `app/src/error.rs` ; le nom est validé (longueur, DNS-1123) avant tout appel au cluster, par le nommage de `vanyline-crds` ; l'unicité de la ligne d'identité arbitre aussi la collision.
+    - **Consequences:** les Scenarios qui figent le 500 dans `app/src/api/projects.sdd` et `app/src/api/sandboxes.sdd`, et leurs tâches `[!]`, sont à réécrire.
+    - **Source:** décision du développeur, 2026-11-07 ; `workspaces#BR-3`, `workspaces#AC-3`
+
 ## Réalisation SpecDD
 
 - `SpecDD /app/src/db/entities/projects.sdd` : entité `vanyline_projects` (FR-1 à FR-4, FR-9, DEC-2).
@@ -195,19 +207,16 @@ Cas d'erreur :
 - **AC-5:** Le nom affiché d'une CR adoptée retire le préfixe du projet. Scenario : `nom_affiche_d_une_cr_adoptee` (`app/src/naming.sdd`).
 - **AC-6:** La création d'une Sandbox insère la ligne avant la CR, et la retire si la CR échoue. Vérification : TBD (OI-5).
 - **AC-7:** La suppression d'une Sandbox supprime la CR puis la ligne, et un second appel est sans effet. Vérification : TBD (OI-5).
-- **AC-8:** Une collision de nom répond 409 avec la cause. Vérification : TBD, contredit par les specs actuelles (OI-4). Référence : `workspaces#AC-3`.
+- **AC-8:** Une collision de nom répond 409 avec la cause. Vérification : à écrire avec `DEC-6` ; contredit par les specs d'API actuelles. Référence : `workspaces#AC-3`.
 
 ## Open Issues
 
-- **OI-1 - Énumération des CR à réconcilier:** `vanyline.sdd` demande une comparaison avec les CR, mais `lib/src/k8s.sdd` interdit un listing cluster-wide et le RBAC n'accorde des droits que par namespace d'Owner. Il faut décider comment obtenir la liste des Owners à parcourir (lignes de lien, puis namespace calculé par `owner_namespace_name`). **TBD.** Bloque FR-1 et FR-4.
 - **OI-2 - Owner et projet d'une Sandbox:** `SandboxSpec` n'a pas de champ `owner`. L'Owner d'une sandbox adoptée n'est pas défini, ni la lecture de `project_id` à partir de `spec.project`. La cascade `project` vers `sandbox` peut supprimer une ligne sandbox dont la CR existe encore. **TBD.**
 - **OI-3 - Lien inverse Owner vers utilisateur:** `vanyline.sdd` parle d'un « lien utilisateur connu », mais aucune spec ne définit la recherche par `k8s_owner_name`, qui n'est pas unique en base (`app/src/db/entities/owner_links.sdd`). **TBD.**
-- **OI-4 - Codes 409 et 422 contradictoires:** `vanyline.sdd` (Must) exige 422 pour un nom trop long et 409 pour une collision. `app/src/api/sandboxes.sdd` répond 500 à `AlreadyExists` (« pas de map 409 ici ») et laisse la validation de nom en `[?]`. `app/src/api/projects.sdd` répond 500 à un doublon (`[!]`). Ces specs décrivent un comportement actuel contraire à la cible ; aucune n'a de priorité sur l'autre. **TBD, bloquant pour AC-8 et AC-4 côté HTTP.**
 - **OI-5 - Ordre de création et portée:** la règle « ligne avant CR, retrait si échec » figure dans `vanyline.sdd` mais ni `app/src/api/sandboxes.sdd` ni `app/src/api/projects.sdd` ne l'appliquent. Il n'est pas dit si elle vaut aussi pour les Project. **TBD.**
 - **OI-6 - Watch sur un namespace unique:** `app/src/ws/sandbox_state.sdd` décrit un watch de « tous les Sandbox du namespace du client », sans paramètre, alors que `lib/src/k8s.sdd` décrit un watch par Owner, jamais cluster-wide. `app/src/api/projects.sdd` parle encore d'un namespace unique d'application. **TBD.**
 - **OI-7 - Cadence 60 s ou 30 s:** `vanyline.sdd` retient 60 s à titre provisoire, avec une alternative à 30 s marquée `[?]` ; voir `workspaces#OI-2`. **TBD.**
-- **OI-8 - Tâches cochées sans implémentation:** `vanyline.sdd` marque `[x]` « Adoption et suppression par réconciliation » et « Délai de grâce 180 s », alors qu'aucun réconciliateur n'a de spec et que les migrations et entités ont des tâches ouvertes. **TBD :** la case reflète-t-elle un contrat ou une livraison ?
-- **OI-9 - Réconciliateur non spécé:** emplacement de la spec, comportement en cas d'erreur de base pendant un passage, nom de la métrique de signalement. **TBD.**
+- **OI-9 - Réconciliateur non spécé:** emplacement de la spec (`app/src/identity.sdd`, à créer ; tâche ajoutée à `vanyline.sdd` le 2026-11-07), comportement en cas d'erreur de base pendant un passage, nom de la métrique de signalement. **TBD.**
 - **OI-10 - Modèle antérieur dans les API:** `app/src/api/projects.sdd` et `app/src/api/sandboxes.sdd` contiennent encore un namespace unique et des Scenarios à reprendre (Tasks « Un Owner = un namespace », `[ ]`). **TBD.**
 
 ## Références

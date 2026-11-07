@@ -30,7 +30,7 @@ Hors périmètre, par décision :
 - `workspaces#BR-3` : nom `<projet>-<nom>`, immuable après création (la limite de 63 caractères est reprise en Open Issue).
 - `workspaces#BR-5` : suspension manuelle ; le pod est supprimé, worktree, Service et politiques réseau sont conservés.
 - `workspaces#BR-7` : aucun champ de CRD n'est interpolé dans un shell ; la maintenance git passe par `vanyline-maint` en argv.
-- `workspaces#FR-2` et `workspaces#FR-3` : création et modification d'une Sandbox ; `FR-3` exige un signal de redémarrage (voir OI-1).
+- `workspaces#FR-2` et `workspaces#FR-3` : création et modification d'une Sandbox ; `FR-3` exige un signal de redémarrage (`DEC-10`, `OI-1`).
 - `sandbox#BR-1`, `sandbox#BR-2`, `sandbox#BR-3` : accès tout ou rien par le jeton du ServiceAccount de l'Owner, SA sans droit RBAC, navigateur sans jeton.
 
 ## Acteurs
@@ -208,6 +208,12 @@ Propagation des changements : le controller n'observe que les CR Sandbox. Les ch
     - **Consequences:** latence de propagation bornée par les requeues (`workspaces#OI-2`).
     - **Source:** SpecDD /controller/src/sandbox.sdd (Must, `@build_controller`)
 
+- **DEC-10 - Le redémarrage requis est une condition `RestartPending`, détectée par empreinte**
+    - **Context:** `workspaces#FR-3` autorise la modification d'une sandbox en cours sans redémarrage automatique et exige que l'état de la sandbox signale qu'un redémarrage est requis ; l'IDE et les relais sont conditionnés par `phase == Running`.
+    - **Decision:** le signal est une condition `RestartPending` du status, jetée dès que le Pod a redémarré avec la spec courante ; la phase ne change pas. La dérive se détecte par l'empreinte de la spec utile portée par le Pod, comparée à la spec courante.
+    - **Alternatives:** une nouvelle valeur de `phase` (écartée : la sandbox deviendrait inutilisable pour l'IDE et les relais en attendant le redémarrage) ; détection par `metadata.generation` (écartée : signalerait aussi des changements qui n'exigent pas de redémarrage, comme labels et annotations de bump).
+    - **Source:** décision du développeur, 2026-11-07 ; `vanyline.sdd`, tâche « Modification d'une sandbox » (option C)
+
 ## Réalisation SpecDD
 
 - `SpecDD /controller/src/sandbox.sdd` : reconciler, builders du Pod, des Jobs, du Service et de l'Ingress, phase et status (FR-1 à FR-14, à l'exception des NetworkPolicies).
@@ -232,7 +238,7 @@ Les Scenarios cités sont ceux de `controller/src/sandbox.sdd`. Les Scenarios `_
 
 ## Open Issues
 
-- **OI-1 - Signal de redémarrage absent:** `workspaces#FR-3` et `workspaces#AC-7` exigent qu'une modification demandant un redémarrage soit signalée par l'état de la Sandbox. `controller/src/sandbox.sdd` ne porte que `phase`, `service` et `Ready` ; aucune condition `RestartPending` n'existe, et aucun Scenario ne le vérifie. Lié à `workspaces#OI-1` (forme du signal). **TBD :** qui écrit ce signal, et dans quelle spec.
+- **OI-1 - Détection du redémarrage requis à spécifier:** `DEC-10` fixe la forme du signal, mais `controller/src/sandbox.sdd` ne spécifie ni la détection de dérive (empreinte de la spec utile portée par le Pod, comparée à la spec courante), ni le checkout de la nouvelle branche au redémarrage. Lié à `OI-2` (Pod immuable ou recréé). **TBD :** à écrire dans `controller/src/sandbox.sdd`.
 - **OI-2 - Pod immuable ou recréé ?** Le Must de `controller/src/sandbox.sdd` dit « v1 immutable » ; `docs/architecture.md`, cité par le `[?]` de cette spec, dit « recréation du pod ». **TBD :** immunité totale (compléter la doc) ou recréation sur empreinte de spec.
 - **OI-3 - Changement de `spec.branch` après checkout:** le Job est nommé sans empreinte de branche, donc pas de nouveau checkout ; le worktree reste sur la branche de départ. `workspaces#FR-3` ne tranche pas. **TBD :** voulu (une Sandbox = une branche de naissance) ou à répercuter.
 - **OI-4 - Namespace par défaut, contradiction interne:** le reconcile et la section Accepts de `controller/src/sandbox.sdd` prévoient un repli sur `"default"`, alors que le Scenario `sandbox_sans_namespace_est_une_erreur` interdit tout repli et rend `VNL-CTL-012`. Le Scenario est plus récent, mais la récence ne tranche pas un conflit entre specs. Même question pour `owner.namespace` (`workspaces/owners`, OI-7). **TBD :** décision du développeur.
@@ -253,7 +259,7 @@ Les Scenarios cités sont ceux de `controller/src/sandbox.sdd`. Les Scenarios `_
 
 ## Références
 
-- `workspaces` : `BO-1`, `BO-2`, `BR-1`, `BR-2`, `BR-3`, `BR-5`, `BR-7`, `FR-2`, `FR-3`, `OI-1`, `OI-2`, `OI-3`, `AC-3`, `AC-4`, `AC-7`.
+- `workspaces` : `BO-1`, `BO-2`, `BR-1`, `BR-2`, `BR-3`, `BR-5`, `BR-7`, `FR-2`, `FR-3`, `DEC-4`, `OI-2`, `OI-3`, `AC-3`, `AC-4`, `AC-7`.
 - `workspaces/owners` : `FR-8`, `FR-11`, `CON-1`, `OI-7`.
 - `sandbox` : `BR-1`, `BR-2`, `BR-3`, `BR-5`, `BR-8`, `BR-9`, `CON-1`, `DEC-1`, `OI-1`, `OI-2`.
 - SpecDD /controller/src/sandbox.sdd, SpecDD /crds/src/lib.sdd, SpecDD /sandbox/src/auth.sdd, SpecDD /sandbox/src/config.sdd.
