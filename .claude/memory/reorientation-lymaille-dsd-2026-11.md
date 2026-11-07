@@ -132,6 +132,17 @@ conservé (script replié, message injecté pendant un tour, `/agent` retiré), 
 Reste à faire du plan : domaines `controller`/`health`/`sandbox` (plus tard), session miryad-core, tri de la branche
 état-final et correction des passages « yolo » des docs.
 
+**Fin de session du 2026-11-07.** Écrits et commités sur `main` (non poussés) : domaine `cli` (5 Solutions), `workspaces`
+(7 Solutions reverse : owners, projects, sandboxes, network, application, identity, controller), `sandbox` (9 Solutions : 8 reverse
++ `threat-model` écrit avec le développeur). Reverse faits par des agents Haiku, recoupés par script (identifiants cités) mais
+**non relus en détail** hormis `owners`. ~185 Open Issues, la plupart des `[?]` repris des specs. Décisions tranchées : 409/422,
+parcours des Owners par le namespace d'application, `RestartPending` en condition, routes de santé, env des toolchains posé par le
+controller, `CARGO_HOME` dans le cache du Project, idempotence des jobs bornée, `vanyline-lib` = librairie d'interface
+cluster/sandboxes. À faire ensuite : `workspaces/client` (conception), passage du validator sur `sandbox/src/auth.sdd` puis cocher le
+chantier « auth Owner-SA seule » de `vanyline.sdd`, manifeste `deploy/sandbox/sandbox-test.yaml` à aligner, amendement des specs
+controller/CRD pour le modèle de menace, confirmer `threat-model#OI-6`, relire les Solutions reverse, domaine `health` si séparé,
+session miryad-core, tri de la branche état-final, correction des passages « yolo ». Aucun build cargo lancé : pas de `cargo clean`.
+
 ## 4. Rappels
 
 - `spikes/` est non suivi par git, désormais interdit par la spec racine. Binaire du spike : cache cargo déjà nettoyé.
