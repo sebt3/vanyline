@@ -138,6 +138,36 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
       distinct et optionnel.
     - **Source:** décision du développeur, 2026-11-07
 
+- **DEC-6 - Le ToolsetContext de la session est dérivé à la volée du Project et de la Sandbox**
+    - **Decision:** la CLI lit les CR Project et Sandbox avec le kubeconfig de l'utilisateur et construit un ToolsetContext
+      éphémère : paramètres tirés du projet, de la branche et du namespace, rôle MCP « sandbox » lié au Service de la
+      sandbox avec le jeton d'Owner. Le ContextType correspondant est livré avec la CLI, et son agent principal par défaut
+      sert au démarrage (`resolve_start` de lymaille). Rien à maintenir à la main.
+    - **Source:** décision du développeur, 2026-11-07 ; `agent-sessions/toolsets#FR-21`
+
+- **DEC-7 - Deux niveaux de stockage : utilisateur et partagé**
+    - **Decision:** le niveau utilisateur vit dans `$HOME/.config/vanyline/`, le niveau partagé dans `.vanyline/` du dépôt
+      du projet. Ils correspondent aux niveaux `Shared` et utilisateur des stores de lymaille ; la session est le
+      troisième niveau.
+    - **Source:** décision du développeur, 2026-11-07
+
+- **DEC-8 - Le TUI montre une exécution de script par une ligne de statut, script et sortie dépliables**
+    - **Decision:** une exécution de `rhai_pad` s'affiche en une ligne (fonctions MCP appelées, durée, succès ou erreur),
+      avec le script complet et sa sortie dépliables à la demande. La source des lignes est l'événement d'audit de
+      lymaille (`agent-sessions/session#FR-8`).
+    - **Source:** décision du développeur, 2026-11-07
+
+- **DEC-9 - Les secrets viennent d'un fichier hors des couches versionnées**
+    - **Decision:** les fichiers de Provider ne contiennent que des noms de secrets ; l'hôte les résout depuis
+      `$HOME/.config/vanyline/secrets/secrets.yaml`, en mode 600 dans un répertoire en mode 700. La CLI refuse un fichier ou un
+      répertoire aux droits plus larges.
+    - **Source:** décision du développeur, 2026-11-07 ; la durée de refus aux droits larges est une proposition à valider
+
+- **DEC-10 - Le dépôt local est le répertoire courant, une option peut le changer**
+    - **Decision:** le niveau partagé `.vanyline/` (`DEC-7`) est cherché dans le dépôt du répertoire courant ; une option
+      explicite désigne un autre répertoire. Le nom de l'option est fixé dans la Solution.
+    - **Source:** décision du développeur, 2026-11-07
+
 ## Transition et migration
 
 Les specs existantes de `cli/` décrivent l'état actuel (environ 16 700 lignes, surtout le chat et le TUI). Le TUI reste,
