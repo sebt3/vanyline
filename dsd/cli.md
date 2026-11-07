@@ -104,6 +104,14 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 - **FR-5 - MUST:** La CLI permet de lister, reprendre et supprimer ses sessions : lymaille laisse ces opérations à l'hôte.
     - **Source:** `lymaille` `agent-sessions#CON-1`
 
+- **FR-6 - MUST:** `vanyline sync push` copie le `.vanyline/` local vers le worktree de la sandbox, et `vanyline sync pull`
+  le copie de la sandbox vers le local, par le MCP de la sandbox (`read_file`, `write_file`, `delete_file`,
+  `list_directory`). Si les deux copies ont divergé depuis la dernière synchronisation, la commande n'écrit rien et
+  montre le diff ; `--force-local` ou `--force-remote` tranche explicitement. La CLI refuse de synchroniser un fichier
+  qui contient une valeur ressemblant à un secret.
+    - **Source:** décision du développeur, 2026-11-07
+    - **Verified by:** `AC-5`
+
 ## Décisions du domaine
 
 - **DEC-1 - Le serveur RPC est conservé**
@@ -128,7 +136,8 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
     - **Source:** décision du développeur, 2026-11-07
 
 - **DEC-4 - Seuls agents et skills sont transférables entre la CLI et `app`**
-    - **Decision:** les définitions d'agents et de skills, au format lymaille, se transfèrent entre la CLI et `app`. Le
+    - **Decision:** les définitions d'agents et de skills, au format lymaille, se transfèrent entre la CLI et `app`
+      (le support de l'échange est le `.vanyline/` de la sandbox, `DEC-11`). Le
       transfert (import et export) est de la responsabilité d'`app`, dans les deux sens ; la CLI l'ignore. Providers,
       modèles, serveurs MCP, toolsets accordés et sessions ne voyagent pas.
     - **Source:** décision du développeur, 2026-11-07
@@ -168,6 +177,19 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
       explicite désigne un autre répertoire. Le nom de l'option est fixé dans la Solution.
     - **Source:** décision du développeur, 2026-11-07
 
+- **DEC-11 - La synchronisation de `.vanyline/` est explicite, dans deux sens séparés**
+    - **Context:** `.vanyline/` existe en deux copies, locale et dans le worktree de la sandbox, et l'agent peut y écrire
+      pendant une session. La synchronisation est aussi ce qui permet l'échange avec `app` (`DEC-4`).
+    - **Decision:** deux commandes lancées par l'utilisateur, `sync push` et `sync pull`, jamais de réconciliation
+      automatique : ce que l'agent écrit en contexte productif ne remonte en local que par une action humaine, après
+      avoir vu le diff (séparation des rôles, `app#DEC-3`). Le périmètre est tout `.vanyline/`, sans secrets : ceux-ci
+      n'y sont jamais (`DEC-9`). La CLI garde une trace de la dernière synchronisation (empreinte par fichier) pour
+      détecter la divergence.
+    - **Alternatives:** bidirectionnel automatique (écarté : écrase du travail et importe sans revue des instructions de
+      moindre confiance) ; plus récent gagne (écarté : horloges) ; fusion git (écartée : exige un commit, ignore les
+      fichiers non suivis).
+    - **Source:** décision du développeur, 2026-11-07
+
 ## Transition et migration
 
 Les specs existantes de `cli/` décrivent l'état actuel (environ 16 700 lignes, surtout le chat et le TUI). Le TUI reste,
@@ -180,6 +202,8 @@ stockage `cfgstore` sont retirés. Inventaire précis des specs à réécrire : 
   l'Owner.
 - **AC-2:** Un projet ou une sandbox créé par la CLI reçoit sa ligne d'identité côté `app` (`workspaces#AC-2`).
 - **AC-3:** Un script qui appelle un module non accordé par le contexte échoue.
+- **AC-5:** `sync push` sur deux copies divergentes n'écrit rien et montre le diff ; avec `--force-local` il remplace la
+  copie de la sandbox.
 - **AC-4:** Créer une sandbox dont le nom dépasse la limite est refusé par la CLI avant tout appel au cluster.
 
 ## Open Issues
