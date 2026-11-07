@@ -115,7 +115,7 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 ## Paysage des Solutions
 
 - `cli/hote` : l'hôte lymaille (stockage par fichiers, secrets, contexte dérivé, jeton d'Owner, journal d'audit). Écrite.
-- `cli/chat` : le TUI, l'adaptateur d'événements, `chat --context --sandbox`. À écrire.
+- `cli/chat` : le TUI, l'adaptateur d'événements, `chat --context --sandbox`. Écrite.
 - `cli/batch` : `run` et `script`. À écrire.
 - `cli/sync` : `sync push` et `sync pull` de `.vanyline/`. À écrire.
 - `cli/objets` : les commandes `owner`, `project` et `sandbox`. À écrire.

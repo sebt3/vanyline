@@ -123,8 +123,8 @@ synchronisation (`cli#FR-6`).
 
 ## Structure et disposition des fichiers
 
-Disposition proposée, à valider avant la spec (**ASSUMPTION**, basée sur les catégories du manifeste de projet de
-lymaille) : un répertoire par catégorie sous chaque niveau.
+Disposition validée par le développeur le 2026-11-07 (basée sur les catégories du manifeste de projet de lymaille) : un
+répertoire par catégorie sous chaque niveau.
 
 ```text
 <niveau>/                 $HOME/.config/vanyline/  ou  .vanyline/
@@ -135,10 +135,29 @@ lymaille) : un répertoire par catégorie sous chaque niveau.
 `-- memories/             par portée
 ```
 
-Hors des niveaux de configuration : `$HOME/.config/vanyline/secrets/secrets.yaml` (`FR-5`), et un répertoire d'état
-local pour les sessions et le journal d'audit (**ASSUMPTION** : `$HOME/.local/state/vanyline/`). Le format de
-sérialisation des toolsets, des contextes et des mémoires est celui que fournit lymaille : **TBD** jusqu'à la lecture des
-specs correspondantes.
+Hors des niveaux de configuration : `$HOME/.config/vanyline/secrets/secrets.yaml` (`FR-5`), et le répertoire d'état local
+`$HOME/.local/state/vanyline/` pour les sessions et le journal d'audit (validé le 2026-11-07).
+
+Formats, lus dans lymaille (0.2.0) :
+
+- **Agent :** `AgentDefinition::to_text` et `from_text`, frontmatter YAML puis prompt en corps ; un fichier `.md` par
+  agent (`agent-sessions/agents#FR-3`).
+- **Skill :** texte `SKILL.md` (frontmatter YAML puis corps, compatible Agent Skills), lu par `Skill::parse`
+  (`agent-sessions/toolsets#FR-7`).
+- **Provider, profil, ContextType, ToolsetContext, mémoire :** types `serde`, sans format texte de lymaille ; la CLI les
+  écrit en YAML. Un provider ne porte que des références (`CON-3`).
+- **Toolset :** un répertoire par toolset (`DEC-2`), car l'enveloppe `serde` enferme le module Rhai dans une chaîne,
+  illisible à la main et mal adaptée à la revue de diff.
+
+```text
+toolsets/<nom>/
+|-- toolset.yaml          métadonnées, version, exigences
+|-- module.rhai           le code du module
+`-- skills/<skill>/SKILL.md   un skill et ses documents annexes
+```
+
+Un brouillon (`DEC-1`) vit dans un répertoire frère, `toolsets-drafts/<nom>/`, de même forme (**ASSUMPTION**, à confirmer
+à l'écriture de la spec du store de toolsets).
 
 ## Décisions
 
@@ -149,6 +168,14 @@ specs correspondantes.
       humaine hors session.
     - **Consequences:** la promotion exige une commande de la CLI (nom à fixer dans la spec).
     - **Source:** `agent-sessions/toolsets#FR-8` ; `app#DEC-3`
+
+- **DEC-2 - Un toolset s'écrit en répertoire, pas en enveloppe `serde`**
+    - **Context:** le format d'échange entre développeurs est lu, édité et revu dans git.
+    - **Decision:** `toolset.yaml` pour les métadonnées, `module.rhai` pour le code, `skills/<skill>/SKILL.md` pour les
+      skills ; la CLI convertit vers et depuis le type de lymaille.
+    - **Alternatives:** un fichier YAML par toolset avec le Rhai en bloc littéral (écarté : diff et édition moins
+      confortables) ; le JSON `serde` tel quel (écarté : illisible).
+    - **Source:** décision du développeur, 2026-11-07
 
 ## Réalisation SpecDD
 
@@ -182,8 +209,8 @@ Les conversations existantes de `store.rs` ne sont pas reprises : leur format d�
 
 ## Open Issues
 
-- **OI-1:** **Format exact des fichiers par catégorie** (toolsets, contextes, mémoires) et disposition ci-dessus : à lire
-  dans les specs de lymaille puis à valider avec le développeur. **TBD.**
+- **OI-1:** **Disposition d'une mémoire sur disque.** Une mémoire a une portée (niveau et référence) puis un identifiant ;
+  proposition : `memories/<référence>/<id>.md` sous chaque niveau, corps en markdown. **TBD.**
 - **OI-2:** **Format de `secrets.yaml`.** Association nom vers valeur ; création et édition par une commande de la CLI, ou
   seulement à la main. **TBD.**
 - **OI-3:** **Migration de `cfgstore`** (voir Compatibilité et migration). **TBD.**
