@@ -25,7 +25,9 @@ Exposes:
     (clé, `#[serde(default)]`), `key: String` (unique), `value: serde_json::Value`.
   `impl MiryadResource` : `resource_name() == "app-settings"`, lecture `AccessPolicy::Public`,
     écriture `AccessPolicy::AdminOnly`, aucune colonne propriétaire. Hooks `before_create` et
-    `before_update` : la clé doit être connue (`default_model` en v1) et la valeur valide pour sa
+    `before_update` (forme asynchrone @MiryadResource depuis miryad-core 0.3.1 : `db: &C`
+    en premier paramètre, `C: @sea_orm::ConnectionTrait`, futur `Send` ; `db` ignoré) :
+    la clé doit être connue (`default_model` en v1) et la valeur valide pour sa
     clé, sinon `HookError` (422) avec code contracté — `VNL-SET-001` (clé inconnue), `VNL-SET-002`
     (valeur invalide pour sa clé) :
     - `default_model` : `{ "provider_id": <entier>, "model": <chaîne non vide>, "options"?: <objet> }`

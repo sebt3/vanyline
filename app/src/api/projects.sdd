@@ -64,7 +64,7 @@ Exposes:
       @Result<@Json<Project>, @AppError>`. Route `GET /api/projects/{name}`.
   - @create_project — `pub async fn(State(@AppState), @AuthPrincipal, @Json<CreateProjectBody>)
       -> @Result<(@StatusCode, @Json<Project>), @AppError>`. Route `POST /api/projects`.
-      Extracteur @AuthPrincipal (miryad-core 0.1.5, session OU token API) depuis le
+      Extracteur @AuthPrincipal (miryad-core 0.3.1, session OU token API) depuis le
       2026-10-07 — c'est lui qui porte `preferred_username`, que @ensure_owner consomme
       pour le nommage (décision Sébastien ; le chemin token API, `preferred_username`
       `@None`, nomme d'après `subject`).

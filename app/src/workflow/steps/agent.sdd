@@ -19,6 +19,10 @@ Can read:
 
 Exposes:
   @AgentStep — `impl MiryadWorkflowStep`, `kind() == "agent"`.
+    L'argument `run: &@RunInfo` de miryad-core (via l'impl de @MiryadWorkflowStep::run)
+    est ignoré par le step (le contexte utile vient de `config._run`) ; depuis
+    miryad-core 0.3.1 ce type porte `vars` et `trigger` — le constructeur de fixture
+    `engine()` des tests doit les renseigner (`{}` / `None`).
   Config : `{ "agent": <nom>, "prompt": <gabarit>, "timeout_secs"?: <entier>, "json"?: <bool>,
     "max_steps"?: <entier>, "_run": … }`.
 

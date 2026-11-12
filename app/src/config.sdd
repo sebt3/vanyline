@@ -91,7 +91,7 @@ Accepts:
     `OIDC_TIMEOUT_SECS` (défaut `15`) → @Config::oidc_timeout, même contrat de parse et
       de repli que `OIDC_CONNECT_TIMEOUT_SECS`, défaut `15`.
       (Arbitrage Sébastien 2026-10-05 : timeouts du client OIDC configurables par env —
-      miryad-core 0.1.5 les impose dans @OidcConfig ; défauts = défauts applicatifs
+      miryad-core 0.3.1 les impose dans @OidcConfig ; défauts = défauts applicatifs
       recommandés par la lib, 5 s / 15 s.)
     `LISTEN_ADDR` (défaut `"0.0.0.0:8080"`) → @Config::listen_addr en @String brut :
       aucune vérification qu'il se parse en @SocketAddr ici (le parse et son échec
@@ -146,7 +146,7 @@ Returns:
     `OIDC_ISSUER_URL` → `OIDC_CLIENT_ID` → `OIDC_CLIENT_SECRET` → `OIDC_REDIRECT_URL` →
     `COOKIE_SECRET` → `DATABASE_URL` (`OIDC_SCOPES` est évalué entre les deux derniers
     mais ne peut échouer). Un seul message remonté, jamais la liste des manquantes.
-  @oidc_config — @miryad_core::auth::OidcConfig (miryad-core 0.1.5, 8 champs) dont les
+  @oidc_config — @miryad_core::auth::OidcConfig (miryad-core 0.3.1, 8 champs) dont les
     champs `issuer_url`, `client_id`, `redirect_url`, `scopes`, `ca_cert` sont des clones
     un-à-un des champs homonymes de @Config, `client_secret` est @Some du clone de
     @Config::oidc_client_secret (l'app exige `OIDC_CLIENT_SECRET` via `"VNL-CFG-003"` :
@@ -239,8 +239,8 @@ Must not:
 
 Depends on:
   std::env — @env::var et sa sémantique (@Err sur absente ET non-Unicode, @Ok sur vide).
-  miryad-core (../Cargo.toml, version `0.1.5`, `default-features = false`, feature
-    `swagger-ui`) — @miryad_core::auth::OidcConfig (8 champs depuis 0.1.5, redirects
+  miryad-core (../Cargo.toml, version `0.3.1`, `default-features = false`, feature
+    `swagger-ui`) — @miryad_core::auth::OidcConfig (8 champs, toujours en 0.3.1, redirects
     retirés, timeouts obligatoires) ; consommé par ./main.rs::@OidcClient::new.
   ./main.rs — unique appelant de @from_env/@oidc_config au démarrage ; validations
     différées downstream (`"VNL-CFG-008"`, longueur du cookie `"VNL-CFG-005"`) et
@@ -467,7 +467,7 @@ Scenario: from_env_defaut_timeouts
     `OIDC_TIMEOUT_SECS` absentes
   When @Config::from_env est appelé
   Then oidc_connect_timeout vaut @Duration::from_secs(5) et oidc_timeout vaut
-    @Duration::from_secs(15) — les défauts recommandés par miryad-core 0.1.5
+    @Duration::from_secs(15) — les défauts recommandés par miryad-core 0.3.1
 
 Scenario: from_env_timeouts_fournis
   Given un environnement complet en requises, `OIDC_CONNECT_TIMEOUT_SECS="7"` et

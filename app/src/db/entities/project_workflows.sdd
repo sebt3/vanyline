@@ -32,7 +32,9 @@ Exposes:
     `scope` hors de `{project, sandbox}` ⇒ `HookError` (422) code `VNL-WFA-001` (identifiant
     contracté W0 2026-10-10, règle AGENTS.md « messages d'erreur avec identifiant unique ») ;
     le hook ne charge pas la définition
-    (il est synchrone et sans base) — la validation des kinds contre la portée est faite au
+    (forme asynchrone @MiryadResource depuis miryad-core 0.3.1 — `db: &C` en premier
+    paramètre, `C: @sea_orm::ConnectionTrait`, futur `Send` — mais `db` est ignoré,
+    aucune requête) — la validation des kinds contre la portée est faite au
     rattachement par ../../api/workflows.sdd et refaite à chaque lancement
     (../../workflow/run_context.sdd).
 

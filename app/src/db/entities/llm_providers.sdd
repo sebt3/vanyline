@@ -63,14 +63,22 @@ Exposes:
     - @write_policy() -> @AccessPolicy::AdminOnly
     - @owner_column() -> @None (la table ne porte aucune colonne owner — les providers
       sont une ressource globale)
-    - @before_create(@ActiveModel, &@AuthPrincipal) -> @Result<@ActiveModel, @HookError> :
+    - @before_create(db, @ActiveModel, &@AuthPrincipal) -> futur `Send` de sortie
+      @Result<@ActiveModel, @HookError> (`db: &C`, `C: @sea_orm::ConnectionTrait` —
+      forme @MiryadResource depuis miryad-core 0.3.1) :
       valide que `provider_type` vaut exactement `"ollama"` ou `"openai-compatible"` ;
       sinon @HookError::with_code(`"VNL-LLM-005"`, message). Le principal est ignoré
       (argument souligné `_principal`) ; @ActiveValue::NotSet est traité comme la chaîne
       vide donc rejeté ; @ActiveValue::Unchanged est traité comme @ActiveValue::Set.
-      Le modèle accepté est rendu inchangé (aucune normalisation). Aucun hook
-      d'équivalent `before_update` n'existe dans le trait — le commentaire du fichier
-      qualifie cela de « limite du framework, pas de cette entité ».
+      Le modèle accepté est rendu inchangé (aucune normalisation).
+    - @before_update(db, @ActiveModel, &@Model, &@AuthPrincipal) — même forme
+      asynchrone 0.3.1 (`db: &C`, `C: @sea_orm::ConnectionTrait`, futur `Send`) ; le
+      hook ignore `db` et le principal. Si `provider_type` est @Set, il est revalidé
+      (mêmes valeurs que @before_create, rejet `VNL-LLM-005`, ligne intacte). Sur
+      `api_key` : @NotSet (absente du corps) ou `null` ⇒ la valeur de `existing` est
+      CONSERVÉE ; chaîne VIDE `""` ⇒ EFFACÉE (@None en base) ; chaîne non vide ⇒
+      remplacée. `api_key` étant écriture seule (`serde(skip_serializing)`), un `PUT`
+      sans le champ ne doit jamais l'effacer.
   @fn default_json_array — privée : valeur par défaut de `available_models` à la
     désérialisation (@serde_json::json!([])).
 
@@ -246,8 +254,9 @@ Must not:
   - Porter de timestamps (`created_at`/`updated_at`) : la table n'en a pas et @auto_time
       n'est utilisé sur aucune entité sœur de `./mod.rs`.
   - Présenter @before_create comme le garde global du `provider_type` : @Entity::insert
-      le court-circuite, la voie `PUT` de `resource_router` ne l'exécute pas (aucun
-      `before_update` dans le trait) et le schéma actuel ne porte aucun CHECK.
+      le court-circuite ; la voie `PUT` de `resource_router` n'exécute pas @before_create
+      (c'est @before_update qui revalidate `provider_type` quand il est @Set) et le
+      schéma actuel ne porte aucun CHECK.
   - Supposer dans ce fichier que `resource_router` écrase `id` aux écritures, appelle le
       hook sur tous les chemins de création, ou que @can_write consomme bien
       @AccessPolicy::AdminOnly : ce sont des contrats de miryad-core (crate externe, non
@@ -384,7 +393,7 @@ Tasks:
       `../../api/llm_providers.sdd` (cohérence @discover_models). Impact frontend
       (`httpConfigRepo.ts`) hors périmètre de cette spec, à signaler séparément.
   [x] MISE À JOUR DES SECRETS (décision 2026-10-18, suite de la décision ci-dessus ; le trait — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
-      @MiryadResource de miryad-core 0.1.5 EXPOSE `before_update(active, existing, principal)` —
+      @MiryadResource de miryad-core EXPOSE `before_update` — forme depuis 0.3.1 : `before_update(db, active, existing, principal)`, asynchrone, `db: &C` —
       les mentions « pas de before_update » de ce fichier sont périmées) : comme `api_key` n'est
       plus jamais relue par un client, un `PUT` qui ne la porte pas ne doit PAS l'effacer.
       Implémenter `before_update` : `api_key` absente ou `null` (indiscernables, @None) ⇒ la valeur

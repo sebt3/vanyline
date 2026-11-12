@@ -85,7 +85,7 @@ Tasks:
     `killed`⇒`Failed` ; `cancelled` pourrait arriver réel en `completed`+failure⇒`Failed`),
     enveloppe `{"rows": […]}`, horodatages RFC 3339 OU millisecondes epoch (parse
     tolérant, autre forme ⇒ `None`), et le `404`⇒`Unknown` de la lecture de détail.
-    Note : le @StepDispatcher de miryad-core 0.1.5 journalise dans un `ctx.run()` sans
+    Note : le @StepDispatcher de miryad-core 0.3.1 journalise dans un `ctx.run()` sans
     nom ⇒ `steps` probablement vide en réel — jamais inventé.
   [?] Rétention : durée de conservation des invocations terminées côté Restate à configurer pour
     couvrir l'affichage (2 semaines / 50 derniers) ; `Unknown` est l'effet d'une purge.

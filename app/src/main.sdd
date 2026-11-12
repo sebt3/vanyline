@@ -379,12 +379,14 @@ Depends on:
     exigeant un état de test).
   ./db/entities (6 entités mergées : `llm_providers`, `mcp_servers`, `skills`,
     `toolsets`, `model_profiles`, `agents`) — specs enfants ./db/entities/*.sdd.
-  Crate externe `miryad-core` v0.1.5 (hors workspace, source absente du dépôt) —
+  Crate externe `miryad-core` v0.3.1 (hors workspace, source absente du dépôt) —
     @MiryadAuthState, @OidcClient, @auth_router, @resource_router, @resource_openapi,
     @swagger_ui_router, @miryad_core::migration::Migrator : surface subie, non specée
     (même lacune que le `[!]` de ./auth/mod.sdd — cf. Tasks).
-  ../Cargo.toml — nom du binaire `vanyline-app`, features structurantes : `swagger-ui`
-    de miryad-core, feature `k8s` de vanyline-lib, `rustls`/`ring`, tower-http `fs`.
+  ../Cargo.toml — nom du binaire `vanyline-app`, features structurantes : de
+    miryad-core `swagger-ui`, `workflow`, `mcp`, `lymaille`, `matrix` (version `0.3.1`,
+    `default-features = false`) ; feature `k8s` de vanyline-lib, `rustls`/`ring`,
+    tower-http `fs`.
   ../../docs/architecture.md — sections « Backend web » (montée miryad-core, tables,
     RBAC) et Application (génération du Secret cookie base64 64 octets consommé par la
     dérivation d'ici).
@@ -400,7 +402,7 @@ Scenario: purge_au_demarrage_puis_quotidienne
   Then une première purge est exécutée IMMÉDIATEMENT, puis une par période de 24 h ; un échec est journalisé en `warn` avec `VNL-WF-007` sans arrêter la tâche, un succès en `info` avec `VNL-WF-008`
 
 Tasks:
-  [?] Oracle d'existence résiduel du CRUD générique (validation 2026-10-18) : le `resource_router` de miryad-core 0.1.5
+  [?] Oracle d'existence résiduel du CRUD générique (validation 2026-10-18) : le `resource_router` de miryad-core (observé 0.1.5, non revu sous 0.3.1)
     (`rest/core.rs` get/update/delete) rend 404 pour un id inexistant mais 403 pour la ligne d'un autre owner (lecture
     `OwnerOnly`) sur `/api/v1/agents|model-profiles|skills|toolsets/{id}` et via l'outil MCP générique `/mcp` ; un utilisateur
     peut sonder l'existence d'identifiants d'autrui. Cet écart est amont, hors de nos lots.

@@ -39,9 +39,9 @@ Exposes:
   (démarrage), ../api/workflows.rs (lancement, runs) et le MCP de domaine (../mcp_domain.sdd).
 
 Must:
-  Dépendre de miryad-core avec les features `workflow` et `mcp` (Cargo.toml de l'app, version
-    ≥ 0.1.4 ; ≥ 0.1.5 une fois levé le prérequis de l'issue sebt3/miryad-core#27, voir
-    ./steps/rhai.sdd).
+  Dépendre de miryad-core avec les features `workflow` et `mcp` (Cargo.toml de l'app,
+    version `0.3.1` — le prérequis de l'issue sebt3/miryad-core#27 est levé depuis 0.1.5,
+    voir ./steps/rhai.sdd).
   Rester sans effet quand le moteur n'est pas configuré : aucun port ouvert, aucune requête
     sortante vers Restate, aucune route de workflow active.
   Ne jamais dupliquer le statut d'un run en base (décision miryad-core, reprise ici) : le statut

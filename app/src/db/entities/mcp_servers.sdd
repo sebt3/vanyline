@@ -58,8 +58,11 @@ Exposes:
     - @write_policy() -> @AccessPolicy::AdminOnly
     - @owner_column() -> @None — aucune colonne owner : ressource partagée, seule de
       ce cas parmi les sœurs de `./mod.rs`
-    - @before_create(@ActiveModel, @AuthPrincipal) -> @Result(@ActiveModel,
-      @HookError) — validation à la création : `server_type` doit valoir exactement
+    - @before_create(db, @ActiveModel, &@AuthPrincipal) -> futur `Send` de sortie
+      @Result(@ActiveModel,
+      @HookError) (`db: &C`, `C: @sea_orm::ConnectionTrait` — forme @MiryadResource
+      depuis miryad-core 0.3.1 ; le hook ignore `db`) : validation à la création :
+      `server_type` doit valoir exactement
       `"sse"` ou `"http-streamable"`, sinon @HookError::with_code(`"VNL-MCP-003"`).
       Valeur non posée (@ActiveValue::NotSet) traitée comme `""` donc rejetée. Le
       @AuthPrincipal est ignoré. Le commentaire du fichier explique le contexte :
@@ -67,6 +70,13 @@ Exposes:
       `validate_server_type` sur chaque create/update, cf.
       `docs/features/miryad-core-integration.md`) — la restauration ne couvre que la
       création, et le CHECK SQL n'existe plus dans la migration.
+    - @before_update(db, @ActiveModel, &@Model, &@AuthPrincipal) — même forme
+      asynchrone 0.3.1 (`db: &C`, `C: @sea_orm::ConnectionTrait`, futur `Send`) ; le
+      hook ignore `db` et le principal. Si `server_type` est @Set, il est revalidé
+      (mêmes valeurs que @before_create, rejet `VNL-MCP-003`, ligne intacte). Sur
+      `headers` : @NotSet (absent du corps) ou objet @Vide `{}` ⇒ la valeur de
+      `existing` est CONSERVÉE ; `null` ⇒ défaut objet vide ; objet non vide ⇒
+      remplacé.
   @fn default_json_object — privée : valeur par défaut de `headers` à la
     désérialisation (@serde_json::json!({})).
   @fn default_json_array — privée : valeur par défaut de `available_tools` à la
@@ -147,8 +157,9 @@ Raises:
     création uniquement, quand `server_type` est inconnu ou non posé. Le statut HTTP
     qui traduit cette erreur est un comportement de miryad-core, non observable
     depuis ce fichier.
-  - Aucune autre erreur fabriquée par ce fichier : pas de before_update, pas de
-    @before_save, pas de validation de `url`/`name`/formes JSON.
+  - Aucune autre erreur fabriquée par ce fichier : hors @before_create/@before_update
+    (validation `server_type`), pas de @before_save, pas de validation de
+    `url`/`name`/formes JSON.
   - En base : violation d'unicité `name`, violation NOT NULL remontent en @DbErr de
     SeaORM vers l'appelant (`resource_router` en production, @McpServerEntity::update
     dans `../../api/mcp_servers.rs`) — le statut HTTP correspondant est un
@@ -307,7 +318,7 @@ Tasks:
       @build_domain_server, qui doit continuer à lire `headers` en interne depuis la
       ligne chargée, pas depuis une réponse HTTP).
   [x] MISE À JOUR DES SECRETS (décision 2026-10-18, suite de la décision ci-dessus ; le trait — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
-      @MiryadResource de miryad-core 0.1.5 EXPOSE `before_update(active, existing, principal)` —
+      @MiryadResource de miryad-core EXPOSE `before_update` — forme depuis 0.3.1 : `before_update(db, active, existing, principal)`, asynchrone, `db: &C` —
       les mentions « pas de before_update » de ce fichier sont périmées pour CE hook) : comme
       `headers` n'est plus jamais relu par un client, un `PUT` qui ne le porte pas ne doit PAS
       l'effacer. Implémenter `before_update` : `headers` absent (donc `{}` par le défaut serde) ou

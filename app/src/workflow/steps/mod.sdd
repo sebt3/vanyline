@@ -27,6 +27,12 @@ Exposes:
   @RunInfo — lecture typée de `config._run` (@RunContext de ../run_context.sdd) :
     @RunInfo::from_config(&Value) -> Result<RunInfo, StepError> (`retryable: false` si `_run`
     est absent ou mal formé — un step lancé sans contexte est une erreur de fabrication du DAG).
+    À distinguer du @RunInfo de miryad-core (argument `run` de la signature
+    @MiryadWorkflowStep::run) : depuis miryad-core 0.3.1 il porte en plus `vars` (objet
+    `serde_json::Value` des variables constantes du run, lecture seule) et `trigger`
+    (`Option<String>` — le run parent le propage aux runs enfants) ; `Eq` n'est plus
+    derivé. Un littéral de struct de ce type (fixtures de test) doit renseigner ces deux
+    champs.
   @SandboxAccess — accès à la sandbox d'un run : @SandboxAccess::open(env, &RunInfo) -> Result<_,
     StepError> vérifie que `sandbox` est présent, que la Sandbox existe dans le namespace de
     l'Owner et que sa phase est `Running` (sinon erreur non retryable « sandbox non démarrée »),
@@ -48,6 +54,11 @@ Must:
   Ne jamais journaliser le jeton, ni `config`/`inputs` d'un step.
   Rendre des @StepError `retryable: false` pour toute erreur de configuration ou de contexte, et
     `retryable: true` seulement pour les pannes de transport transitoires.
+  Traiter @StepError de miryad-core sans inspecter ses variantes (aucun `match` sur le type
+    dans l'app) : les variantes nouvelles en 0.3.1, dont @ScriptTimeout (`MRD-WORKFLOW-009`),
+    remontent donc par le seul canal `message` — converties en erreur applicative locale
+    (`step_err` de ../../mcp_domain.rs, rendu d'état de step par ./../status.sdd),
+    sans comportement distinctif ici.
 
 Must not:
   Accepter un `kind` hors de la liste : un kind inconnu est une erreur du DAG (404, miryad-core).

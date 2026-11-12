@@ -5,7 +5,7 @@ Purpose:
   fichier ./mod.rs NE porte AUCUNE logique d'authentification en build de production :
   tout son contenu est sous `#[cfg(test)]`. L'authentification réelle (état
   @MiryadAuthState, client OIDC, routes, extracteurs) vit dans le crate EXTERNE
-  `miryad-core` (dépendance version 0.1.5, hors workspace cargo), consommé directement
+  `miryad-core` (dépendance version 0.3.1, hors workspace cargo), consommé directement
   par `../main.rs` (`MiryadAuthState`, `OidcClient`, `auth_router()`). Le contrat propre
   de ./mod.rs est donc uniquement un contrat de harnais de test : exposer aux tests de
   l'`app` un constructeur d'@MiryadAuthState avec un client OIDC simulé.
@@ -58,17 +58,17 @@ Returns:
     (@miryad_core::auth::issue_token, ex. `bearer_for` de ../db/entities/agents.rs) et
     ceux qui le VALIDENT via l'état partagent le même poivre HMAC (sinon chaque
     émission échoue en empreinte divergente).
-  @authorization_url (mock) — quatuor figé (signature miryad-core 0.2.0, PKCE S256) :
+  @authorization_url (mock) — quatuor figé (signature miryad-core 0.3.1, PKCE S256) :
     URL `https://issuer.example.com/authorize`, @CsrfToken::new(`"csrf"`),
     @Nonce::new(`"nonce"`), @PkceCodeVerifier::new(`"test-pkce-verifier"`).
 
 Raises:
   Aucune erreur propagée par les constructeurs eux-mêmes.
-  @exchange_code (mock, signature miryad-core 0.2.0 : `code`, `expected_nonce`,
+  @exchange_code (mock, signature miryad-core 0.3.1 : `code`, `expected_nonce`,
   @PkceCodeVerifier) — retourne toujours une @Err(@AuthError::Oidc) de message
   `"MRD-TEST-001: mock not used"`, quels que soient les arguments reçus (les trois
   arguments sont ignorés) : le mock n'est jamais censé servir un échange réel.
-  @verify_bearer (mock, ajouté au trait par miryad-core 0.2.0 : `jwt`) — retourne toujours
+  @verify_bearer (mock, ajouté au trait par miryad-core 0.2.0, inchangé en 0.3.1 : `jwt`) — retourne toujours
   une @Err(@AuthError::Oidc) de message `"MRD-TEST-002: mock not used"`, quel que soit le
   JWT reçu : le mock ne valide jamais de Bearer.
   Panique `expect("valid test url")` uniquement si la constante d'URL codée en dur
@@ -142,7 +142,7 @@ Scenario: URL d'autorisation déterministe
   When @authorization_url est appelée deux fois
   Then les deux appels retournent la même URL `https://issuer.example.com/authorize`,
     le même @CsrfToken `"csrf"`, le même @Nonce `"nonce"` et le même
-    @PkceCodeVerifier `"test-pkce-verifier"` (quatuor miryad-core 0.2.0)
+    @PkceCodeVerifier `"test-pkce-verifier"` (quatuor miryad-core 0.3.1)
 
 Tasks:
   [x] Convertir les 4 Scenario de cette spec en tests taggés (décision Sébastien
