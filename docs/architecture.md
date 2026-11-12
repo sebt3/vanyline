@@ -25,7 +25,7 @@ foi** (les sections concernées portent une note « Cible ») :
 
 ## Vue d'ensemble
 
-Neuf crates (dix avec `vanyline-llm-config`, à créer) : **cinq bibliothèques** partagées (`vanyline-tools`, `vanyline-cfgstore`, `vanyline-health`,
+Neuf crates : **cinq bibliothèques** partagées (`vanyline-tools`, `vanyline-cfgstore`, `vanyline-health`,
 `vanyline-lib`, `vanyline-crds`) et **quatre binaires** qui les consomment (`vanyline`, `vanyline-app`,
 `vanyline-sandbox`, `vanyline-controller`).
 
@@ -230,7 +230,7 @@ est ignoré par serde, ce qui verrouille le comportement. Table complète :
 | `mode` | `mode` (`AgentMode`) | direct |
 | `model` | `model` | direct |
 | `temperature` | sur `ModelProfile` (config.yaml), PAS l'agent | **ignoré** (single source, décision 2026-08-02) |
-| `permission` | — | sans objet (philosophie yolo, aucun système de permissions) |
+| `permission` | — | sans objet (permissions fixées par le contexte — Project/Sandbox —, pas par une approbation en session) |
 | `steps` | — | ne pas exposer (`max-turns` = filet anti-boucle interne, pas un plafond de travail) |
 | `color` | — | UI only, sans objet backend |
 | `disable`/`hidden`/`top_p` | — | sans équivalent |
@@ -274,8 +274,9 @@ skill nommé, toolset→mcp_server, `defaults.agent`→agent) — best-effort, u
 problèmes sont rapportés ensemble (pas de fail-fast).
 
 **Sécurité workspace assumée** : un `.vanyline/` de repo cloné peut définir
-des agents/mcp arbitraires — accepté (usage solo, agents de confiance,
-philosophie yolo du projet), simplement affiché au lancement de `run`/REPL
+des agents/mcp arbitraires — accepté (usage solo, agents de confiance ; les
+permissions sont fixées par le contexte — Project/Sandbox —, pas par une
+approbation en session), simplement affiché au lancement de `run`/REPL
 (« sources workspace : … ») pour la visibilité, pas de sandboxing ni de
 confirmation.
 

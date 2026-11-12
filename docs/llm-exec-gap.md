@@ -81,7 +81,7 @@ supporté par vanyline : `cli/src/fs_store.rs::RawAgentFrontmatter`).
 | `mode` (`primary/subagent/all`) | `mode` (`AgentMode`) | ✓ direct |
 | `model` | `model` | ✓ direct |
 | `temperature` | sur `ModelProfile` (config.yaml), pas l'agent | **table de correspondance** : à décider sprint 3 (override par agent ou ignoré) |
-| `permission` | **aucun** | **sans objet — philosophie yolo**. À ne pas reproduire (voir irritants) |
+| `permission` | **aucun** | **sans objet — permissions fixées par le contexte, pas par une approbation en session**. À ne pas reproduire (voir irritants) |
 | `steps` | `max-turns` interne (DEFAULT_MAX_TURNS=100) | **ne pas exposer** (voir décision) |
 | `color` | — | UI only, sans objet backend |
 | `disable`/`hidden`/`top_p` | — | sans équivalent |
@@ -114,7 +114,7 @@ cli/src/chat.rs:172 → `run_agent_turn`).
 | Irritant opencode | Cause | Ce que vanyline doit faire |
 |-------------------|-------|----------------------------|
 | Sessions cassées par les env héritées (`OPENCODE_SERVER_PASSWORD`, `OPENCODE_BINARY` → "Session not found") | le wrapper `llm-exec` doit `env -u ...` | **ne pas dépendre de ces variables** : le CLI vanyline est un binaire local, pas un serveur — aucune dépendance à reproduire ni contourner |
-| Permissions bash inopérantes en headless (Qwen ne peut pas s'auto-valider) | `ask` s'auto-rejette en `run`, sans `--auto` | **aucun système de permission** (philosophie yolo) — l'agent a accès direct |
+| Permissions bash inopérantes en headless (Qwen ne peut pas s'auto-valider) | `ask` s'auto-rejette en `run`, sans `--auto` | **pas d'approbation en session : permissions fixées par le contexte (Project/Sandbox)** |
 | Une permission auto-rejetée casse toute la session `run` (diff vide) | auto-reject → plantage | pas de permissions → **pas de rejet qui casse une session** |
 
 Ce sont les « avantageusement » de l'objectif : le remplacement perd ces trois
