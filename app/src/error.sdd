@@ -64,7 +64,7 @@ Depends on:
 Exposes:
   @AppError — `pub enum` à portée crate (./main.rs déclare `mod error;` sans `pub` : le
     binaire n'expose rien hors de lui-même ; les modules du crate l'importent par
-    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 31 variantes (compteur tenu à 31 depuis @AppError::SandboxRelayUnavailable, 2026-10-14 — ne pas re-compter à chaque ajout, le match @IntoResponse exhaustif est le contrat vivant),
+    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 29 variantes (31 avant C2 du chantier lymaille, 2026-11-12 : @AppError::ConversationNotFound et @AppError::ConversationAccessDenied retirées avec ./api/conversations.rs ; compteur tenu depuis @AppError::SandboxRelayUnavailable, 2026-10-14 — ne pas re-compter à chaque ajout, le match @IntoResponse exhaustif est le contrat vivant),
     aucun gating de feature. Le @Display de chaque variante commence par son marqueur suivi
     de `": "` SAUF @AppError::UnprocessableReference qui n'a pas de marqueur propre (gabarit
     `"{0}"`, marqueur hérité du @VnyError embarqué — voir `Tasks`). Rendus exacts, caractère
@@ -133,8 +133,8 @@ Exposes:
     spec-dd) : ./api/workflows.sdd avait d'abord rendu un type d'erreur LOCAL, en rupture
     du contrat « type unique » de ce fichier (seul `impl @IntoResponse` hors ./error.rs de
     tout app/src — grep) ; converti aux variantes dédiées sur le motif `VNL-SBX-*`/
-    `VNL-CNV-*` (les voisins ./api/sandboxes.rs et ./api/conversations.rs font exactement
-    cela). Les rendus sont BYTE-IDENTIQUES au type local remplacé (statuts et messages) ;
+    `VNL-SBX-*` (le voisin ./api/sandboxes.rs fait exactement cela ; ./api/conversations.rs,
+    autre convertisseur sur ce motif, a été retiré en C2 du chantier lymaille). Les rendus sont BYTE-IDENTIQUES au type local remplacé (statuts et messages) ;
     `VNL-WFA-001` reste la propriété de ./db/entities/project_workflows.sdd (hook
     @HookError 422, jamais un @AppError) ; les erreurs internes de ./api/workflows.rs
     réutilisent @AppError::InternalError (`VNL-INT-001`, pas de `VNL-WFA-009`).
@@ -346,7 +346,7 @@ Must:
 
 Must not:
   Renommer, renuméroter ou réaffecter un marqueur publié (`VNL-AUTH-004`, `VNL-LLM-001/002`,
-    `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001/002`, `VNL-REQ-001`, `VNL-INT-001`,
+    `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001/002` (retirés en C2, numéros non réutilisables), `VNL-REQ-001`, `VNL-INT-001`,
     `VNL-K8S-001/002/003`, `VNL-SBX-001/002/003`) ni retoucher un gabarit sans décision de
     spec actée — ces chaînes sortent dans les corps HTTP de l'app, les logs WS, et sont
     lues par les specs voisines (../../lib/src/error.sdd, ../../cfgstore/src/error.sdd,
@@ -563,7 +563,7 @@ Scenario: source_std_error_absente_partout_sauf_request_error
 Scenario: marqueurs_propres_de_apperror_uniques_dans_le_fichier
   Given le contenu de ./error.rs lu par `include_str!` dans un test du crate
   When chaque marqueur propre à ce fichier (`VNL-AUTH-004`, `VNL-LLM-001`, `VNL-LLM-002`,
-    `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001`, `VNL-CNV-002`, `VNL-REQ-001`, `VNL-INT-001`,
+    `VNL-MCP-001`, `VNL-AGT-001`, `VNL-REQ-001`, `VNL-INT-001`,
     `VNL-K8S-001`, `VNL-K8S-002`, `VNL-K8S-003`, `VNL-SBX-001`, `VNL-SBX-002`,
     `VNL-SBX-003`, `VNL-SBX-017`, `VNL-WFA-002`, `VNL-WFA-003`, `VNL-WFA-004`, `VNL-WFA-005`,
     `VNL-WFA-006`, `VNL-WFA-007`, `VNL-WFA-008`, `VNL-WFA-011`, `VNL-WFA-012`,

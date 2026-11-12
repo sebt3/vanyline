@@ -2,7 +2,7 @@ Spec: Db Entities
 
 Purpose:
   Module `entities` de la couche base de données de l'`app` : registre déclaratif des
-  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les quinze
+  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les douze
   sous-modules d'entités — aucun comportement propre, aucune réexportation, aucune
   fonction utilitaire : le contrat table ↔ entité (colonnes, clé primaire, relations)
   vit dans chaque fichier enfant (specs séparées en cours de rédaction, règle

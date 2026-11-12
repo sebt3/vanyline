@@ -77,6 +77,10 @@ Structure:
   - TOUTES méthodes (@any) `/sandboxes/{name}/git/{*path}` → @git_proxy — seul chemin
     avec paramètre wildcard `{*path}` du fichier ; le handler relit l'URI brute
     (`req.uri().path()`) et IGNORE le paramètre décodé par @Path (cf. ./sandboxes.rs).
+  - `GET` `/sandboxes/{name}/code-health` → @code_health — relais sandbox (relu par
+    l'app avec le jeton de l'Owner, ./sandboxes.sdd).
+  - `POST` `/sandboxes/{name}/code-health/refresh` → @code_health_refresh — relais
+    déclenchant un recalcul (./sandboxes.sdd).
   Syntaxe des paramètres : `{id}` / `{name}` / `{*path}` — la forme axum 0.8 (accolades),
   pas la forme axum 0.7 `:id` / `*path`.
   Les handlers branchés reçoivent tous l'identité par l'extracteur @AuthUser de

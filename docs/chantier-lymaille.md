@@ -99,7 +99,7 @@ Specs (parallélisables après B9), puis code séquentiel :
 - [x] **C1 — Nœud `agent` de workflow → step `subagent` de miryad-core.** Specs `workflow/steps/agent.sdd`, `workflow/mod.sdd`,
   `mcp_domain.sdd` ; code `workflow/steps/agent.rs`. Le type de contexte de liaison est `SUBAGENT_CONTEXT_TYPE`
   (`miryad-core#CHANGELOG 0.3.0`).
-- [ ] **C2 — Chat maison.** Retirer `ws/chat.rs`, `api/conversations.rs`, `system_agents.rs`, `api/local_tools.rs`, les entités
+- [x] **C2 — Chat maison.** Retirer `ws/chat.rs`, `api/conversations.rs`, `system_agents.rs`, `api/local_tools.rs`, les entités
   `chat_contexts`, `conversations`, `messages` **et leurs migrations d'origine** (`m20260825_000007` à `000009` et leurs `.sdd`),
   retirées de `migration/mod.rs` : table propre, aucune migration `drop` ; specs associées.
 - [ ] **C3 — Configuration LLM maison.** Retirer `config_store.rs`, les entités et l'API de `agents`, `llm_providers`,

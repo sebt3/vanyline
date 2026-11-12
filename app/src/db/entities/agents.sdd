@@ -109,8 +109,9 @@ Structure:
     colonne reste en lecture jusqu'au retrait C3 de l'entité. Non requis, pas de défaut.
   - `system_version: Option<i32>` — SQL `INTEGER` NULL (même migration) ; version du
     prompt système embarqué ; NULL pour un agent ordinaire.
-  Aucun champ temporel : la table ne porte ni `created_at` ni `updated_at` (déjà
-  possédée par les tables sœurs `vanyline_conversations`, pas par `vanyline_agents`).
+  Aucun champ temporel : la table ne porte ni `created_at` ni `updated_at` ; les tables
+  sœurs qui en portaient (`vanyline_conversations`) ont été retirées en C2 du chantier
+  lymaille.
 
 Accepts:
   Côté lecture SQL : toute ligne de `vanyline_agents` dont les colonnes respectent les
@@ -192,12 +193,13 @@ Handles:
     modèle à suivre pour les deux résolutions ci-dessus.
   - Cycle de vie FK entrant/sortant : suppression d'un utilisateur `miryad_users` →
     CASCADE sur ces lignes ; suppression du profil référencé → RESTRICT (impossible
-    tant qu'un agent pointe dessus). La FK sortante vers `vanyline_conversations.agent_id`
-    (ON DELETE SET NULL de
-    ../migration/m20260825_000008_create_vanyline_conversations.rs).
+    tant qu'un agent pointe dessus). La FK sortante `SET NULL` vers
+    `vanyline_conversations.agent_id` a disparu en C2 du chantier lymaille (2026-11-12) :
+    il ne reste que ces deux FK.
 
 Must:
-  AGENTS SYSTÈME (2026-10-04, ../../system_agents.sdd) : @Model porte `system_key: Option<String>` et
+  AGENTS SYSTÈME (2026-10-04 ; l'amorçage `../../system_agents.rs` est retiré en C2 du
+    chantier lymaille, les hooks ci-dessous restent le contrat de l'entité) : @Model porte `system_key: Option<String>` et
     `system_version: Option<i32>` (colonnes de la migration `m20261005_000003`) ; le hook
     `before_update` refuse (`VNL-AGENT-002`, 422) tout changement d'une ligne portant `system_key`
     autre que `model_profile_id` ; `before_delete` refuse la suppression d'une telle ligne
@@ -340,13 +342,14 @@ Scenario: Deux agents homonymes chez le même owner collent en base
     base ; un autre owner avec le même nom passe
 
 Scenario: Les FK du schéma bornent le cycle de vie des lignes
-  Given un agent inséré via @Entity::insert avec un `model_profile_id` valide et une
-    conversation `vanyline_conversations` pointant sur cet agent
-  When l'agent est supprimé, puis séparément le profil référencé par un agent
-    survivant, puis l'utilisateur owner avec ses agents
-  Then la suppression de l'agent remet `conversations.agent_id` à NULL (SET NULL), la
-    suppression du profil référencé échoue (RESTRICT), la suppression de l'utilisateur
-    emporte les agents par CASCADE
+  # Réécrit en C2 du chantier lymaille (2026-11-12) : la branche `SET NULL` vers
+  # `vanyline_conversations.agent_id` est sans objet (table retirée avec le chat
+  # maison). Aucun test taggué avant ni après — voir Tasks.
+  Given un agent inséré via @Entity::insert avec un `model_profile_id` valide
+  When le profil référencé par cet agent est supprimé, puis séparément l'utilisateur
+    owner avec ses agents
+  Then la suppression du profil référencé échoue (RESTRICT) et la suppression de
+    l'utilisateur emporte les agents par CASCADE
 
 Depends on:
   @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, @ActiveValue, prelude), @serde,
@@ -355,8 +358,6 @@ Depends on:
     externe hors dépôt.
   ../migration/m20260825_000006_create_vanyline_agents.rs — DDL source de vérité de la
     table (spec propre en cours).
-  ../migration/m20260825_000008_create_vanyline_conversations.rs — FK entrante
-    `conversations.agent_id` → cette table (SET NULL).
   ./model_profiles.rs + ./llm_providers.rs — cibles de FK et seed des tests
     (`seed_model_profile` enchaîne les deux inserts).
   ./mod.rs — déclaration `pub mod agents;` (cf. `./mod.sdd`, dont l'entrée
@@ -378,6 +379,9 @@ Scenario: put_mode_invalide_rejete_ligne_intacte
   Then la mise à jour est rejetée avec `VNL-AGENT-001` et la ligne en base est INCHANGÉE ; un PUT à valeur valide réussit
 
 Tasks:
+  [ ] Dériver un test du Scenario « Les FK du schéma bornent le cycle de vie des
+      lignes » (réécrit en C2 du chantier lymaille, branche conversation retirée) :
+      RESTRICT et CASCADE jamais assertés directement par un test taggué.
   [!] Cartographie des tests internes (seule entité avec tests DB réels) :
       `@mod tests` — `agent_record_resource_contract` (Scenario « Contrat ressource des
       quatre items est asserté »), `before_create_accepts_known_modes` (Scenario
