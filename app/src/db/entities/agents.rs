@@ -75,29 +75,21 @@ impl MiryadResource for Entity {
     /// Validation perdue lors de la bascule miryad-core (CHECK en base + `AgentMode` typé côté
     /// handler, cf. `docs/features/miryad-core-integration.md`) — restaurée ici pour la création
     /// (seule surface que `before_create` couvre). Le gap sur les noms `toolsets`/`skills`
-    /// (existence côté DB, `validate_toolsets`/`validate_skills`) reste accepté : `before_create`
-    /// n'a pas accès DB, même limite que la validation croisée par id déjà actée en Phase 1.
-    fn before_create(
+    /// (existence côté DB, `validate_toolsets`/`validate_skills`) reste accepté : le hook
+    /// n'utilise pas la connexion (limite déjà actée en Phase 1). Forme async à connexion
+    /// générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement inchangé — logique
+    /// sans attente rendue par [`std::future::ready`] (harnais : `async fn` sans `.await`
+    /// refusé, cf. harnais `tooling.sdd`).
+    fn before_create<C>(
+        _db: &C,
         active: Self::ActiveModel,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        let mode = match &active.mode {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
-            ActiveValue::NotSet => "",
-        };
-        verifier_mode(mode)?;
-        // AGENTS SYSTÈME (`Must` agents.sdd l.191-197, system_agents.sdd) : `system_key` et
-        // `system_version` sont des colonnes serveur — un corps de création client qui en
-        // porte une est refusé. Le CRUD générique ne crée que des agents ordinaires.
-        let carries_system_column = matches!(&active.system_key, ActiveValue::Set(Some(_)))
-            || matches!(&active.system_version, ActiveValue::Set(Some(_)));
-        if carries_system_column {
-            return Err(HookError::with_code(
-                "VNL-AGENT-004",
-                "system_key and system_version are server-owned columns and cannot be set by a client body",
-            ));
-        }
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_creation(active))
     }
 
     /// AGENTS SYSTÈME (`Must` agents.sdd l.191-197) : sur une ligne portant `system_key`,
@@ -106,66 +98,116 @@ impl MiryadResource for Entity {
     /// sont réécrites par `crate::system_agents::ensure_system_agents` directement en
     /// base, hors de cette voie. `id`/`owner_id` ne sont pas comparés : `rest::core::update`
     /// les force APRÈS ce hook (ils ne sont donc jamais un changement observable).
-    fn before_update(
+    /// Forme async à connexion générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement
+    /// inchangé.
+    fn before_update<C>(
+        _db: &C,
         active: Self::ActiveModel,
         existing: &Self::Model,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        if existing.system_key.is_some() {
-            let mut refused: Vec<&str> = Vec::new();
-            if is_changed(&active.name, &existing.name) {
-                refused.push("name");
-            }
-            if is_changed(&active.description, &existing.description) {
-                refused.push("description");
-            }
-            if is_changed(&active.mode, &existing.mode) {
-                refused.push("mode");
-            }
-            if is_changed(&active.toolsets, &existing.toolsets) {
-                refused.push("toolsets");
-            }
-            if is_changed(&active.skills, &existing.skills) {
-                refused.push("skills");
-            }
-            if is_changed(&active.system_prompt, &existing.system_prompt) {
-                refused.push("system_prompt");
-            }
-            if is_changed(&active.system_key, &existing.system_key) {
-                refused.push("system_key");
-            }
-            if is_changed(&active.system_version, &existing.system_version) {
-                refused.push("system_version");
-            }
-            if !refused.is_empty() {
-                return Err(HookError::with_code(
-                    "VNL-AGENT-002",
-                    format!(
-                        "system agents are code-piloted: only model_profile_id is editable, refused change on: {}",
-                        refused.join(", ")
-                    ),
-                ));
-            }
-        }
-        // `agents.sdd` (DÉCIDÉ 2026-10-18) : un `mode` posé par le PUT est revalidé comme à la
-        // création. Après la garde système : sur une ligne système, `VNL-AGENT-002` prime.
-        if let ActiveValue::Set(mode) = &active.mode {
-            verifier_mode(mode)?;
-        }
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_mise_a_jour(active, existing))
     }
 
     /// AGENTS SYSTÈME (`Must` agents.sdd l.191-197) : un agent système ne se supprime pas
     /// (`VNL-AGENT-003`) — il est piloté par le code et sa version, pas par le CRUD.
-    fn before_delete(existing: &Self::Model, _principal: &AuthPrincipal) -> Result<(), HookError> {
-        if existing.system_key.is_some() {
+    /// Forme async à connexion générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement
+    /// inchangé.
+    fn before_delete<C>(
+        _db: &C,
+        existing: &Self::Model,
+        _principal: &AuthPrincipal,
+    ) -> impl std::future::Future<Output = Result<(), HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+    {
+        std::future::ready(valider_suppression(existing))
+    }
+}
+
+/// Logique de `before_create` (sans attente) : valeurs admises de `mode` puis garde des
+/// colonnes serveur `system_key`/`system_version` (`VNL-AGENT-004`).
+fn valider_creation(active: ActiveModel) -> Result<ActiveModel, HookError> {
+    let mode = match &active.mode {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
+        ActiveValue::NotSet => "",
+    };
+    verifier_mode(mode)?;
+    // AGENTS SYSTÈME (`Must` agents.sdd l.191-197, system_agents.sdd) : `system_key` et
+    // `system_version` sont des colonnes serveur — un corps de création client qui en
+    // porte une est refusé. Le CRUD générique ne crée que des agents ordinaires.
+    let carries_system_column = matches!(&active.system_key, ActiveValue::Set(Some(_)))
+        || matches!(&active.system_version, ActiveValue::Set(Some(_)));
+    if carries_system_column {
+        return Err(HookError::with_code(
+            "VNL-AGENT-004",
+            "system_key and system_version are server-owned columns and cannot be set by a client body",
+        ));
+    }
+    Ok(active)
+}
+
+/// Logique de `before_update` (sans attente) : garde des lignes système (`VNL-AGENT-002`,
+/// prioritaire) puis revalidation du `mode` posé (`VNL-AGENT-001`).
+fn valider_mise_a_jour(active: ActiveModel, existing: &Model) -> Result<ActiveModel, HookError> {
+    if existing.system_key.is_some() {
+        let mut refused: Vec<&str> = Vec::new();
+        if is_changed(&active.name, &existing.name) {
+            refused.push("name");
+        }
+        if is_changed(&active.description, &existing.description) {
+            refused.push("description");
+        }
+        if is_changed(&active.mode, &existing.mode) {
+            refused.push("mode");
+        }
+        if is_changed(&active.toolsets, &existing.toolsets) {
+            refused.push("toolsets");
+        }
+        if is_changed(&active.skills, &existing.skills) {
+            refused.push("skills");
+        }
+        if is_changed(&active.system_prompt, &existing.system_prompt) {
+            refused.push("system_prompt");
+        }
+        if is_changed(&active.system_key, &existing.system_key) {
+            refused.push("system_key");
+        }
+        if is_changed(&active.system_version, &existing.system_version) {
+            refused.push("system_version");
+        }
+        if !refused.is_empty() {
             return Err(HookError::with_code(
-                "VNL-AGENT-003",
-                "system agents cannot be deleted",
+                "VNL-AGENT-002",
+                format!(
+                    "system agents are code-piloted: only model_profile_id is editable, refused change on: {}",
+                    refused.join(", ")
+                ),
             ));
         }
-        Ok(())
     }
+    // `agents.sdd` (DÉCIDÉ 2026-10-18) : un `mode` posé par le PUT est revalidé comme à la
+    // création. Après la garde système : sur une ligne système, `VNL-AGENT-002` prime.
+    if let ActiveValue::Set(mode) = &active.mode {
+        verifier_mode(mode)?;
+    }
+    Ok(active)
+}
+
+/// Logique de `before_delete` (sans attente) : une ligne portant `system_key` ne se
+/// supprime pas (`VNL-AGENT-003`).
+fn valider_suppression(existing: &Model) -> Result<(), HookError> {
+    if existing.system_key.is_some() {
+        return Err(HookError::with_code(
+            "VNL-AGENT-003",
+            "system agents cannot be deleted",
+        ));
+    }
+    Ok(())
 }
 
 /// Valeurs admises de `mode` (création et mise à jour) : `VNL-AGENT-001` sinon.
@@ -202,6 +244,13 @@ mod tests {
     use super::*;
     use miryad_core::resource::AccessPolicy;
     use sea_orm::{IntoActiveModel, Set};
+
+    /// Connexion factice pour la forme async des hooks (miryad-core 0.3.1, hooks.sdd DEC-2) —
+    /// même motif que `mock_db` des tests de `miryad-core/src/resource.rs` : les hooks testés
+    /// ici n'effectuent aucune requête, la connexion n'est pas consultée.
+    fn mock_db() -> sea_orm::DatabaseConnection {
+        sea_orm::MockDatabase::new(sea_orm::DbBackend::Sqlite).into_connection()
+    }
 
     #[test]
     fn agent_record_resource_contract() {
@@ -264,63 +313,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn before_create_accepts_known_modes() {
+    #[tokio::test]
+    async fn before_create_accepts_known_modes() {
         for mode in ["primary", "subagent", "all"] {
-            assert!(Entity::before_create(sample(mode), &test_principal()).is_ok());
+            assert!(
+                Entity::before_create(&mock_db(), sample(mode), &test_principal())
+                    .await
+                    .is_ok()
+            );
         }
     }
 
-    #[test]
-    fn before_create_rejects_unknown_mode() {
-        let err = Entity::before_create(sample("bogus"), &test_principal()).unwrap_err();
+    #[tokio::test]
+    async fn before_create_rejects_unknown_mode() {
+        let err = Entity::before_create(&mock_db(), sample("bogus"), &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-001"));
     }
 
     /// `agents.sdd` (tâche DÉCIDÉ 2026-10-18) : `before_update` valide `mode` comme
     /// `before_create` (mêmes valeurs, même code `VNL-AGENT-001`).
-    #[test]
-    fn before_update_accepte_les_modes_connus() {
+    #[tokio::test]
+    async fn before_update_accepte_les_modes_connus() {
         let existing = sample_model("primary");
         for mode in ["primary", "subagent", "all"] {
             let mut active = existing.clone().into_active_model();
             active.mode = Set(mode.to_string());
             assert!(
-                Entity::before_update(active, &existing, &test_principal()).is_ok(),
+                Entity::before_update(&mock_db(), active, &existing, &test_principal())
+                    .await
+                    .is_ok(),
                 "mode {mode} doit passer"
             );
         }
     }
 
-    #[test]
-    fn before_update_rejette_mode_inconnu_avec_vnl_agent_001() {
+    #[tokio::test]
+    async fn before_update_rejette_mode_inconnu_avec_vnl_agent_001() {
         let existing = sample_model("primary");
         let mut active = existing.clone().into_active_model();
         active.mode = Set("bogus".to_string());
-        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        let err = Entity::before_update(&mock_db(), active, &existing, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-001"));
     }
 
     /// Un update qui ne touche pas `mode` (`NotSet`/`Unchanged`) n'est pas revalidé : la
     /// valeur relue reste la responsabilité de la ligne existante.
-    #[test]
-    fn before_update_sans_mode_pose_ne_revalide_pas() {
+    #[tokio::test]
+    async fn before_update_sans_mode_pose_ne_revalide_pas() {
         let existing = sample_model("primary");
         let mut active = existing.clone().into_active_model();
         active.mode = sea_orm::ActiveValue::NotSet;
         active.system_prompt = Set("autre".to_string());
-        assert!(Entity::before_update(active, &existing, &test_principal()).is_ok());
+        assert!(
+            Entity::before_update(&mock_db(), active, &existing, &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
     /// La garde des agents SYSTÈME (VNL-AGENT-002) coexiste avec la validation du mode et lui
     /// est PRIORITAIRE : sur une ligne système, tout changement de `mode` (même invalide) est
     /// refusé par la garde, la validation du mode n'est jamais atteinte.
-    #[test]
-    fn before_update_garde_systeme_reste_prioritaire_sur_le_mode() {
+    #[tokio::test]
+    async fn before_update_garde_systeme_reste_prioritaire_sur_le_mode() {
         let existing = existing_system_row();
         let mut active = existing.clone().into_active_model();
         active.mode = Set("bogus".to_string());
-        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        let err = Entity::before_update(&mock_db(), active, &existing, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-002"));
     }
 
@@ -328,74 +393,98 @@ mod tests {
 
     /// Scenario (`system_agents.sdd`) : `creation_client_avec_cle_systeme` — un corps de
     /// création portant `system_key` est refusé (`VNL-AGENT-004`).
-    #[test]
-    fn before_create_refuse_corps_portant_system_key() {
+    #[tokio::test]
+    async fn before_create_refuse_corps_portant_system_key() {
         let mut active = sample("primary");
         active.system_key = Set(Some("config".to_string()));
-        let err = Entity::before_create(active, &test_principal()).unwrap_err();
+        let err = Entity::before_create(&mock_db(), active, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-004"));
     }
 
     /// Même Scenario, branche `system_version` : un corps portant la version du prompt
     /// embarqué est refusé aussi.
-    #[test]
-    fn before_create_refuse_corps_portant_system_version() {
+    #[tokio::test]
+    async fn before_create_refuse_corps_portant_system_version() {
         let mut active = sample("primary");
         active.system_version = Set(Some(1));
-        let err = Entity::before_create(active, &test_principal()).unwrap_err();
+        let err = Entity::before_create(&mock_db(), active, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-004"));
     }
 
     /// Le défaut serde des deux champs (clé absente du corps → `Set(None)`) passe
     /// `before_create` : les agents ordinaires ne sont pas affectés.
-    #[test]
-    fn before_create_accepte_ligne_ordinaire_sans_cle_systeme() {
-        assert!(Entity::before_create(sample("primary"), &test_principal()).is_ok());
+    #[tokio::test]
+    async fn before_create_accepte_ligne_ordinaire_sans_cle_systeme() {
+        assert!(
+            Entity::before_create(&mock_db(), sample("primary"), &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
     /// Scenario (`system_agents.sdd`) : `seul_le_modele_est_modifiable` — modifier
     /// `system_prompt` d'une ligne portant `system_key` est refusé (`VNL-AGENT-002`, 422).
-    #[test]
-    fn before_update_refuse_changement_de_prompt_sur_ligne_systeme() {
+    #[tokio::test]
+    async fn before_update_refuse_changement_de_prompt_sur_ligne_systeme() {
         let existing = existing_system_row();
         let mut active = existing.clone().into_active_model();
         active.model_profile_id = Set(9);
         active.system_prompt = Set("prompt detourne".to_string());
-        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        let err = Entity::before_update(&mock_db(), active, &existing, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-002"));
     }
 
     /// Même Scenario, branche succès : un update qui ne change QUE `model_profile_id` passe.
-    #[test]
-    fn before_update_accepte_changement_du_seul_modele() {
+    #[tokio::test]
+    async fn before_update_accepte_changement_du_seul_modele() {
         let existing = existing_system_row();
         let mut active = existing.clone().into_active_model();
         active.model_profile_id = Set(9);
-        assert!(Entity::before_update(active, &existing, &test_principal()).is_ok());
+        assert!(
+            Entity::before_update(&mock_db(), active, &existing, &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
     /// Un update d'une ligne ORDINAIRE (pas de `system_key`) garde son comportement actuel :
     /// tout changement passe.
-    #[test]
-    fn before_update_accepte_ligne_ordinaire() {
+    #[tokio::test]
+    async fn before_update_accepte_ligne_ordinaire() {
         let existing = sample_model("primary");
         let mut active = existing.clone().into_active_model();
         active.system_prompt = Set("modifie".to_string());
-        assert!(Entity::before_update(active, &existing, &test_principal()).is_ok());
+        assert!(
+            Entity::before_update(&mock_db(), active, &existing, &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
     /// Scenario (`system_agents.sdd`) : `suppression_refusee` — `before_delete` refuse la
     /// suppression d'une ligne portant `system_key` (`VNL-AGENT-003`).
-    #[test]
-    fn before_delete_refuse_ligne_systeme() {
-        let err = Entity::before_delete(&existing_system_row(), &test_principal()).unwrap_err();
+    #[tokio::test]
+    async fn before_delete_refuse_ligne_systeme() {
+        let err = Entity::before_delete(&mock_db(), &existing_system_row(), &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-AGENT-003"));
     }
 
     /// La suppression d'un agent ordinaire reste autorisée par les hooks de ce fichier.
-    #[test]
-    fn before_delete_accepte_ligne_ordinaire() {
-        assert!(Entity::before_delete(&sample_model("primary"), &test_principal()).is_ok());
+    #[tokio::test]
+    async fn before_delete_accepte_ligne_ordinaire() {
+        assert!(
+            Entity::before_delete(&mock_db(), &sample_model("primary"), &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
     /// Scenario : `Sérialisation REST expose la forme ligne complète` — depuis

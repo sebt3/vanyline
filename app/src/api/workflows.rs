@@ -177,8 +177,13 @@ fn parse_scope(scope: &str) -> Result<RunScope, AppError> {
 /// miryad-core (seule porte publique vers `validate_dag`, `pub(crate)` dans la crate —
 /// vérifié 0.1.5) : `WorkflowError::InvalidDag` → `HookError` sans code dont le message
 /// est rendu 400 sous `MRD-WORKFLOW-004` (`Raises`). Le principal construit ici n'est
-/// jamais lu par le hook (signature d'interface).
-fn validate_dag(steps: &[StepDefinition], user: &AuthUser) -> Result<(), AppError> {
+/// jamais lu par le hook (signature d'interface). Forme async à connexion générique :
+/// miryad-core 0.3.1 (hooks.sdd, DEC-2) — la connexion prêtée au hook n'est pas
+/// consultée, elle est empruntée à l'appelant.
+async fn validate_dag<C>(db: &C, steps: &[StepDefinition], user: &AuthUser) -> Result<(), AppError>
+where
+    C: sea_orm::ConnectionTrait,
+{
     let active = WorkflowDefinitionActiveModel {
         id: NotSet,
         name: Set(String::new()),
@@ -192,7 +197,8 @@ fn validate_dag(steps: &[StepDefinition], user: &AuthUser) -> Result<(), AppErro
         preferred_username: None,
         source: PrincipalSource::ApiToken { token_id: 0 },
     };
-    WorkflowDefinition::before_create(active, &principal)
+    WorkflowDefinition::before_create(db, active, &principal)
+        .await
         .map_err(|hook| AppError::WorkflowDagInvalid(hook.message))?;
     Ok(())
 }
@@ -344,7 +350,7 @@ pub async fn create_workflow_db(
     body: CreateWorkflowBody,
 ) -> Result<WorkflowDetail, AppError> {
     let scope = parse_scope(&body.scope)?;
-    validate_dag(&body.steps, user)?;
+    validate_dag(db, &body.steps, user).await?;
     validate_kinds(&body.steps, scope)?;
 
     let stored_name = full_name(owner, project, &body.name);
@@ -426,7 +432,7 @@ pub async fn update_workflow(
     }
     let scope = parse_scope(&attach.scope)?;
     if let Some(steps) = &body.steps {
-        validate_dag(steps, &user)?;
+        validate_dag(&state.auth.db, steps, &user).await?;
         validate_kinds(steps, scope)?;
     }
 
@@ -2306,7 +2312,21 @@ mod tests {
 
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1, "un seul envoi à l'ingress");
-        let etapes = sends[0].as_array().expect("le corps est le DAG sérialisé");
+        // miryad-core 0.3.1 (client.sdd) : le corps POST est l'enveloppe `RunInput`
+        // `{ dag, vars, trigger }` — le DAG matérialisé est lu sous `dag` ; `vars` est l'objet
+        // vide et `trigger` `null` posés par `WorkflowRuntime::trigger` (runtime.sdd).
+        assert_eq!(
+            sends[0]["vars"],
+            serde_json::json!({}),
+            "vars vides au déclenchement de l'app"
+        );
+        assert!(
+            sends[0]["trigger"].is_null(),
+            "trigger None au déclenchement de l'app"
+        );
+        let etapes = sends[0]["dag"]
+            .as_array()
+            .expect("le champ dag de l'enveloppe RunInput");
         assert_eq!(etapes.len(), 1);
         let run = &etapes[0]["config"]["_run"];
         assert_eq!(run["run_id"], serde_json::json!(launch.run_id));
@@ -2353,7 +2373,8 @@ mod tests {
         {
             let sends = fake.sends.lock().unwrap();
             assert_eq!(sends.len(), 1);
-            for etape in sends[0].as_array().expect("DAG matérialisé") {
+            // Enveloppe `RunInput` de miryad-core 0.3.1 : le DAG matérialisé sous `dag`.
+            for etape in sends[0]["dag"].as_array().expect("DAG matérialisé") {
                 assert_eq!(
                     etape["config"]["_run"]["sandbox"],
                     serde_json::json!("s1"),

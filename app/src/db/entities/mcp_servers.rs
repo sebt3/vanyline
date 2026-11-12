@@ -54,17 +54,19 @@ impl MiryadResource for Entity {
 
     /// Validation perdue lors de la bascule miryad-core (CHECK en base + `validate_server_type`
     /// sur chaque create/update, cf. `docs/features/miryad-core-integration.md`) — restaurée ici
-    /// pour la création (seule surface que `before_create` couvre).
-    fn before_create(
+    /// pour la création (seule surface que `before_create` couvre). Forme async à connexion
+    /// générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement inchangé — logique sans
+    /// attente rendue par [`std::future::ready`] (harnais : `manual_async_fn` et `unused_async_trait_impl` se contredisent sur `async fn` sans `.await`, cf. `tooling.sdd`).
+    fn before_create<C>(
+        _db: &C,
         active: Self::ActiveModel,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        let server_type = match &active.server_type {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
-            ActiveValue::NotSet => "",
-        };
-        verifier_server_type(server_type)?;
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_creation(active))
     }
 
     /// Mise à jour. (1) `server_type` posé par le PUT est revalidé comme à la création
@@ -72,26 +74,52 @@ impl MiryadResource for Entity {
     /// JOUR DES SECRETS ») : `headers` n'est jamais relu par un client, donc un `PUT` qui ne le
     /// porte pas ne doit pas l'effacer. `headers` absent (`{}` par défaut serde) ou objet vide
     /// ⇒ valeur existante conservée ; objet non vide ⇒ remplacé ; `null` explicite ⇒ effacé.
-    fn before_update(
-        mut active: Self::ActiveModel,
+    /// Forme async à connexion générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement
+    /// inchangé.
+    fn before_update<C>(
+        _db: &C,
+        active: Self::ActiveModel,
         existing: &Model,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        if let ActiveValue::Set(server_type) = &active.server_type {
-            verifier_server_type(server_type)?;
-        }
-        let incoming = match &active.headers {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
-            ActiveValue::NotSet => default_json_object(),
-        };
-        let effective = match incoming {
-            serde_json::Value::Null => default_json_object(),
-            serde_json::Value::Object(ref map) if map.is_empty() => existing.headers.clone(),
-            other => other,
-        };
-        active.headers = ActiveValue::Set(effective);
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_mise_a_jour(active, existing))
     }
+}
+
+/// Logique de `before_create` (sans attente) : valeurs admises de `server_type`.
+fn valider_creation(active: ActiveModel) -> Result<ActiveModel, HookError> {
+    let server_type = match &active.server_type {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
+        ActiveValue::NotSet => "",
+    };
+    verifier_server_type(server_type)?;
+    Ok(active)
+}
+
+/// Logique de `before_update` (sans attente) : revalidation de `server_type` puis règle des
+/// secrets sur `headers` (absent/objet vide ⇒ conservé, non vide ⇒ remplacé, `null` ⇒ effacé).
+fn valider_mise_a_jour(
+    mut active: ActiveModel,
+    existing: &Model,
+) -> Result<ActiveModel, HookError> {
+    if let ActiveValue::Set(server_type) = &active.server_type {
+        verifier_server_type(server_type)?;
+    }
+    let incoming = match &active.headers {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+        ActiveValue::NotSet => default_json_object(),
+    };
+    let effective = match incoming {
+        serde_json::Value::Null => default_json_object(),
+        serde_json::Value::Object(ref map) if map.is_empty() => existing.headers.clone(),
+        other => other,
+    };
+    active.headers = ActiveValue::Set(effective);
+    Ok(active)
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +143,13 @@ mod tests {
     use super::*;
     use miryad_core::resource::AccessPolicy;
     use sea_orm::IntoActiveModel;
+
+    /// Connexion factice pour la forme async des hooks (miryad-core 0.3.1, hooks.sdd DEC-2) —
+    /// même motif que `mock_db` des tests de `miryad-core/src/resource.rs` : les hooks testés
+    /// ici n'effectuent aucune requête, la connexion n'est pas consultée.
+    fn mock_db() -> sea_orm::DatabaseConnection {
+        sea_orm::MockDatabase::new(sea_orm::DbBackend::Sqlite).into_connection()
+    }
 
     #[test]
     fn mcp_server_resource_contract() {
@@ -146,39 +181,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn before_create_accepts_known_server_types() {
-        assert!(Entity::before_create(sample("sse"), &test_principal()).is_ok());
-        assert!(Entity::before_create(sample("http-streamable"), &test_principal()).is_ok());
+    #[tokio::test]
+    async fn before_create_accepts_known_server_types() {
+        assert!(
+            Entity::before_create(&mock_db(), sample("sse"), &test_principal())
+                .await
+                .is_ok()
+        );
+        assert!(
+            Entity::before_create(&mock_db(), sample("http-streamable"), &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
-    #[test]
-    fn before_create_rejects_unknown_server_type() {
-        let err = Entity::before_create(sample("bogus"), &test_principal()).unwrap_err();
+    #[tokio::test]
+    async fn before_create_rejects_unknown_server_type() {
+        let err = Entity::before_create(&mock_db(), sample("bogus"), &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-MCP-003"));
     }
 
     /// `mcp_servers.sdd` (tâche DÉCIDÉ 2026-10-18) : `before_update` valide `server_type`
     /// comme `before_create` (mêmes valeurs, même code `VNL-MCP-003`).
-    #[test]
-    fn before_update_accepte_les_server_types_connus() {
+    #[tokio::test]
+    async fn before_update_accepte_les_server_types_connus() {
         let existing = sample_with_headers();
         for server_type in ["sse", "http-streamable"] {
             let mut active = existing.clone().into_active_model();
             active.server_type = sea_orm::ActiveValue::Set(server_type.to_string());
             assert!(
-                Entity::before_update(active, &existing, &test_principal()).is_ok(),
+                Entity::before_update(&mock_db(), active, &existing, &test_principal())
+                    .await
+                    .is_ok(),
                 "server_type {server_type} doit passer"
             );
         }
     }
 
-    #[test]
-    fn before_update_rejette_server_type_inconnu_avec_vnl_mcp_003() {
+    #[tokio::test]
+    async fn before_update_rejette_server_type_inconnu_avec_vnl_mcp_003() {
         let existing = sample_with_headers();
         let mut active = existing.clone().into_active_model();
         active.server_type = sea_orm::ActiveValue::Set("bogus".to_string());
-        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        let err = Entity::before_update(&mock_db(), active, &existing, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-MCP-003"));
     }
 
@@ -301,13 +350,15 @@ mod tests {
 
     /// Décision 2026-10-18 (`mcp_servers.sdd`, Tasks « MISE À JOUR DES SECRETS ») : `headers`
     /// absent (donc `{}` par le défaut serde) ou objet vide ⇒ la valeur existante est conservée.
-    #[test]
-    fn put_sans_headers_conserve_les_headers() {
+    #[tokio::test]
+    async fn put_sans_headers_conserve_les_headers() {
         let out = Entity::before_update(
+            &mock_db(),
             put_active(serde_json::json!({})),
             &sample_with_headers(),
             &test_principal(),
         )
+        .await
         .expect("hook accepts");
         assert_eq!(
             headers_of(&out),
@@ -316,25 +367,29 @@ mod tests {
     }
 
     /// Objet non vide ⇒ remplacé.
-    #[test]
-    fn put_headers_non_vide_remplace() {
+    #[tokio::test]
+    async fn put_headers_non_vide_remplace() {
         let out = Entity::before_update(
+            &mock_db(),
             put_active(serde_json::json!({"X-Api-Key": "k2"})),
             &sample_with_headers(),
             &test_principal(),
         )
+        .await
         .expect("hook accepts");
         assert_eq!(headers_of(&out), serde_json::json!({"X-Api-Key": "k2"}));
     }
 
     /// `null` EXPLICITE ⇒ efface (`{}` en base).
-    #[test]
-    fn put_headers_null_efface() {
+    #[tokio::test]
+    async fn put_headers_null_efface() {
         let out = Entity::before_update(
+            &mock_db(),
             put_active(serde_json::Value::Null),
             &sample_with_headers(),
             &test_principal(),
         )
+        .await
         .expect("hook accepts");
         assert_eq!(headers_of(&out), serde_json::json!({}));
     }

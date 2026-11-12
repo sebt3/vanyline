@@ -172,7 +172,9 @@ pub struct WorkflowRuntime {
 impl WorkflowRuntime {
     /// Déclenche un run du DAG donné — délègue à `miryad_core::workflow::client::trigger_run`
     /// (POST ingress, jamais bloquant sur la complétion ; les `inputs` du DAG sont déjà
-    /// matérialisés par `run_context`).
+    /// matérialisés par `run_context`). vars/trigger (miryad-core 0.3.1) : objet vide et `None`
+    /// au déclenchement de l'app (`runtime.sdd`) — les variables de run et l'identité du
+    /// déclencheur ne sont pas encore câblées côté app (voir le `[?]` de la spec).
     ///
     /// # Errors
     ///
@@ -181,7 +183,14 @@ impl WorkflowRuntime {
     /// indécodable (`MRD-WORKFLOW-003`), config invalide (`MRD-WORKFLOW-007`).
     #[allow(dead_code)] // W4 consommateurs (`api/workflows.sdd`, `mcp_domain.sdd`) — tooling.sdd
     pub async fn trigger(&self, dag: &DagSteps) -> Result<RunHandle, WorkflowError> {
-        trigger_run(&self.app.miryad_config(), &self.http, dag).await
+        trigger_run(
+            &self.app.miryad_config(),
+            &self.http,
+            dag,
+            &serde_json::Map::new(),
+            None,
+        )
+        .await
     }
 
     /// URL d'ingress Restate (déclenchement des runs) — `runtime.sdd` `Exposes`.

@@ -532,6 +532,8 @@ mod tests {
             run_key: "rk".to_string(),
             step_id: "s".to_string(),
             depth: 0,
+            vars: serde_json::json!({}),
+            trigger: None,
         }
     }
 

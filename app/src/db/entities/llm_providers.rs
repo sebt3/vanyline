@@ -52,18 +52,19 @@ impl MiryadResource for Entity {
 
     /// Validation perdue lors de la bascule miryad-core (CHECK en base + `validate_provider_type`
     /// sur chaque create/update, cf. `docs/features/miryad-core-integration.md`) — restaurée ici
-    /// pour la création (seule surface que `before_create` couvre ; pas d'équivalent
-    /// `before_update` dans le trait, limite du framework, pas de cette entité).
-    fn before_create(
+    /// pour la création (seule surface que `before_create` couvre). Forme async à connexion
+    /// générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement inchangé — logique sans
+    /// attente rendue par [`std::future::ready`] (harnais : `manual_async_fn` et `unused_async_trait_impl` se contredisent sur `async fn` sans `.await`, cf. `tooling.sdd`).
+    fn before_create<C>(
+        _db: &C,
         active: Self::ActiveModel,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        let provider_type = match &active.provider_type {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
-            ActiveValue::NotSet => "",
-        };
-        verifier_provider_type(provider_type)?;
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_creation(active))
     }
 
     /// Mise à jour. (1) `provider_type` posé par le PUT est revalidé comme à la création
@@ -71,25 +72,52 @@ impl MiryadResource for Entity {
     /// À JOUR DES SECRETS ») : `api_key` n'est jamais relue par un client, donc un `PUT` qui ne
     /// la porte pas ne doit pas l'effacer. `api_key` absente ou `null` (indiscernables, @None)
     /// ⇒ valeur existante conservée ; chaîne vide ⇒ clé effacée ; chaîne non vide ⇒ remplacée.
-    fn before_update(
-        mut active: Self::ActiveModel,
+    /// Forme async à connexion générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement
+    /// inchangé.
+    fn before_update<C>(
+        _db: &C,
+        active: Self::ActiveModel,
         existing: &Model,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        if let ActiveValue::Set(provider_type) = &active.provider_type {
-            verifier_provider_type(provider_type)?;
-        }
-        let incoming = match &active.api_key {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
-            ActiveValue::NotSet => None,
-        };
-        active.api_key = ActiveValue::Set(match incoming {
-            None => existing.api_key.clone(),
-            Some(key) if key.is_empty() => None,
-            Some(key) => Some(key),
-        });
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_mise_a_jour(active, existing))
     }
+}
+
+/// Logique de `before_create` (sans attente) : valeurs admises de `provider_type`.
+fn valider_creation(active: ActiveModel) -> Result<ActiveModel, HookError> {
+    let provider_type = match &active.provider_type {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
+        ActiveValue::NotSet => "",
+    };
+    verifier_provider_type(provider_type)?;
+    Ok(active)
+}
+
+/// Logique de `before_update` (sans attente) : revalidation de `provider_type` puis
+/// règle des secrets sur `api_key` (absente/`null` ⇒ conservée, vide ⇒ effacée, non vide
+/// ⇒ remplacée).
+fn valider_mise_a_jour(
+    mut active: ActiveModel,
+    existing: &Model,
+) -> Result<ActiveModel, HookError> {
+    if let ActiveValue::Set(provider_type) = &active.provider_type {
+        verifier_provider_type(provider_type)?;
+    }
+    let incoming = match &active.api_key {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.clone(),
+        ActiveValue::NotSet => None,
+    };
+    active.api_key = ActiveValue::Set(match incoming {
+        None => existing.api_key.clone(),
+        Some(key) if key.is_empty() => None,
+        Some(key) => Some(key),
+    });
+    Ok(active)
 }
 
 /// Valeurs admises de `provider_type` (création et mise à jour) : `VNL-LLM-005` sinon.
@@ -109,6 +137,13 @@ mod tests {
     use super::*;
     use miryad_core::resource::AccessPolicy;
     use sea_orm::IntoActiveModel;
+
+    /// Connexion factice pour la forme async des hooks (miryad-core 0.3.1, hooks.sdd DEC-2) —
+    /// même motif que `mock_db` des tests de `miryad-core/src/resource.rs` : les hooks testés
+    /// ici n'effectuent aucune requête, la connexion n'est pas consultée.
+    fn mock_db() -> sea_orm::DatabaseConnection {
+        sea_orm::MockDatabase::new(sea_orm::DbBackend::Sqlite).into_connection()
+    }
 
     #[test]
     fn llm_provider_resource_contract() {
@@ -141,39 +176,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn before_create_accepts_known_provider_types() {
-        assert!(Entity::before_create(sample("ollama"), &test_principal()).is_ok());
-        assert!(Entity::before_create(sample("openai-compatible"), &test_principal()).is_ok());
+    #[tokio::test]
+    async fn before_create_accepts_known_provider_types() {
+        assert!(
+            Entity::before_create(&mock_db(), sample("ollama"), &test_principal())
+                .await
+                .is_ok()
+        );
+        assert!(
+            Entity::before_create(&mock_db(), sample("openai-compatible"), &test_principal())
+                .await
+                .is_ok()
+        );
     }
 
-    #[test]
-    fn before_create_rejects_unknown_provider_type() {
-        let err = Entity::before_create(sample("bogus"), &test_principal()).unwrap_err();
+    #[tokio::test]
+    async fn before_create_rejects_unknown_provider_type() {
+        let err = Entity::before_create(&mock_db(), sample("bogus"), &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-LLM-005"));
     }
 
     /// `llm_providers.sdd` (tâche DÉCIDÉ 2026-10-18) : `before_update` valide `provider_type`
     /// comme `before_create` (mêmes valeurs, même code `VNL-LLM-005`).
-    #[test]
-    fn before_update_accepte_les_provider_types_connus() {
+    #[tokio::test]
+    async fn before_update_accepte_les_provider_types_connus() {
         let existing = sample_with_key();
         for provider_type in ["ollama", "openai-compatible"] {
             let mut active = existing.clone().into_active_model();
             active.provider_type = sea_orm::ActiveValue::Set(provider_type.to_string());
             assert!(
-                Entity::before_update(active, &existing, &test_principal()).is_ok(),
+                Entity::before_update(&mock_db(), active, &existing, &test_principal())
+                    .await
+                    .is_ok(),
                 "provider_type {provider_type} doit passer"
             );
         }
     }
 
-    #[test]
-    fn before_update_rejette_provider_type_inconnu_avec_vnl_llm_005() {
+    #[tokio::test]
+    async fn before_update_rejette_provider_type_inconnu_avec_vnl_llm_005() {
         let existing = sample_with_key();
         let mut active = existing.clone().into_active_model();
         active.provider_type = sea_orm::ActiveValue::Set("bogus".to_string());
-        let err = Entity::before_update(active, &existing, &test_principal()).unwrap_err();
+        let err = Entity::before_update(&mock_db(), active, &existing, &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-LLM-005"));
     }
 
@@ -288,33 +337,43 @@ mod tests {
 
     /// Décision 2026-10-18 (`llm_providers.sdd`, Tasks « MISE À JOUR DES SECRETS ») :
     /// `api_key` absente ou `null` (indiscernables, @None) ⇒ la valeur existante est conservée.
-    #[test]
-    fn put_sans_api_key_conserve_la_cle() {
-        let out = Entity::before_update(put_active(None), &sample_with_key(), &test_principal())
-            .expect("hook accepts");
+    #[tokio::test]
+    async fn put_sans_api_key_conserve_la_cle() {
+        let out = Entity::before_update(
+            &mock_db(),
+            put_active(None),
+            &sample_with_key(),
+            &test_principal(),
+        )
+        .await
+        .expect("hook accepts");
         assert_eq!(key_of(&out).as_deref(), Some("sk-secret-123"));
     }
 
     /// Chaîne vide ⇒ la clé est effacée (@None en base).
-    #[test]
-    fn put_api_key_vide_efface_la_cle() {
+    #[tokio::test]
+    async fn put_api_key_vide_efface_la_cle() {
         let out = Entity::before_update(
+            &mock_db(),
             put_active(Some(String::new())),
             &sample_with_key(),
             &test_principal(),
         )
+        .await
         .expect("hook accepts");
         assert_eq!(key_of(&out), None);
     }
 
     /// Chaîne non vide ⇒ la clé existante est remplacée.
-    #[test]
-    fn put_api_key_non_vide_remplace_la_cle() {
+    #[tokio::test]
+    async fn put_api_key_non_vide_remplace_la_cle() {
         let out = Entity::before_update(
+            &mock_db(),
             put_active(Some("sk-new".to_string())),
             &sample_with_key(),
             &test_principal(),
         )
+        .await
         .expect("hook accepts");
         assert_eq!(key_of(&out).as_deref(), Some("sk-new"));
     }

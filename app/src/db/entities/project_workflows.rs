@@ -53,26 +53,39 @@ impl MiryadResource for Entity {
     }
 
     /// Garde de portée du contrat `project_workflows.sdd` : `scope` doit être dans
-    /// `{project, sandbox}` (sinon `HookError` → 422). Le hook ne charge pas la définition
-    /// (il est synchrone et sans base) — la validation des kinds contre la portée est faite
-    /// au rattachement par `../../api/workflows.sdd` et refaite à chaque lancement
-    /// (`../../workflow/run_context.sdd`).
-    fn before_create(
+    /// `{project, sandbox}` (sinon `HookError` → 422). Le hook ne charge pas la définition —
+    /// la validation des kinds contre la portée est faite au rattachement par
+    /// `../../api/workflows.sdd` et refaite à chaque lancement
+    /// (`../../workflow/run_context.sdd`). Forme async à connexion générique : miryad-core
+    /// 0.3.1 (hooks.sdd, DEC-2), comportement inchangé — logique sans attente rendue par
+    /// [`std::future::ready`] (harnais : `manual_async_fn` et `unused_async_trait_impl` se contredisent sur `async fn` sans `.await`, cf. `tooling.sdd`).
+    fn before_create<C>(
+        _db: &C,
         active: Self::ActiveModel,
         _principal: &AuthPrincipal,
-    ) -> Result<Self::ActiveModel, HookError> {
-        let scope = match &active.scope {
-            ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
-            ActiveValue::NotSet => "",
-        };
-        if scope != "project" && scope != "sandbox" {
-            return Err(HookError::with_code(
-                "VNL-WFA-001",
-                format!("scope must be 'project' or 'sandbox', got: {scope}"),
-            ));
-        }
-        Ok(active)
+    ) -> impl std::future::Future<Output = Result<Self::ActiveModel, HookError>> + Send
+    where
+        C: sea_orm::ConnectionTrait,
+        Self::ActiveModel: Send,
+    {
+        std::future::ready(valider_creation(active))
     }
+}
+
+/// Logique de `before_create` (sans attente) : `scope` dans `{project, sandbox}`, sinon
+/// `VNL-WFA-001`.
+fn valider_creation(active: ActiveModel) -> Result<ActiveModel, HookError> {
+    let scope = match &active.scope {
+        ActiveValue::Set(v) | ActiveValue::Unchanged(v) => v.as_str(),
+        ActiveValue::NotSet => "",
+    };
+    if scope != "project" && scope != "sandbox" {
+        return Err(HookError::with_code(
+            "VNL-WFA-001",
+            format!("scope must be 'project' or 'sandbox', got: {scope}"),
+        ));
+    }
+    Ok(active)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +97,13 @@ mod tests {
 
     use super::*;
     use sea_orm::IntoActiveModel;
+
+    /// Connexion factice pour la forme async des hooks (miryad-core 0.3.1, hooks.sdd DEC-2) —
+    /// même motif que `mock_db` des tests de `miryad-core/src/resource.rs` : les hooks testés
+    /// ici n'effectuent aucune requête, la connexion n'est pas consultée.
+    fn mock_db() -> sea_orm::DatabaseConnection {
+        sea_orm::MockDatabase::new(sea_orm::DbBackend::Sqlite).into_connection()
+    }
 
     /// Scenario: `contrat_de_ressource`
     #[test]
@@ -120,17 +140,23 @@ mod tests {
     }
 
     /// Scenario: `scope_invalide` (et son symétrique d'acceptation)
-    #[test]
-    fn before_create_accepte_scopes_connus() {
+    #[tokio::test]
+    async fn before_create_accepte_scopes_connus() {
         for scope in ["project", "sandbox"] {
-            assert!(Entity::before_create(sample(scope), &test_principal()).is_ok());
+            assert!(
+                Entity::before_create(&mock_db(), sample(scope), &test_principal())
+                    .await
+                    .is_ok()
+            );
         }
     }
 
     /// Scenario: `scope_invalide` — `scope = "global"` ⇒ `HookError` (422).
-    #[test]
-    fn before_create_rejette_scope_inconnu() {
-        let err = Entity::before_create(sample("global"), &test_principal()).unwrap_err();
+    #[tokio::test]
+    async fn before_create_rejette_scope_inconnu() {
+        let err = Entity::before_create(&mock_db(), sample("global"), &test_principal())
+            .await
+            .unwrap_err();
         assert_eq!(err.code.as_deref(), Some("VNL-WFA-001"));
     }
 
