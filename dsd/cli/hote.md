@@ -213,7 +213,8 @@ Les conversations existantes de `store.rs` ne sont pas reprises : leur format d�
   proposition : `memories/<référence>/<id>.md` sous chaque niveau, corps en markdown. **TBD.**
 - **OI-2:** **Format de `secrets.yaml`.** Association nom vers valeur ; création et édition par une commande de la CLI, ou
   seulement à la main. **TBD.**
-- **OI-3:** **Migration de `cfgstore`** (voir Compatibilité et migration). **TBD.**
+- **OI-3 (soldé le 2026-11-12) :** **Migration de `cfgstore`** (voir Compatibilité et migration) : aucune migration, les fichiers YAML de
+  `cfgstore` ne sont pas repris (chantier destructif voulu, `docs/chantier-lymaille.md`).
 - **OI-4:** **Versionnement du format de `.vanyline/`.** Un champ de version, ou le seul format de lymaille. **TBD.**
 
 ## Références

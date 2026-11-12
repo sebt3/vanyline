@@ -240,9 +240,9 @@ lymaille s'écrivent toujours en entier.
 Aucune Solution n'est écrite. Le découpage ci-dessous est une **recommandation** à discuter ; chaque entrée est un
 sujet de la discussion qui suit cette ébauche.
 
-- `app/sessions` : hôte de lymaille dans `app` (par l'intégration de miryad-core), contextes de travail, ouverture et
+- `app/sessions` (écrite : `dsd/app/sessions.md`) : hôte de lymaille dans `app` (par l'intégration de miryad-core), contextes de travail, ouverture et
   suivi des sessions, flux d'événements vers le frontend, disposition de la colonne de conversation (`FR-13`).
-- `app/dashboards` : modèle de tableau de bord et de widget, tableaux par défaut, personnalisation, complémentaires,
+- `app/dashboards` (écrite : `dsd/app/dashboards.md`) : modèle de tableau de bord et de widget, tableaux par défaut, personnalisation, complémentaires,
   éphémères.
 - `app/widgets` : widgets standard et widgets scriptés, y compris le contrat d'exécution et de sécurité des scripts.
 - `app/ui-actions` : navigation et présentation pilotées par le LLM.
@@ -371,7 +371,8 @@ le contexte, pas par une approbation en session ».
 
 ## Open Issues
 
-- **OI-1:** **Amendements à l'intégration lymaille de miryad-core (`CON-1`).** Conditions listées dans
+- **OI-1 (soldé le 2026-11-12) :** livré par miryad-core 0.3.0 (`DEC-27` à `DEC-29`) ; la descente est dans `app/sessions`, qui
+  l'écart résiduel (contextes `H_` sans type) est tranché par `app/sessions#DEC-6`. **Amendements à l'intégration lymaille de miryad-core (`CON-1`).** Conditions listées dans
   `NOTE-vanyline-orientation-lymaille.md` (dépôt miryad-core) : serveurs MCP fournis par l'hôte, ouverture de session
   par contexte, contexte de projet résolu par l'hôte, durée des runs de sous-agent. **TBD :** amendements de ce dépôt-là,
   à trancher dans une session dédiée avant le code de son lot 2.
@@ -379,7 +380,7 @@ le contexte, pas par une approbation en session ».
   garder en écrans de formulaires. **TBD :** à discuter.
 - **OI-3:** **Schéma manipulé à deux (`FR-9`).** Forme inconnue. **ASSUMPTION :** une première version pourrait être un
   artefact dont le LLM écrit la source et que l'utilisateur édite en texte ; le temps réel à deux est un autre chantier.
-- **OI-4:** **Coordination entre réplicas de `app`.** lymaille garantit un tour actif par session et par processus,
+- **OI-4 (soldé le 2026-11-12) :** mono-réplique assumée pour les sessions interactives (`app/sessions#DEC-1`). **Coordination entre réplicas de `app`.** lymaille garantit un tour actif par session et par processus,
   non entre processus (`agent-sessions#CON-7`). **TBD :** limite assumée à une réplique, ou verrou en base.
 - **OI-5:** **Références entre racines DSD.** Chaque racine a sa propre bibliothèque ; `agent-sessions` vit dans le dépôt
   lymaille. **ASSUMPTION :** il se référence par son identifiant canonique, comme source externe, avec le chemin du
