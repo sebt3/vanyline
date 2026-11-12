@@ -69,5 +69,29 @@ Scenario: ouverture selon l'écran (`AC-4`)
     `H_` avec `G_vanyline_project` / `G_vanyline_sandbox`
 
 Tasks:
-  [ ] B7 du chantier lymaille : code catalogue — dépend des API de stores miryad-core (noms
-    exacts à relever à l'implémentation, pas de décision de contrat en attente).
+  [?] B7 du chantier lymaille : code catalogue — dépend des API de stores miryad-core (noms
+    exacts à relever à l'implémentation, pas de décision de contrat en attente). Publication
+    faite et verte (`AC-4`) ; les trois observations relevées à l'implémentation, à confirmer :
+  [?] « Via les stores de miryad-core » : @LymailleStores et ses stores (@SeaAgentStore,
+    @SeaContextTypeStore, @SeaContextStore de miryad-core 0.3.1) exigent un sujet admin résolu
+    en base (@check_write / @require_admin → @UnknownSubject sur une base fraîche au démarrage)
+    et leurs @put_* sont des remplacements (upsert), incompatibles avec « ne patche jamais une
+    ligne existante » au démarrage. Observé : aucune écriture de store ne peut atteindre le
+    catalogue au premier démarrage. Implémenté : @ensure_catalog insère en create-only
+    (`INSERT … ON CONFLICT DO NOTHING`) dans les trois tables posées par le `Migrator` de
+    miryad-core — aucun schéma vanyline, `CON-2` respecté. Alternative : amendement amont d'un
+    chemin système dans les stores.
+  [?] Modèle par défaut des agents publiés : @AgentDefinition exige un nom de profil non vide,
+    mais le réglage `default_model` d'app-settings (`{ provider_id, model }`) n'a aucune
+    correspondance avec la table des profils de miryad-core, et rien n'y est semé au démarrage.
+    Observé : @resolve_profile de `lymaille` rend `UnknownProfile` pour un nom absent. Proposé :
+    les quatre agents portent le nom de profil stable `"default"` (convention d'amorçage de
+    `system_agents.rs`) ; la correspondance du réglage vers un profil, ou son semis, est à
+    poser en B9/C3.
+  [?] Forme de la référence `context_type` des contextes publiés : le `context_type` de
+    `interactive/manager.rs` (miryad-core 0.3.1) résout la référence par `name` dans la table
+    des types, dont les noms sont `G_` — la référence doit donc être `G_home` / `G_config` ;
+    or les hooks de `definitions/catalog_context.rs` exigent de cette colonne une classification
+    `Private` et refuseraient donc la référence par le CRUD d'un administrateur. Contradiction
+    interne à miryad-core, hors de portée de la Solution (`DEC-6` : pas d'amendement) ; la
+    publication porte la forme que l'ouverture résout.

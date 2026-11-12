@@ -9,3 +9,7 @@ mod host;
 #[allow(unused_imports)]
 // Montage B9 à venir (`./mod.sdd` Tasks) — consommateur : le montage de `main.rs` — tooling.sdd
 pub(crate) use host::VnlLymailleHost;
+
+#[allow(dead_code)]
+// Montage B9 à venir (`./catalog.sdd` Tasks) ; catalog.rs consommé par ses seuls tests — tooling.sdd
+mod catalog;
