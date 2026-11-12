@@ -37,8 +37,16 @@ Exposes:
     NON-objet (scalaire ou `null` — le champ est un @serde_json::Value) devient un objet
     ne portant QUE `_run` ; un step de kind `subworkflow` (natif de miryad-core, hors
     @allowed_kinds) est refusé dans les deux portées — voir `Tasks`.
-  @allowed_kinds(scope: RunScope) -> &'static [&'static str] — `Project` : `agent`, `rhai` ;
-    `Sandbox` : `agent`, `rhai`, `shell`, `gate`.
+  @allowed_kinds(scope: RunScope) -> &'static [&'static str] — `Project` : `subagent`, `rhai` ;
+    `Sandbox` : `subagent`, `rhai`, `shell`, `gate`. Le kind `subagent` est celui de
+    miryad-core (@SubagentStep, enregistré par ./runtime.sdd avec le plafond
+    `subagent_max_secs`) : config `{ "agent": <nom d'un sous-agent publié avec schéma de
+    sortie>, "task": <gabarit>, "max_secs"?: <entier>, "max_turns"?: <entier> }`, aucune clé
+    inconnue ; le lien des serveurs MCP du step se règle sous le type de contexte
+    `"workflow_subagent"` (@SUBAGENT_CONTEXT_TYPE de miryad-core, côté utilisateur). Le kind
+    `agent` de vanyline n'existe plus (chantier lymaille C1) : une définition portant
+    `kind: "agent"` est refusée au rattachement comme tout kind inconnu ; les définitions en
+    base datant de l'ancien kind ne sont pas migrées (table propre).
 
 Tasks:
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : refus MAINTENU en v1 (`MRD-WORKFLOW-004`, explicite) ; à rouvrir quand un besoin de sous-DAG apparaît (portée à décider alors). (Question d'origine : `subworkflow` (kind natif de miryad-core, embarque un sous-DAG en ligne) n'est
@@ -92,4 +100,4 @@ Scenario: portee_sandbox_exige_une_sandbox
 Scenario: kinds_de_la_portee_sandbox
   Given la portée `Sandbox`
   When @allowed_kinds
-  Then `agent`, `rhai`, `shell`, `gate`
+  Then `subagent`, `rhai`, `shell`, `gate`

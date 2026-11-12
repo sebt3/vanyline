@@ -1,12 +1,11 @@
 //! Registres des kinds de step et accès communs — contrat : `mod.sdd`.
 //!
-//! Construit le [`StepRegistry`] du `StepDispatcher` (`../runtime.sdd`) avec les quatre kinds de
-//! vanyline — `agent`, `rhai`, `shell`, `gate` — et porte ce qu'ils partagent : l'environnement
+//! Construit le [`StepRegistry`] du `StepDispatcher` (`../runtime.sdd`) avec les trois kinds de
+//! vanyline — `rhai`, `shell`, `gate` — et porte ce qu'ils partagent : l'environnement
 //! d'exécution ([`StepEnv`]), la lecture typée du contexte de run injecté (`config._run`,
 //! `../run_context.sdd`) et l'accès authentifié à la sandbox d'un run ([`SandboxAccess`]).
 //! Aucune logique de kind ici.
 
-pub mod agent;
 pub mod gate;
 pub mod rhai;
 pub mod shell;
@@ -336,12 +335,11 @@ impl RunInfo {
     }
 }
 
-/// Assemble le registre depuis les quatre kinds déjà construits — séam de [`build_registry`]
+/// Assemble le registre depuis les trois kinds déjà construits — séam de [`build_registry`]
 /// testable sans cluster (`VnlK8sClient` n'est pas constructible hors cluster, convention
 /// anti-mock `lib/src/k8s.sdd` ; les Scenario verrouillent l'assemblage par sondes ici et les
 /// `kind()` exacts dans les fichiers de kinds).
 pub(crate) fn assemble_registry(
-    agent: Box<dyn MiryadWorkflowStep>,
     rhai: Box<dyn MiryadWorkflowStep>,
     shell: Box<dyn MiryadWorkflowStep>,
     gate: Box<dyn MiryadWorkflowStep>,
@@ -349,7 +347,7 @@ pub(crate) fn assemble_registry(
     let mut reg = StepRegistry::new();
     // Une collision de kind est un bug d'assemblage (deux `build_registry` mélangés) : elle ne
     // peut pas être propagée ici (`build_registry` rend le registre), elle est journalisée.
-    for step in [agent, rhai, shell, gate] {
+    for step in [rhai, shell, gate] {
         if let Err(e) = reg.register(DynStep(step)) {
             tracing::error!(error = %e, "assemblage du registre des steps : kind en double");
         }
@@ -376,11 +374,11 @@ impl MiryadWorkflowStep for DynStep {
     }
 }
 
-/// Enregistre exactement `agent`, `rhai`, `shell`, `gate` — jamais un autre kind, jamais deux
-/// fois le même (`mod.sdd` `Exposes`).
+/// Enregistre exactement `rhai`, `shell`, `gate` — jamais un autre kind, jamais deux fois le
+/// même (`mod.sdd` `Exposes`). Le kind `subagent` de miryad-core est enregistré par
+/// `start_runtime` de `../runtime.sdd`, pas ici (C1, chantier lymaille).
 pub fn build_registry(env: StepEnv) -> StepRegistry {
     assemble_registry(
-        Box::new(agent::AgentStep::new(env.clone())),
         Box::new(rhai::rhai_step(env.clone())),
         Box::new(shell::ShellStep::new(env.clone())),
         Box::new(gate::GateStep::new(env)),
@@ -711,7 +709,9 @@ mod tests {
     // ── Scenario: registre_exact ────────────────────────────────────────────
     // Énumération par sonde : `StepRegistry` n'expose aucune liste de kinds ; un `kind()` déjà
     // pris rend `DuplicateStepKind` — la sonde échoue ⇒ le kind est enregistré. Un kind
-    // étranger s'enregistre ⇒ `build_registry` n'enregistre QUE les quatre.
+    // étranger s'enregistre ⇒ `build_registry` n'enregistre QUE les trois kinds de vanyline.
+    // C1 (chantier lymaille) : `agent` de vanyline et `subagent` de miryad-core (enregistré
+    // par `start_runtime`, `../runtime.sdd`) sont tous deux ABSENTS de ce registre.
     struct Probe(&'static str);
     #[async_trait]
     impl MiryadWorkflowStep for Probe {
@@ -731,13 +731,12 @@ mod tests {
     #[test]
     fn registre_exact() {
         let registry = assemble_registry(
-            Box::new(Probe("agent")),
             Box::new(Probe("rhai")),
             Box::new(Probe("shell")),
             Box::new(Probe("gate")),
         );
         let mut probe = registry;
-        for kind in ["agent", "rhai", "shell", "gate"] {
+        for kind in ["rhai", "shell", "gate"] {
             // La sonde doit être refusée : le kind est déjà dans le registre.
             let err = probe
                 .register(Probe(kind))
@@ -748,23 +747,27 @@ mod tests {
                 "sonde {kind} : {err:?}"
             );
         }
-        // Et rien d'autre : un cinquième kind s'enregistre sans collision.
-        assert!(
-            probe.register(Probe("subworkflow")).is_ok(),
-            "aucun autre kind n'est enregistré par build_registry"
-        );
+        // Et rien d'autre : `agent` (kind disparu, C1) et les kinds gérés ailleurs s'enregistrent
+        // sans collision — build_registry n'enregistre QUE les trois kinds de vanyline.
+        for kind in ["agent", "subagent", "subworkflow"] {
+            assert!(
+                probe.register(Probe(kind)).is_ok(),
+                "le kind {kind} ne doit PAS être enregistré par build_registry"
+            );
+        }
     }
 
-    // Appoint `Exposes` @build_registry : les kinds de production portent les quatre noms
+    // Appoint `Exposes` @build_registry : les kinds de production portent les trois noms
     // exacts via leur constante `KIND` (l'assemblage des kinds réels dans `build_registry`
     // n'est pas instanciable hors cluster — `VnlK8sClient` non constructible, convention
     // anti-mock kube ; verrouillé par `assemble_registry` + constantes, signalé au rapport).
     #[test]
     fn kinds_de_production() {
-        assert_eq!(agent::AgentStep::KIND, "agent");
         assert_eq!(gate::GateStep::KIND, "gate");
         assert_eq!(shell::ShellStep::KIND, "shell");
         // le kind `rhai` est celui de `RhaiStep` de miryad-core (`kind() == "rhai"`,
         // `rhai_step.rs`) — verrouillé par exécution dans les tests de `rhai.rs`.
+        // le kind `subagent` est celui de `SubagentStep` de miryad-core, monté par
+        // `start_runtime` (`../runtime.rs`) — verrouillé par ses tests, pas ici (C1).
     }
 }

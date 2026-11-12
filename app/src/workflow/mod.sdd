@@ -31,7 +31,7 @@ Structure:
   ./runtime.rs — endpoint Restate, enregistrement, options de service
   ./run_context.rs — fabrication du DAG d'un run (injection du contexte, validation de portée)
   ./status.rs — lecture du statut des runs et annulation, côté Restate
-  ./steps/ — un fichier par kind (`agent`, `rhai`, `shell`, `gate`) et le constructeur du registre
+  ./steps/ — un fichier par kind vanyline (`rhai`, `shell`, `gate`) et le constructeur du registre
 
 Exposes:
   Les quatre sous-modules et @WorkflowRuntime (voir ./runtime.sdd), re-exportés ici avec

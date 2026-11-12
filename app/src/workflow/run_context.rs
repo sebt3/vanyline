@@ -13,9 +13,9 @@ use miryad_core::workflow::WorkflowError;
 /// (décision 2026-10-04, `run_context.sdd`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunScope {
-    /// Workflow de projet : kinds `agent` et `rhai` seulement, contexte sans sandbox.
+    /// Workflow de projet : kinds `subagent` et `rhai` seulement, contexte sans sandbox.
     Project,
-    /// Workflow de sandbox : kinds `agent`, `rhai`, `shell` et `gate`, contexte avec sandbox.
+    /// Workflow de sandbox : kinds `subagent`, `rhai`, `shell` et `gate`, contexte avec sandbox.
     Sandbox,
 }
 
@@ -98,8 +98,8 @@ pub fn materialize(
 #[must_use]
 pub fn allowed_kinds(scope: RunScope) -> &'static [&'static str] {
     match scope {
-        RunScope::Project => &["agent", "rhai"],
-        RunScope::Sandbox => &["agent", "rhai", "shell", "gate"],
+        RunScope::Project => &["subagent", "rhai"],
+        RunScope::Sandbox => &["subagent", "rhai", "shell", "gate"],
     }
 }
 
@@ -173,14 +173,14 @@ mod tests {
     #[test]
     fn injection_du_contexte() {
         let definition = dag(vec![
-            step("a", "agent", serde_json::json!({"prompt": "x"})),
+            step("a", "subagent", serde_json::json!({"prompt": "x"})),
             step("b", "rhai", serde_json::json!({"n": 1})),
-            step("c", "agent", serde_json::Value::Null),
+            step("c", "subagent", serde_json::Value::Null),
         ]);
         let ctx = ctx();
 
         let out = materialize(&definition, RunScope::Project, &ctx)
-            .expect("un DAG projet agent/rhai est valide");
+            .expect("un DAG projet subagent/rhai est valide");
 
         let expected = serde_json::to_value(&ctx).unwrap();
         assert_eq!(
@@ -213,7 +213,7 @@ mod tests {
     fn cle_run_usurpee_ecrasee() {
         let definition = dag(vec![step(
             "a",
-            "agent",
+            "subagent",
             serde_json::json!({"_run": {"owner": "autrui"}, "prompt": "ok"}),
         )]);
         let ctx = ctx();
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn shell_refuse_dans_un_workflow_de_projet() {
         let definition = dag(vec![
-            step("a", "agent", serde_json::json!({})),
+            step("a", "subagent", serde_json::json!({})),
             step("compiler", "shell", serde_json::json!({"cmd": "make"})),
         ]);
 
@@ -286,7 +286,7 @@ mod tests {
     // ── Scenario: portee_sandbox_exige_une_sandbox ──────────────────────────
     #[test]
     fn portee_sandbox_exige_une_sandbox() {
-        let definition = dag(vec![step("a", "agent", serde_json::json!({}))]);
+        let definition = dag(vec![step("a", "subagent", serde_json::json!({}))]);
 
         let err = materialize(&definition, RunScope::Sandbox, &ctx())
             .expect_err("la portée Sandbox sans ctx.sandbox est une erreur de contexte");
@@ -302,7 +302,7 @@ mod tests {
     // Rejet symétrique du Raises : portée Projet AVEC ctx.sandbox.
     #[test]
     fn portee_projet_refuse_un_contexte_sandbox() {
-        let definition = dag(vec![step("a", "agent", serde_json::json!({}))]);
+        let definition = dag(vec![step("a", "subagent", serde_json::json!({}))]);
 
         let err = materialize(&definition, RunScope::Project, &ctx_sandbox())
             .expect_err("la portée Project avec ctx.sandbox est une erreur de contexte");
@@ -318,21 +318,50 @@ mod tests {
     fn kinds_de_la_portee_sandbox() {
         assert_eq!(
             allowed_kinds(RunScope::Sandbox),
-            &["agent", "rhai", "shell", "gate"]
+            &["subagent", "rhai", "shell", "gate"]
         );
     }
 
-    // Volet Projet du même `Exposes` : agent et rhai seulement.
+    // Volet Projet du même `Exposes` : subagent et rhai seulement.
     #[test]
     fn kinds_de_la_portee_projet() {
-        assert_eq!(allowed_kinds(RunScope::Project), &["agent", "rhai"]);
+        assert_eq!(allowed_kinds(RunScope::Project), &["subagent", "rhai"]);
+    }
+
+    // ── Appoint `Exposes` (C1, chantier lymaille) : table propre ─────────────
+    // Le kind `agent` de vanyline n'existe plus : une définition portant
+    // `kind: "agent"` est refusée comme tout kind inconnu (InvalidDag
+    // MRD-WORKFLOW-004 nommant le step et le kind), dans les deux portées —
+    // les définitions en base datant de l'ancien kind ne sont pas migrées.
+    #[test]
+    fn kind_agent_refuse_dans_les_deux_portees() {
+        for scope in [RunScope::Project, RunScope::Sandbox] {
+            let definition = dag(vec![step("a", "agent", serde_json::json!({"prompt": "x"}))]);
+            let ctx = match scope {
+                RunScope::Project => ctx(),
+                RunScope::Sandbox => ctx_sandbox(),
+            };
+            let err = materialize(&definition, scope, &ctx)
+                .expect_err("le kind `agent` de vanyline n'existe plus : il doit être refusé");
+            match &err {
+                WorkflowError::InvalidDag(msg) => {
+                    assert!(msg.contains("step a"), "le message nomme le step : {msg}");
+                    assert!(msg.contains("agent"), "le message nomme le kind : {msg}");
+                }
+                other => panic!("attendu InvalidDag, rendu {other:?}"),
+            }
+            assert!(
+                err.to_string().starts_with("MRD-WORKFLOW-004"),
+                "code MRD-WORKFLOW-004 rendu : {err}"
+            );
+        }
     }
 
     // `Must` : ne jamais inclure de secret dans `_run` — l'objet injecté porte exactement
     // les huit champs du contrat `@RunContext`, rien d'autre.
     #[test]
     fn secrets_jamais_dans_run() {
-        let definition = dag(vec![step("a", "agent", serde_json::json!({}))]);
+        let definition = dag(vec![step("a", "subagent", serde_json::json!({}))]);
         let out = materialize(&definition, RunScope::Sandbox, &ctx_sandbox()).unwrap();
 
         let run = out.0[0].config.get("_run").unwrap().as_object().unwrap();
@@ -357,7 +386,11 @@ mod tests {
     // `Must not` : la définition stockée n'est jamais modifiée par la matérialisation.
     #[test]
     fn la_definition_stockee_n_est_pas_modifiee() {
-        let definition = dag(vec![step("a", "agent", serde_json::json!({"prompt": "x"}))]);
+        let definition = dag(vec![step(
+            "a",
+            "subagent",
+            serde_json::json!({"prompt": "x"}),
+        )]);
 
         materialize(&definition, RunScope::Project, &ctx()).unwrap();
 

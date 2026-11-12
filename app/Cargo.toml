@@ -67,11 +67,11 @@ restate-sdk = { version = "0.12", default-features = false, features = ["http_se
 utoipa = "5"
 sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "mock"] }
 sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
-# W2 `app/src/workflow/steps/` : `agent.sdd` contracte le gabarit `prompt` « Handlebars en mode
-# strict » ; `rhai.sdd` enregistre des fonctions sur le moteur Rhai de `RhaiStep` (types
-# `Engine`/`Dynamic`/`Map`) ; `gate.sdd` (`Platform: …/vanyline-health`) évalue le rapport via
-# `HealthReport::status` et `CoverageTotals::percent` sans le réinterpréter.
-handlebars = "6.4"
+# W2 `app/src/workflow/steps/` : `rhai.sdd` enregistre des fonctions sur le moteur Rhai de
+# `RhaiStep` (types `Engine`/`Dynamic`/`Map`) ; `gate.sdd` (`Platform: …/vanyline-health`)
+# évalue le rapport via `HealthReport::status` et `CoverageTotals::percent` sans le
+# réinterpréter. (`handlebars` retiré en C1, chantier lymaille : seul `agent.sdd` le
+# consommait ; le gabarit `task` du step `subagent` est rendu par miryad-core.)
 rhai = "1.26"
 vanyline-health = { path = "../health" }
 # B8 `app/src/sessions/events.rs` (events.sdd, Depends on) : export TypeScript de @HostEvent vers

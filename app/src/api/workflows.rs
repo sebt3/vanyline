@@ -1253,8 +1253,8 @@ mod tests {
         serde_json::Value::Object(map)
     }
 
-    fn agent_step(id: &str) -> serde_json::Value {
-        serde_json::json!({"id": id, "depends_on": [], "kind": "agent", "config": {}})
+    fn subagent_step(id: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "depends_on": [], "kind": "subagent", "config": {}})
     }
 
     fn shell_step(id: &str) -> serde_json::Value {
@@ -1403,7 +1403,7 @@ mod tests {
             &state,
             "bob",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("bob crée son workflow");
@@ -1440,7 +1440,7 @@ mod tests {
             &state,
             "bob",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("bob crée son workflow");
@@ -1524,7 +1524,7 @@ mod tests {
                         serde_json::from_value(body_json(
                             "ci",
                             "project",
-                            serde_json::json!([agent_step("a")]),
+                            serde_json::json!([subagent_step("a")]),
                         ))
                         .unwrap(),
                     ),
@@ -1582,7 +1582,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow créé");
@@ -1640,7 +1640,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow projet créé");
@@ -1674,7 +1674,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow projet créé");
@@ -1698,7 +1698,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(def.steps.0.len(), 1, "les steps stockés sont intacts");
-        assert_eq!(def.steps.0[0].kind, "agent");
+        assert_eq!(def.steps.0[0].kind, "subagent");
     }
 
     // Appoint `PUT` nominal : description (rattachement) et steps (définition) modifiés.
@@ -1709,7 +1709,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow créé");
@@ -1721,7 +1721,7 @@ mod tests {
             Json(
                 serde_json::from_value(serde_json::json!({
                     "description": "mis à jour",
-                    "steps": [agent_step("a"), agent_step("b")],
+                    "steps": [subagent_step("a"), subagent_step("b")],
                 }))
                 .unwrap(),
             ),
@@ -1740,7 +1740,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("première création");
@@ -1749,7 +1749,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect_err("le doublon de nom doit être refusé");
@@ -1763,8 +1763,8 @@ mod tests {
     async fn dag_invalide_rend_400_mrd_workflow_004_sans_ecriture() {
         let (state, _, _) = seeded_state().await;
         let cyclic = serde_json::json!([
-            {"id": "A", "depends_on": ["B"], "kind": "agent", "config": {}},
-            {"id": "B", "depends_on": ["A"], "kind": "agent", "config": {}},
+            {"id": "A", "depends_on": ["B"], "kind": "subagent", "config": {}},
+            {"id": "B", "depends_on": ["A"], "kind": "subagent", "config": {}},
         ]);
         let err = post_workflow(&state, "alice", "demo", body_json("ci", "project", cyclic))
             .await
@@ -1787,7 +1787,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "global", serde_json::json!([agent_step("a")])),
+            body_json("ci", "global", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect_err("la portée « global » n'existe pas");
@@ -1806,7 +1806,7 @@ mod tests {
             "demo",
             serde_json::json!({
                 "name": "ci", "scope": "project", "description": "la CI",
-                "steps": [agent_step("a"), agent_step("a2")],
+                "steps": [subagent_step("a"), subagent_step("a2")],
             }),
         )
         .await
@@ -1823,7 +1823,7 @@ mod tests {
             &state,
             "bob",
             "demo",
-            body_json("autre", "project", serde_json::json!([agent_step("a")])),
+            body_json("autre", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow de bob");
@@ -1837,7 +1837,7 @@ mod tests {
         assert_eq!(ci.description.as_deref(), Some("la CI"));
         assert_eq!(
             ci.kinds,
-            vec!["agent".to_string()],
+            vec!["subagent".to_string()],
             "kinds distincts du DAG"
         );
         assert_eq!(ci.steps_count, 2);
@@ -1869,7 +1869,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow créé");
@@ -1882,7 +1882,7 @@ mod tests {
         .expect("détail");
         assert_eq!(detail.name, "ci");
         assert_eq!(detail.steps.len(), 1);
-        assert_eq!(detail.steps[0].kind, "agent");
+        assert_eq!(detail.steps[0].kind, "subagent");
     }
 
     // =========================================================================
@@ -2281,7 +2281,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow projet créé");
@@ -2523,7 +2523,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow projet créé");
@@ -2572,7 +2572,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow projet créé");
@@ -2616,7 +2616,7 @@ mod tests {
             &state,
             "alice",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("workflow projet créé");
@@ -2927,7 +2927,7 @@ mod tests {
             &state,
             "bob",
             "demo",
-            body_json("ci", "project", serde_json::json!([agent_step("a")])),
+            body_json("ci", "project", serde_json::json!([subagent_step("a")])),
         )
         .await
         .expect("bob crée son workflow");

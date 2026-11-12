@@ -1756,16 +1756,16 @@ mod tests {
         serde_json::json!({"name": name, "scope": scope, "steps": steps})
     }
 
-    fn agent_step(id: &str) -> serde_json::Value {
-        serde_json::json!({"id": id, "depends_on": [], "kind": "agent", "config": {}})
+    fn subagent_step(id: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "depends_on": [], "kind": "subagent", "config": {}})
     }
 
-    /// Le workflow de `who` (portée projet, un step agent) créé par la route REST — id.
+    /// Le workflow de `who` (portée projet, un step subagent) créé par la route REST — id.
     async fn seed_workflow(state: &AppState, who: &str, name: &str) -> i32 {
         let body: api::workflows::CreateWorkflowBody = serde_json::from_value(body_json(
             name,
             "project",
-            &serde_json::json!([agent_step("a")]),
+            &serde_json::json!([subagent_step("a")]),
         ))
         .expect("corps de fixture");
         let (_, detail) = api::workflows::create_workflow(

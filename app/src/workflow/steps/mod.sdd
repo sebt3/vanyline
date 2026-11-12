@@ -4,7 +4,7 @@ Platform: Rust/vanyline-app/miryad-core
 
 Purpose:
   Construit le @StepRegistry du `StepDispatcher` (./../runtime.sdd) avec les quatre kinds de
-  vanyline — `agent`, `rhai`, `shell`, `gate` — et porte ce qu'ils partagent : l'environnement
+  vanyline — `rhai`, `shell`, `gate` — et porte ce qu'ils partagent : l'environnement
   d'exécution (@StepEnv), la lecture du contexte de run injecté (`config._run`, voir
   ../run_context.sdd) et l'accès authentifié à la sandbox d'un run. Chaque kind a sa spec ; ce
   fichier ne contient aucune logique de kind. Fichier neuf, conception.
@@ -14,7 +14,6 @@ Owns:
 
 Can read:
   ../run_context.sdd
-  ./agent.sdd
   ./rhai.sdd
   ./shell.sdd
   ./gate.sdd
@@ -43,8 +42,10 @@ Exposes:
     status HTTP en `Ok((u16, Option<Value>))` au lieu d'erreur sur tout hors 2xx : la
     détection d'état par status (ex. « job perdu » sur 404 dans ./shell.sdd) est
     STRUCTURELLE, jamais une sous-chaîne du message d'erreur.
-  @build_registry(env: StepEnv) -> StepRegistry — enregistre exactement `agent`, `rhai`, `shell`,
-    `gate` (jamais d'autre kind, jamais deux fois le même).
+  @build_registry(env: StepEnv) -> StepRegistry — enregistre exactement `rhai`, `shell`,
+    `gate` (jamais d'autre kind, jamais deux fois le même) ; le kind `subagent` de
+    miryad-core n'est PAS enregistré ici mais par @start_runtime de ./../runtime.sdd, avec
+    le plafond `subagent_max_secs` (C1, chantier lymaille).
 
 Must:
   Redemander le jeton de l'Owner à chaque utilisation de @SandboxAccess (le cache de
@@ -71,13 +72,14 @@ Tasks:
   [ ] Rattraper à la passe d'intégration cluster : @build_registry réel jamais exécuté
     hors cluster (convention anti-mock kube de ../../../lib/src/k8s.sdd) —
     `registre_exact` verrouille la mécanique d'assemblage sur stubs + les constantes
-    `KIND` ; l'enregistrement bout-en-bout des 4 kinds réels reste à prouver sur un
-    @StepDispatcher vivant.
+    `KIND` ; l'enregistrement bout-en-bout des kinds réels (3 de vanyline + `subagent` de
+    miryad-core) reste à prouver sur un @StepDispatcher vivant.
 
 Scenario: registre_exact
   Given @build_registry
   When les kinds enregistrés sont énumérés
-  Then exactement `agent`, `rhai`, `shell`, `gate`
+  Then exactement `rhai`, `shell`, `gate` — le registre complet du moteur y ajoute `subagent`
+    (./../runtime.sdd)
 
 Scenario: contexte_absent
   Given une config sans `_run`

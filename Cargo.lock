@@ -8999,7 +8999,6 @@ dependencies = [
  "chrono",
  "cookie",
  "futures",
- "handlebars",
  "lymaille",
  "miryad-core",
  "openidconnect",
