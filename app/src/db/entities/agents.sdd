@@ -242,11 +242,13 @@ Must:
 
 Must not:
   - Valider en @before_create l'existence des noms référencés par `toolsets`/`skills` :
-    le hook n'a PAS d'accès DB (limite déjà actée en Phase 1 du document
-    `docs/features/miryad-core-integration.md`) — cf. Tasks `[?]`.
-  - Porter de hook `before_update`/`before_save` ou de validation du `mode` en
-    modification : la création est la seule surface couverte aujourd'hui (asymétrie
-    documentée en Tasks `[!]`, pas un contrat à étendre sans spec).
+    le hook ne fait aucune requête avec le `db` qu'il reçoit (depuis miryad-core 0.3.1
+    il a un accès DB possible, mais la validation des références reste hors de son
+    contrat — cf. Tasks `[?]`).
+  - Valider le `mode` en @before_save ou porter d'autre hook que @before_create,
+    @before_update et @before_delete : la validation du `mode` en modification est
+    couverte par @before_update (décision 2026-10-18, cf. Tasks) et @before_save n'est
+    pas un hook de @MiryadResource.
   - Porter de timestamps (`created_at`/`updated_at`) : la table n'en a pas et @auto_time
     n'est utilisé sur aucune entité sœur de `./mod.rs`.
   - Supposer dans ce fichier que `resource_router` applique le filtre owner, écrase
@@ -352,7 +354,7 @@ Scenario: Les FK du schéma bornent le cycle de vie des lignes
 Depends on:
   @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, @ActiveValue, prelude), @serde,
     @serde_json, @utoipa (@ToSchema), @miryad_core (@auth::AuthPrincipal,
-    @resource::{MiryadResource, AccessPolicy, HookError}) — miryad-core 0.1, crate
+    @resource::{MiryadResource, AccessPolicy, HookError}) — miryad-core 0.3.1, crate
     externe hors dépôt.
   ../migration/m20260825_000006_create_vanyline_agents.rs — DDL source de vérité de la
     table (spec propre en cours).

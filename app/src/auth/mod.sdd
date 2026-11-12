@@ -159,7 +159,7 @@ Tasks:
   [?] MockDatabase avec backend `Sqlite` alors que la production est Postgres/CNPG :
     choix délibéré (les réponses pré-programmées de sea-orm mock sont indépendantes du
     backend) ou héritage à corriger en `Postgres` pour lever une ambiguïté de lecture ?
-  [!] `miryad-core` (v0.1, dépendance de registre hors workspace, source absente du
+  [!] `miryad-core` (v0.3.1, dépendance de registre hors workspace, source absente du
     dépôt) porte tout le comportement auth réel (@MiryadAuthState, @OidcClientTrait,
     @AuthError, `auth_router()`). Aucune spec `.sdd` ne couvre ce périmètre dans vanyline :
     décider avec Sébastien si un contrat miroir (ou une spec amont chez l'éditeur du crate)

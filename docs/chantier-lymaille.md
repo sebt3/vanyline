@@ -48,13 +48,13 @@ specs correspondantes, sans être tranchés.
 
 ## A — Socle (séquentiel)
 
-- [ ] **A1 — Specs : montée de version.** Citer `miryad-core 0.3.1` partout où 0.1.5 ou 0.2.0 est cité (`vanyline.sdd`,
+- [x] **A1 — Specs : montée de version.** Citer `miryad-core 0.3.1` partout où 0.1.5 ou 0.2.0 est cité (`vanyline.sdd`,
   `app/src/main.sdd`, `config.sdd`, `auth/mod.sdd`, `api/owners.sdd`, `api/projects.sdd`, `workflow/*.sdd`). Hooks
   `before_create`, `before_update`, `before_delete` : `async`, paramètre `db: &C` (`C: ConnectionTrait`), futur `Send`, dans
   les specs de `db/entities/{agents,llm_providers,mcp_servers,project_workflows,app_settings}.sdd` et leurs Scenario.
   `workflow/steps/{mod,agent}.sdd` : `RunInfo` gagne `vars` et `trigger`. `error.sdd` : variante `ScriptTimeout` de
   `StepError` si le code la rencontre.
-- [ ] **A2 — Code : bump et compilation** (après A1). `app/Cargo.toml` : `miryad-core = "0.3.1"`, features `swagger-ui`,
+- [x] **A2 — Code : bump et compilation** (après A1). `app/Cargo.toml` : `miryad-core = "0.3.1"`, features `swagger-ui`,
   `workflow`, `mcp`, **`lymaille`, `matrix`**. Adapter les cinq entités à hooks async, les fixtures `RunInfo`
   (`workflow/steps/rhai.rs`, `agent.rs`, `mcp_domain.rs`), tout `match` sur `PrincipalSource`. Valider : `cargo check
   --workspace`, puis la batterie complète.
@@ -62,10 +62,10 @@ specs correspondantes, sans être tranchés.
   `miryad_core::migration::Migrator::up` puis `crate::migration::Migrator::up` les tables `miryad_lymaille_*` existent et que la
   seconde passe est sans effet. Aucune migration `vanyline_*` à écrire pour elles (`sessions#CON-2`). La vérification sur
   PostgreSQL réel est faite à part, lors d'un déploiement de test (`docs/release-runbook.md`).
-- [ ] **A4 — Specs : feuille de route.** `vanyline.sdd`, `Tasks` : clore comme caduques « Agents système », « Autonomie des
+- [x] **A4 — Specs : feuille de route.** `vanyline.sdd`, `Tasks` : clore comme caduques « Agents système », « Autonomie des
   agents » et « Démarrer l'étape 9 (`llm-config`) » (remplacés par ce chantier, `app#DEC-1`), retirer `llm-config` de la liste
   des membres à venir, ajouter un pointeur vers ce fichier.
-- [ ] **A5 — Docs.** `docs/architecture.md` (l. 233 et 278) et `docs/llm-exec-gap.md` (l. 84 et 117) : remplacer les passages
+- [x] **A5 — Docs.** `docs/architecture.md` (l. 233 et 278) et `docs/llm-exec-gap.md` (l. 84 et 117) : remplacer les passages
   « philosophie yolo, `permission` sans objet » par « permissions fixées par le contexte, pas par une approbation en session »
   (`app#BR-2`).
 

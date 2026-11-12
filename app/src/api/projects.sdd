@@ -281,7 +281,7 @@ Depends on:
   @axum 0.8 — @Json (extraction + rendu, rejets 422 natifs), @extract::{@State, @Path},
     @http::@StatusCode ; @tower dans les tests (@ServiceExt::@oneshot).
   @serde::@Deserialize (derive de @CreateProjectBody, `rename_all = "camelCase"`).
-  miryad-core 0.1 (crate externe, source hors dépôt) — @miryad_core::auth::@AuthUser
+  miryad-core 0.3.1 (crate externe, source hors dépôt) — @miryad_core::auth::@AuthUser
     (extraction + refus 401), @miryad_core::users::@resolve_user (id `miryad_users`,
     sémantique d'écriture hors contrat, Tasks `[?]`).
   @vanyline_crds — @Project, @ProjectSpec, @EgressRule
