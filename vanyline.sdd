@@ -185,13 +185,18 @@ Tasks:
     sandbox reste utilisable en attendant. Reste à spécer côté controller : détection de dérive
     (empreinte de la spec utile portée par le Pod, comparée à la spec courante) et checkout de la
     nouvelle branche au redémarrage.
-  [ ] Agents système (`app/src/system_agents.sdd`) et écrans (`frontend/frontend.sdd` et specs liées).
-  [ ] Autonomie des agents (`lib/src/autonomous.sdd`) et, sur décision, extraction de la
-    config LLM (`llm-config/src/lib.sdd`, membre `llm-config` à ajouter au workspace).
-  [?] Démarrer l'étape 9 (`llm-config`) maintenant ? Aucune spec `.sdd` n'existe pour ce
-    crate (la règle « pas de code sans spec » interdit d'implémenter avant) ; l'extraction
-    de la config LLM hors de `app`/`cfgstore` est-elle décidée, et avec quel périmètre de
-    partage entre applications miryad-core ?
+  [-] Agents système (`app/src/system_agents.sdd`) et écrans (`frontend/frontend.sdd` et specs
+    liées). — CADUC 2026-11-12 : remplacé par le chantier lymaille (`/docs/chantier-lymaille.md`,
+    taches B et C ; `dsd/app#DEC-1`).
+  [-] Autonomie des agents (`lib/src/autonomous.sdd`) et, sur décision, extraction de la
+    config LLM (`llm-config/src/lib.sdd`, membre `llm-config` à ajouter au workspace). — CADUC
+    2026-11-12 : l'autonomie et la config LLM relèvent de lymaille via miryad-core (feature
+    `lymaille`), plus de crate `llm-config` à créer (`/docs/chantier-lymaille.md`).
+  [-] Démarrer l'étape 9 (`llm-config`) maintenant ? — CADUC 2026-11-12 : la question est
+    close par la réorientation lymaille du 2026-11-03 ; `llm-config` ne sera pas créé, la
+    persistance et l'administration de la config LLM sont portées par miryad-core + lymaille.
+  [ ] Exécution du chantier lymaille — feuille de route et 40 tâches séquentielles/
+    parallélisables dans `/docs/chantier-lymaille.md` (vagues A à G).
 
 Done when:
   Chaque fichier `*.rs` du workspace est couvert par une spec revue, le harnais est à

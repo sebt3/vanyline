@@ -292,8 +292,7 @@ logger du crate (`tracing` côté Rust, logger du projet côté frontend ; le ha
 | `tools` (`vanyline-tools`) | Rust | tools MCP partagés |
 | `cfgstore` (`vanyline-cfgstore`) | Rust | stockage de configuration |
 | `health` (`vanyline-health`) | Rust | santé du code : presets, parseurs, runner, rapport (ts-rs) |
-| `llm-config` (`vanyline-llm-config`, à créer) | Rust | persistance et administration de la config LLM, partageable entre applications miryad-core |
-| app | Rust | axum, SeaORM/PostgreSQL, `miryad-core` (features `mcp`, `workflow`), `vanyline-lib` (+ `k8s`), restate-sdk |
+| app | Rust | axum, SeaORM/PostgreSQL, `miryad-core` (features `mcp`, `workflow`, `lymaille`, `matrix`), `vanyline-lib` (+ `k8s`), restate-sdk |
 | sandbox | Rust | axum, `portable-pty`, `vanyline-tools`, `vanyline-health` |
 | controller | Rust | kube-rs, `vanyline-crds` |
 | cli | Rust | ratatui, crossterm, harness/CLI du projet |
@@ -302,7 +301,7 @@ logger du crate (`tracing` côté Rust, logger du projet côté frontend ; le ha
 
 ```
 vanyline/
-├── Cargo.toml          # workspace Cargo UNIQUE (membres lib/app/cli/sandbox/tools/controller/crds/cfgstore/health, + llm-config à venir) + [workspace.lints] (harnais)
+├── Cargo.toml          # workspace Cargo UNIQUE (membres lib/app/cli/sandbox/tools/controller/crds/cfgstore/health) + [workspace.lints] (harnais)
 ├── package.json        # workspace npm racine (workspaces: frontend, packages/*)
 ├── vanyline.sdd        # spec racine — contraintes transverses + feuille de route de migration
 ├── tooling.sdd         # spec du harnais clippy/fmt + dette tracée
