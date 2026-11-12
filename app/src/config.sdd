@@ -135,6 +135,13 @@ Accepts:
     signature de configuration du moteur : les TROIS URL absentes ⇒ moteur de workflow
     non configuré, l'app tourne sans workflows et les routes répondent `503`
     (./workflow/mod.sdd). Posées par le controller ; W0 2026-10-10.
+    `VNL_SUBAGENT_MAX_SECS` (défaut `2700`, soit 45 min) → @Config::subagent_max_secs :
+      plafond de durée EXPLICITE posé sur les steps `subagent` de miryad-core au montage
+      (./workflow/runtime.sdd) — la valeur par défaut de miryad-core n'est jamais laissée
+      implicite (`dsd/app/sessions.md#FR-11`) ; la couverture visée est un agent de code
+      (30 à 45 min de compilation et de tests), un sous-agent de 40 min n'est donc jamais
+      interrompu par le plafond (`AC-8`). Même contrat de parse et de repli que
+      `OIDC_TIMEOUT_SECS` (jamais d'échec, défaut sur valeur invalide).
   Valeur présente vide (`FOO=""`) : @env::var réussit → traitée comme PRESENTE pour les
     requises (champ @String vide dans le @Config), et comme `Some("")` pour les
     optionnelles. Cf. `Tasks`.

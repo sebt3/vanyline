@@ -122,8 +122,10 @@ Must:
   Construire @build_application_deployment avec : un seul container nommé `app` ; image =
     `spec.image` cloné, sinon l'argument `default_image` (résolu par `./main.rs` depuis
     `--app-image-repo`/`--app-image-tag`, env `APP_IMAGE_REPO`/`APP_IMAGE_TAG` — pas une
-    constante, cf. `[?]` correspondant de /crds/src/lib.sdd) ; `replicas` = `spec.replicas` ou `1`
-    (pass-through sans validation, l'apiserver borne) ; un unique @ContainerPort `http`/8080
+    constante, cf. `[?]` correspondant de /crds/src/lib.sdd) ; `replicas` FIXE à `1` —
+    la limite « une réplique pour les sessions interactives » (`dsd/app/sessions.md#DEC-1`,
+    hub d'événements en mémoire de miryad-core) est posée ICI, pas par la CR : `spec.replicas`
+    est ignoré au rendu (cf. Tasks `[?]`) ; un unique @ContainerPort `http`/8080
     ; `serviceAccountName` = @application_name ; labels APP_LABEL sur metadata, selector et
     template ; readiness et liveness probes IDENTIQUES : HTTP GET `/health` sur le port
     numérique @APP_PORT, `initialDelaySeconds` 5, `periodSeconds` 10 — pas de startup probe,
@@ -348,6 +350,12 @@ Handles:
     tard, les SSA étant idempotents et le cookie « create-if-absent ».
 
 Tasks:
+  [?] `ApplicationSpec.replicas` (`/crds/src/lib.sdd`) : devenu sans effet au rendu depuis la
+    limite « une réplique pour les sessions interactives » (`dsd/app/sessions.md#DEC-1`,
+    2026-11-12). Le retirer de la CRD (table propre, pas de production), le garder champ
+    réservé documenté, ou le réutiliser quand la haute disponibilité rouvrira la question
+    (`DEC-1` le dit possible côté Kydah) ? Le `[?]` SSA `.force()` des HPA externes devient
+    sans objet avec `replicas` fixe.
   [ ] `ApplicationSpec.restate: Option<RestateSpec { image, storage_size, storage_class }>`
     (/crds/src/lib.sdd) ; builders `build_restate_statefulset`/`build_restate_service` ; test du
     Role à DEUX règles (l'ancien Scenario à trois règles est remplacé) ; NetworkPolicy du

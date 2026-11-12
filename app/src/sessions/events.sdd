@@ -1,0 +1,63 @@
+Spec: Sessions Events
+
+Platform: Rust — événements Host côté hôte
+
+Purpose:
+  L'enveloppe des événements d'interface que `app` publie dans les sessions lymaille : un type
+  unique @HostEvent{kind, payload} exporté en TypeScript, publié par @EventHub::publish_host,
+  notification pure — tout ce qui doit survivre au rechargement est persisté par la Solution qui
+  le possède (`dsd/app/sessions.md#FR-8`, `FR-9`, `DEC-4`).
+
+Owns:
+  ./events.rs
+
+References:
+  ../../../dsd/app/sessions.md — `FR-8`, `FR-9`, `DEC-4`, `AC-6`.
+  ../../../packages/protocol/src/generated/ — destination de l'export TypeScript.
+
+Must:
+  DÉFINIR @HostEvent — structure ts-rs `{ kind: String, payload: serde_json::Value }` : le seul
+    type d'événement d'interface publié par vanyline ; le contenu des `kind` (actions d'interface,
+    tableaux éphémères) appartient aux Solutions `app/ui-actions` et `app/dashboards`, pas ici.
+  Publier via @EventHub::publish_host(session, kind, payload) de miryad-core ; la limite de
+    charge de la crate (65 536 octets sérialisés, `kind` non vide) est celle de miryad-core —
+    vanyline ne revalide pas, le refus remonté (`MRD-LYMAILLE-004`) n'est pas réécrit.
+  Exporter @HostEvent en TypeScript vers `../../../packages/protocol/src/generated/` par le même
+    mécanisme d'export ts-rs que les autres types générés (`export_typescript`, côté hôte,
+    `FR-8`) ; la divergence est rattrapée par la CI (amendement du job `tsrs` en B8, cf.
+    /.github/workflows/workflows.sdd).
+  Traiter tout événement comme une notification : aucune réémission au rechargement, aucune
+    rejouabilité (`CON-4`, `FR-9`) — le frontend relit l'historique par la route dédiée.
+
+Must not:
+  Porter dans le `payload` un état destiné à survivre au rechargement de page (`FR-9`) : ce sera
+    le contrat des Solutions dashboards/artifacts, avec leur persistance.
+  Interpréter un `payload` dans `app` : la crate hôte le transporte, ne le lit pas.
+  Déclarer un deuxième type d'événement d'interface côté vanyline.
+
+Exposes:
+  @HostEvent — type ts-rs, exporté ; consommé par `@vanyline/protocol`.
+
+Depends on:
+  miryad-core (feature `lymaille`) — @EventHub::publish_host.
+  ts-rs (feature `ts-rs` du crate app en test) — export des types.
+
+Handles:
+  Événement refusé par la limite miryad-core (`kind` vide, payload > 65 536 octets) : journalisé
+    par l'app (identifiant `"VNL-APP-SES-*"` propre au publishing), jamais propagé comme erreur
+    de session.
+
+Scenario: export TypeScript vérifié (`AC-6`)
+  Given le job CI `tsrs` régénéré depuis `app`
+  When les types générés diffèrent de `packages/protocol/src/generated/`
+  Then la CI échoue — @HostEvent.ts est produit par le même harnais que les types de miryad-core
+
+Scenario: charge refusée sans casse (`AC-6`)
+  Given un @HostEvent au `payload` sérialisé de plus de 65 536 octets
+  When la publication est tentée
+  Then @EventHub::publish_host rend @LymailleError::InvalidDefinition, la session continue,
+    aucun événement partiel n'est diffusé
+
+Tasks:
+  [ ] B8 du chantier lymaille : code + export + extension du job CI `tsrs` (amendement
+    ./.github/workflows.sdd alors).

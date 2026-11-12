@@ -1,0 +1,73 @@
+Spec: Sessions Catalog
+
+Platform: Rust — catalogue publié au démarrage
+
+Purpose:
+  Le catalogue des types de contexte et des agents par défaut qui fait de « j'ouvre le chat
+  depuis cet écran » le seul sélecteur de session : deux contextes stockés `G_home` / `G_config`
+  et les agents `G_vanyline_*`, publiés idempotemment au démarrage, plus la table de
+  correspondance écran → agent pour les contextes `H_` (`dsd/app/sessions.md#DEC-6`, `DEC-7`).
+
+Owns:
+  ./catalog.rs
+
+References:
+  ../../../dsd/app/sessions.md — `FR-5`, `FR-6`, `FR-7`, `DEC-6`, `DEC-7`, `AC-4`, `AC-5`.
+  ./host.sdd — les identifiants `H_` que la table écran → agent nomme sans les stocker.
+
+Must:
+  Publier au démarrage, de façon idempotente (relancer n'ajoute ni ne duplique rien) et via les
+    stores de miryad-core, le catalogue par défaut (`FR-6`) :
+    - contexte `G_home` de type `G_home`, nature `Work`, agent par défaut `G_vanyline_home`,
+      ouvrable par tout utilisateur authentifié (`DEC-7`) ;
+    - contexte `G_config` de type `G_config`, nature `Config`, agent par défaut
+      `G_vanyline_config`, ouvrable par tout utilisateur authentifié (`DEC-7`) ;
+    - agents `G_vanyline_home`, `G_vanyline_config`, `G_vanyline_project`, `G_vanyline_sandbox`
+      (productifs `Work` sauf `G_vanyline_config`, nature `Config`).
+  Ne jamais remplacer une définition publiée par un administrateur sous le même nom : la
+    publication ne create que si l'identifiant est absent, ne patche jamais une ligne existante
+    (`FR-6`).
+  Porter la table de correspondance (constante, compilée) écran → agent pour les contextes `H_` :
+    Project → `G_vanyline_project`, Sandbox → `G_vanyline_sandbox` ; l'ouverture d'une session
+    sur un `H_` passe l'agent explicite correspondant, sans que l'appelant nomme d'agent et sans
+    que l'utilisateur voie ce choix (`FR-5`, `DEC-6`, `AC-4`). Cette table n'est ni administrable
+    ni visible des sessions `Config` ; elle est isolée ici pour être remplacée sans douleur.
+  Laisser ouvertes aux non-administrateurs les sessions `Config` sur un contexte de leur niveau :
+    l'app n'ajoute aucune restriction au-delà de celles de miryad-core ; l'écriture d'une session
+    `Config` reste confinée au niveau `User`, la promotion vers `Shared` ou le catalogue restant
+    une action humaine hors session (`FR-7`, `AC-5`).
+
+Must not:
+  Recréer les quatre agents système de ./../system_agents.rs : ils sont retirés avec l'ancien
+    chat (C2), le catalogue les remplace, aucune adaptation ni migration.
+  Rendre la table écran → agent lisible ou modifiable par une session `Config` ou par REST.
+  Écrire un contexte de type `H_` : les `H_` ne sont pas dans le catalogue (vu par ./host.sdd).
+
+Depends on:
+  miryad-core (feature `lymaille`) — stores du catalogue (types de contexte, contextes, agents).
+
+Exposes:
+  @ensure_catalog — appelé au démarrage avant que les routes de ./mod.sdd servent ; idempotent.
+  @agent_pour_contexte — correspondance `H_` → agent (`DEC-6`) ; `None` pour un contexte stocké,
+    dont la nature et l'agent viennent du type lui-même.
+
+Scenario: démarrage répété idempotent (`AC-4`)
+  Given une base vide puis trois démarrages successifs
+  When @ensure_catalog s'exécute à chaque fois
+  Then le catalogue compte exactement les entrées attendues, sans doublon ni variante datée
+
+Scenario: définition administrateur intacte
+  Given un administrateur a redéfini l'agent `G_vanyline_config` avant le démarrage
+  When @ensure_catalog s'exécute
+  Then la ligne de l'administrateur reste inchangée
+
+Scenario: ouverture selon l'écran (`AC-4`)
+  Given quatre ouvertures depuis écran accueil, projet, sandbox et configuration
+  When aucune ne nomme d'agent
+  Then accueil ouvre `G_home` (nature `Work`, agent `G_vanyline_home`), configuration ouvre
+    `G_config` (nature `Config`, agent `G_vanyline_config`), projet et sandbox ouvrent sur leur
+    `H_` avec `G_vanyline_project` / `G_vanyline_sandbox`
+
+Tasks:
+  [ ] B7 du chantier lymaille : code catalogue — dépend des API de stores miryad-core (noms
+    exacts à relever à l'implémentation, pas de décision de contrat en attente).

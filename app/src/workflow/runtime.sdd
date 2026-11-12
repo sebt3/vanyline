@@ -67,7 +67,9 @@ Exposes:
     de ./status.sdd (W3 2026-10-10).
   @start_runtime(state, config) -> Result<WorkflowRuntime, AppError> (async) — séquence : valider
     la config (`WorkflowConfig::validate` de miryad-core), poser la `WorkflowPolicy`, construire le
-    registre, lier `DagInterpreter` + `StepDispatcher` à l'`Endpoint`, démarrer le serveur en
+    registre — le step `subagent` de miryad-core y est monté avec un plafond d'application de
+    durée explicite valant @Config::subagent_max_secs, jamais le défaut implicite de miryad-core
+    (`dsd/app/sessions.md#FR-11`, `AC-8`) —, lier `DagInterpreter` + `StepDispatcher` à l'`Endpoint`, démarrer le serveur en
     tâche de fond, puis enregistrer le déploiement ; un échec d'enregistrement est loggé et
     RÉESSAYÉ en arrière-plan (backoff plafonné à 30 s) sans empêcher l'app de démarrer.
     Contracté validation W3 2026-10-10 : @start_runtime fait @VnlK8sClient::discover sur

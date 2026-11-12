@@ -12,7 +12,8 @@ Purpose:
   miryad-core PUIS app est un contrat, cf. ./migration/mod.sdd —, client OIDC, état,
   bind, serve) ; (2) la construction de @AppState et son `impl @FromRef` vers
   @MiryadAuthState ; (3) l'assemblage du router racine (health, auth_router miryad-core,
-  6 @resource_router mergés en chemins complets, swagger, @nest `/api` et `/api/v1`,
+  6 @resource_router mergés en chemins complets, swagger, @nest `/api/v1/lymaille` des
+  sessions lymaille, @nest `/api` et `/api/v1`,
   routes WS, @with_state, @fallback_service statique SPA) — la frontière avec
   ./api/mod.sdd est celle-là : les préfixes `/api` et `/api/v1` sont la propriété
   EXCLUSIVE des @nest d'ici ; (4) @openapi_spec, la fusion des sept fragments OpenAPI.
@@ -50,9 +51,9 @@ Structure:
     ligne canonique quatre lints, `../../tooling.sdd` ratifié 2026-10-14) — seule ligne de
     ./main.rs que ../../tooling.sdd autorise à
     modifier dans ce fichier ; aucune autre exemption dans le corps.
-  Déclarations de modules (13, toutes privées, sans `pub`) : `mod api; mod auth;
+  Déclarations de modules (14, toutes privées, sans `pub`) : `mod api; mod auth;
   mod config; mod config_store; mod db; mod error; mod k8s; mod mcp_domain; mod migration;
-  mod naming; mod system_agents; mod workflow; mod ws;` —
+  mod naming; mod sessions; mod system_agents; mod workflow; mod ws;` —
   tout module du crate doit être déclaré ici pour exister.
   @AppState — struct `#[derive(Clone)] pub` à 7 champs (table en Exposes).
   impl @FromRef<@AppState> for @MiryadAuthState — clone du champ `auth`.
@@ -96,7 +97,10 @@ Exposes:
     découverte lazy à la première requête, jamais au démarrage (contrat ./k8s.sdd).
   - `auth: @MiryadAuthState` — état miryad-core construit au démarrage (champs en
     Returns) ; c'est LE porteur de la connexion DB (@db y est mové) : @AppState n'a pas de
-    champ `db` distinct.
+    champ `db` distinct. Depuis le chantier lymaille : l'état est monté AVEC l'hôte lymaille
+    (@SharedHost de ./sessions/mod.sdd, une seule implémentation fournie — refus fermé) et
+    le catalogue est publié (@ensure_catalog de ./sessions/catalog.sdd) AVANT le bind ;
+    l'app ne démarre pas si l'un des deux échoue (identifiant `"VNL-APP-SES-*"`).
   - `shared_sandbox_state: @ws::sandbox_state::SharedState` — via @SharedState::new()
     (hub de push des phases de sandbox, contrat ./ws/).
   impl @FromRef<@AppState> for @MiryadAuthState — @from_ref retourne `state.auth.clone()`
@@ -105,7 +109,7 @@ Exposes:
   @health — fonction privée, montée uniquement sur `GET /health`.
   @openapi_spec — fonction privée, appelée une seule fois (argument de
     @swagger_ui_router) ; documentée par les tests du module.
-  Déclarations `mod` (9) — la visibilité de tout le crate part d'ici : tous privés
+  Déclarations `mod` (14) — la visibilité de tout le crate part d'ici : tous privés
     (aucun `pub mod`), conformes à un binaire.
 
 Accepts:
@@ -226,6 +230,11 @@ Returns:
     `GET /api/swagger-ui` et `/api/openapi.json` (feature Cargo `swagger-ui` de
     miryad-core activée dans ../Cargo.toml ; routes affirmées par le commentaire de
     code, hors source lisible).
+  - @merge des routes lymaille (@crate::sessions de ./sessions/mod.sdd, routeur de
+    conversation miryad-core) — chemins COMPLETS sous `/api/v1/lymaille`, mergés à la racine
+    comme les @resource_router et déclarés AVANT le @nest `/api/v1` (jurisprudence matchit
+    des segments littéraux sur le wildcard du nest, cf. ./api/mod.sdd Tasks `[?]`) ; aucune
+    route de conversation n'est servie hors de ce préfixe.
   - @nest(`"/api/v1"`, @api::api_v1_router()) puis @nest(`"/api"`, @api::api_router()) —
     les deux préfixes externes sont écrits ICI, jamais dans ./api/mod.rs
     (./api/mod.sdd, section Must).

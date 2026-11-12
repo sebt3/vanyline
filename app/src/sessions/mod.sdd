@@ -1,0 +1,65 @@
+Spec: Sessions
+
+Platform: Rust/axum — hôte lymaille de l'app
+
+Purpose:
+  Montage de l'hébergement des sessions lymaille dans `app` : une seule implémentation de
+  @LymailleHost fournie à l'état miryad-core, routes de conversation montées sous
+  `/api/v1/lymaille`, et la règle d'identifiants d'erreur de la Solution (`dsd/app/sessions.md`).
+  Ce fichier ne porte que le montage ; l'hôte vit dans ./host.sdd, le catalogue dans
+  ./catalog.sdd, les événements dans ./events.sdd.
+
+Owns:
+  ./mod.rs
+
+Can read:
+  ../../../dsd/app/sessions.md
+
+References:
+  ../../../dsd/app/sessions.md — `FR-1`, `FR-12`, `CON-1`, `CON-2`, `DEC-1`.
+  ../main.sdd — point d'appel du montage dans la construction de l'état.
+  ../config.sdd — configuration lue au montage.
+
+Must:
+  Fournir UNE seule implémentation de @miryad_core::lymaille::host::LymailleHost
+    (`SharedHost` = `Arc<dyn …>`) au montage de l'état miryad-core ; sans elle l'app refuse de
+    démarrer quand le module lymaille est compilé (échec fermé, `FR-1`).
+  Monter les routes de conversation servies par miryad-core (`conversations_router`) sous
+    `/api/v1/lymaille` et nulle part ailleurs — l'app n'ajoute aucune route de conversation
+    propre et ne proxy pas le SSE.
+  Dépendre de `miryad-core >= 0.3.1` avec les features `lymaille` et `matrix` activées
+    (`CON-1`) ; 0.3.0 ne doit jamais être résolu. La feature `matrix` n'est montée nulle part :
+    ses migrations seules sont appliquées, aucun pont Matrix configuré (`DEC-10`).
+  Appliquer les migrations par la paire existante de ./../main.rs (`miryad_core::migration::Migrator::up`
+    puis `crate::migration::Migrator::up`) — les tables `miryad_lymaille_*` viennent de
+    miryad-core, aucune migration `vanyline_*` pour elles (`CON-2`).
+  Porter les identifiants d'erreur propres à la Solution sous `"VNL-APP-SES-NNN"` ; les refus de
+    miryad-core gardent leurs `"MRD-LYMAILLE-NNN"` sans réécriture (`FR-12`).
+  Ne fonctionner qu'en une réplique d'`app` : le montage ne pose aucun verru distribué et
+    n'affiche aucune avertissement multiréplique — la contrainte est portée par le déploiement
+    (`DEC-1`, cf. ../../../controller/src/application.sdd).
+
+Must not:
+  Persister, journaliser ou exposer le jeton d'Owner que l'hôte fournit (`CON-2` — détail
+    contracté en ./host.sdd).
+  Réimplémenter un hub d'événements, un store de sessions ou un modèle de conversation : tout
+    vient de miryad-core.
+
+Depends on:
+  miryad-core (feature `lymaille`) — @SharedHost, @conversations_router.
+  ./host.rs — l'unique implémentation fournie (@VnlLymailleHost de ./host.sdd).
+  ./catalog.rs — le catalogue publié au démarrage avant que les routes servent.
+
+Scenario: montage refusé sans hôte
+  Given un montage de l'état miryad-core où l'hôte n'est pas fourni
+  When l'app démarre
+  Then le démarrage échoue avec une erreur citant un identifiant `"VNL-APP-SES-*"`, aucune route
+    de conversation n'est servie
+
+Scenario: routes sous lymaille et pas ailleurs
+  Given une app démarrée avec le module lymaille
+  When le routage complet est énuméré
+  Then les routes de conversation n'existent que sous `/api/v1/lymaille`
+
+Tasks:
+  [ ] B6-B9 du chantier lymaille : code de montage (dépend de ./host.sdd, ./catalog.sdd).

@@ -1,0 +1,90 @@
+Spec: Sessions Host
+
+Platform: Rust — implémentation vanyline de @LymailleHost
+
+Purpose:
+  Le point par lequel `app` fournit à miryad-core ce qu'elle seule connaît : l'URL et le jeton
+  du serveur MCP d'une sandbox (`resolve_mcp`) et les contextes projet/sandbox de préfixe `H_`
+  (`resolve_context`). Réutilise le client K8s et le cache de jeton existants — aucun second
+  chemin de TokenRequest (`dsd/app/sessions.md#DEC-3`).
+
+Owns:
+  ./host.rs
+
+References:
+  ../../../dsd/app/sessions.md — `FR-2`, `FR-3`, `FR-4`, `DEC-2`, `DEC-3`, `DEC-9`, `AC-1`,
+    `AC-2`, `AC-3`.
+  ../../../lib/src/k8s.sdd — @VnlK8sClient::owner_token et @sandbox_mcp_url, seuls chemins de
+    jeton et d'URL.
+  ../db/entities/owner_links.sdd — le lien utilisateur↔Owner (`vanyline_owner_links`).
+
+Must:
+  IMPLÉMENTER @miryad_core::lymaille::host::LymailleHost (@VnlLymailleHost), construit à partir
+    du client K8s, du handle de base de données et du lien d'owner existants.
+  Pour @resolve_mcp (`McpRequest{context, role}`) : n'hériter d'un rôle que pour le contexte
+    `H_sandbox_<owner>_<nom>` (préfixe `H_sandbox_`) et le rôle `"sandbox"` ; vérifier à chaque
+    appel que le principal de @CallerPrincipal est lié à `<owner>` via `vanyline_owner_links` ;
+    lié ⇒ @McpDecision::Granted avec @McpGrant{url = @sandbox_mcp_url(owner, nom), token =
+    @Zeroizing d'un jeton frais par @VnlK8sClient::owner_token, expires_at = celui du cache} ; non lié, sandbox absente, ou TokenRequest
+    en échec ⇒ @McpDecision::Denied (et @HostError seulement pour une panne interne, sans
+    contenu). Les autres contextes et rôles ⇒ @McpDecision::Unprovided (`FR-2`, `DEC-2`).
+  Appelée à l'assemblage ET à chaque appel d'outil, la vérification du lien rend la révocation
+    effective à l'appel suivant, pas à la fin de la session (`FR-2`).
+  Pour @resolve_context : @H_project_<nom> et @H_sandbox_<owner>_<nom> rendent le
+    @ToolsetContext dérivé de l'entité réelle (Project/Sandbox relus à l'appel) ; hors de portée
+    de l'appelant ⇒ @None sans distinction absent/interdit ; tout autre identifiant ⇒ @None.
+    Jamais écriture : ni REST, ni MCP, ni session `Config` ne create/update un identifiant `H_`
+    (`FR-3`, `DEC-9`).
+  Fabriquer les identifiants `H_` par encodage réversible des noms d'entités K8s : `<nom>` et
+    `<owner>` voient leurs `"-"` convertis en `"_"` pour rester dans l'alphabet exigé par
+    @identity::classify (alphanumérique + `"_"`, casse sensible) ; la résolution inverse
+    (identifiant → nom d'entité) fait `"_"` → `"-"`. Sur des noms valides DNS-1123 l'encodage
+    est injectif et total (cf. Tasks `[?]`).
+  Garder le jeton hors de tout chemin persistant : jamais écrit en base, jamais dans un log,
+    jamais dans une réponse au navigateur ; @McpGrant porte un @Zeroizing, le `Debug` de la
+    structure reste opaque ; le renouvellement suit le cache de @owner_token tel quel (`FR-4`,
+    `DEC-11`).
+
+Must not:
+  Créer un second client Kubernetes ou un second cache de jeton pour les sessions (`DEC-3`).
+  Mettre en cache l'@McpGrant ou son URL entre deux appels d'outil.
+  Distinguer dans @resolve_context « inexistant » de « interdit » — l'un comme l'autre @None.
+
+Exposes:
+  @VnlLymailleHost — fourni comme @SharedHost au montage (./mod.sdd).
+
+Depends on:
+  vanyline-lib (feature `k8s`) — @VnlK8sClient.
+  sea-orm — relecture de `vanyline_owner_links` et des entités Project/Sandbox côté hôte.
+
+Handles:
+  Panne apiserver sur @owner_token ⇒ @HostError (refus fermé, `FR-1`) : la session continue
+    sans le serveur MCP de ce rôle jusqu'au prochain appel, sans message contenant la panne.
+
+Scenario: utilisateur lié obtient le serveur sandbox
+  Given un utilisateur lié à l'owner `ana` et la sandbox `web` de `ana` en phase Running
+  When @resolve_mcp sur `H_sandbox_ana_web` rôle `"sandbox"`
+  Then @McpDecision::Granted avec l'URL `/mcp` de la sandbox et un jeton du ServiceAccount d'`ana`
+
+Scenario: lien supprimé en cours de session (`AC-2`)
+  Given une session ouverte sur `H_sandbox_ana_web` et un lien utilisateur↔`ana` supprimé depuis
+  When @resolve_mcp est rappelé pour un appel d'outil
+  Then @McpDecision::Denied — l'appel d'outil échoue, aucune réutilisation du jeton précédent
+
+Scenario: hors portée et inconnu indiscernables (`AC-3`)
+  Given un projet `secret-proj` appartenant à un autre utilisateur
+  When @resolve_context sur son identifiant `H_` par l'appelant
+  Then @None — même réponse que pour un projet inexistant
+
+Scenario: H_ jamais écrit
+  Given une session `Config` ou un appel REST/MCP tentant d'enregistrer un contexte `H_…`
+  When miryad-core applique ses règles d'écriture
+  Then l'écriture est refusée — l'app ne propose aucun chemin d'écriture pour les `H_`
+
+Tasks:
+  [?] Forme des identifiants `H_` face à @identity::classify (`DEC-9`, `OI-1`) : la source de
+    miryad-core 0.3.1 (`lymaille/identity.rs`) n'accepte que `[A-Za-z0-9_]` — un nom K8s avec
+    `"-"` (fréquent : `mon-projet`) rendrait `H_project_mon-projet` invalide. Encodage
+    réversible `"-"` ↔ `"_"` proposé dans le `Must` (injectif sur DNS-1123, les noms d'objets
+    K8s ne peuvent pas porter `"_"`). Alternative : amendement amont pour accepter `"-"` —
+    écarté pour ce lot par la règle « on construit avec ce que livre la stack ». À ratifier.
