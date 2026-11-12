@@ -107,7 +107,7 @@ Tasks:
     « Extension VS Code » de `docs/architecture.md`. Le cas `kydah-code` (PVC partagé) disparaît
     avec elle.
   [x] Migration de la méthode vers SpecDD + TTD : `.specdd/` (bootstrap 1.5), AGENTS.md,
-    agents `spec-dd`/`spec-reverse`/`implementer`/`validator`, suppression de la méthode
+    agents `spec-dd`/`implementer`/`validator`, suppression de la méthode
     llm-template (agents `cadence`/`implement`/`diagnose`, `.claude/config.md`, tâches
     `.tasks/`).
   [x] Harnais `[workspace.lints]` posé (deny immédiat, dette tracée dans ./tooling.sdd).

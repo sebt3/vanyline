@@ -1,7 +1,7 @@
 ---
 description: Validation spec ↔ implémentation + batterie tests/clippy/fmt/checks npm de vanyline. Lecture seule, produit une synthèse d'écarts.
 mode: subagent
-temperature: 0.1
+temperature: 0.7
 permission:
   edit: deny
   bash:

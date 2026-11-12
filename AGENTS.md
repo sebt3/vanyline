@@ -30,7 +30,6 @@ Détail complet dans `.specdd/bootstrap.project.md`. Règles clés :
 | Agent | Rôle |
 |---|---|
 | `spec-dd` (primary) | Rédige les specs avec Sébastien, orchestre les sous-agents, ne code jamais directement |
-| `spec-reverse` | Reverse-engineering : rédige la spec la plus complète possible d'un fichier source existant, sans jamais toucher le code |
 | `implementer` | Réalise une spec précise : tests d'abord depuis les `Scenario`, puis implémentation minimale |
 | `validator` | Vérifie implémentation ↔ spec + batterie tests/clippy/fmt, remonte une synthèse si ce n'est pas bon |
 | `release` | Exécute `docs/release-runbook.md` (hors SpecDD : ops) |

@@ -63,7 +63,7 @@ directement avec le développeur en session, pas une reprise planifiée de la
 réorientation. Le workflow/DAG, lui, reste non démarré.
 
 **Mise à jour (2026-10-05)** : méthode SpecDD + TTD en vigueur (agents spec-dd /
-spec-reverse / implementer / validator) ; lot de specs « état final » gelé sur
+implementer / validator) ; lot de specs « état final » gelé sur
 `docs/specs-etat-final-2026-10` et son implantation engagée — étapes 1-3 closes
 (suppression `ext/`, miryad-core 0.1.5, crate `vanyline-health`) : détail, arbitrages
 et suite de séquence dans `.claude/memory/migration-etat-final-2026-10.md`.

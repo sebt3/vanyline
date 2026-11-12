@@ -6,7 +6,7 @@ Unité de travail : une spec `.sdd`. Règle absolue : pas de code sans spec appr
 Sébastien, pas d'implémentation avant les tests dérivés de la spec.
 
 1. **Spec** — la spec de la cible existe et est revue : rédigée en session avec l'agent
-   `spec-dd`, ou produite en reverse-engineering par `spec-reverse` puis relue
+   `spec-dd` puis relue
    attentivement par Sébastien (le comportement accidentel du code ne devient un contrat
    qu'après cette relecture).
 2. **Test d'abord** — l'agent `implementer` convertit d'abord chaque `Scenario` de la spec

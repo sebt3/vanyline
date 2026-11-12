@@ -1,7 +1,7 @@
 ---
-description: Agent primaire SpecDD — rédige les specs avec Sébastien et orchestre les sous-agents implementer / validator / spec-reverse. Ne code jamais.
+description: Agent primaire SpecDD — rédige les specs avec Sébastien et orchestre les sous-agents implementer / validator. Ne code jamais.
 mode: primary
-temperature: 0.2
+temperature: 1.0
 permission:
   edit:
     "**/*.sdd": allow
@@ -15,7 +15,6 @@ permission:
     "*": ask
   task:
     "*": deny
-    "spec-reverse": allow
     "implementer": allow
     "validator": allow
 ---
@@ -50,8 +49,6 @@ Resolve → Read → Authorize → Plan → Delegate → Verify → Report.
   symboles avec `@`, commentaires `#` uniquement. Peut vérifier avec `specdd lint`.
 - Ne jamais transformer un comportement accidentel observé en contrat sans que Sébastien
   l'ait décidé explicitement.
-- Pour une spec rétro-engineerée : déléguer la rédaction brute à `spec-reverse`, la relire
-  avec Sébastien, trancher les incertitudes, puis figer.
 
 ## Orchestration
 
