@@ -13,7 +13,7 @@ Purpose:
   feature : la dépendance de compilation est constante (`k8s` toujours activé côté app).
   Grouper ici le cache et le mappage, plutôt que répéter `lock → check → discover →
   map_err` dans les six modules consommateurs (api/sandboxes, api/projects,
-  api/owners::ensure_owner, api/me via owners, ws/sandbox_state, ws/chat).
+  api/owners::ensure_owner, api/me via owners, ws/sandbox_state).
 
 Owns:
   ./k8s.rs
@@ -26,7 +26,6 @@ Can read:
   ./api/projects.rs
   ./api/owners.rs
   ./ws/sandbox_state.rs
-  ./ws/chat.rs
   ../Cargo.toml
   ../../lib/src/k8s.rs
   ../../lib/src/error.rs
@@ -80,10 +79,9 @@ Handles:
     retente une découverte complète (y compris avec une config réparée entre-temps).
   Consommateur REST (api/sandboxes, api/projects, api/owners::ensure_owner,
     ws/sandbox_state) : l'erreur remonte par `?` et devient un 502 JSON `{"error": …}`
-    au sens de ./error.rs.
-  Consommateur WS (./ws/chat.rs) : l'erreur est interceptée par un `match` —
-    `send_tool_unavailable` avec le message de l'erreur sur le canal WS, retour liste
-    vide, sans fermer la connexion ni faire échouer le tour de chat.
+    au sens de ./error.rs. (Le consommateur WS ./ws/chat.rs, qui interceptait l'erreur
+    par un `match` pour la rendre sur le canal WS, a été retiré en C2 du chantier
+    lymaille, 2026-11-12.)
   `VNL_K8S_NAMESPACE` absent : @Option `None` passé à `discover` = namespace du contexte
     kubeconfig courant (ou du service account in-cluster), selon le contrat lib
     ../../lib/src/k8s.sdd. `VNL_K8S_NAMESPACE` présente mais vide : voir `Tasks` (`[?]`).

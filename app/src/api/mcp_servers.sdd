@@ -57,7 +57,7 @@ Accepts:
       n'est PAS utilisé ici : deux tests simultanés du même serveur courent en parallèle.
     - @AuthUser (extracteur miryad-core) — session cookie ou porteur ; son refus (@401)
       est émis par l'extracteur AVANT le corps du handler, mécanisme de miryad-core
-      (précédent : `./local_tools.sdd`, test `test_server_without_cookie_returns_401`).
+      (précédent : `./local_tools.rs`, retiré en C2 du chantier lymaille, test `test_server_without_cookie_returns_401`).
       Champs consommés : `user.subject` et `user.email` (passé en @as_deref).
     - @Path(id) : `i32` — même type que la clef primaire `id` de la ligne. Un `{id}`
       non numérique, vide, ou hors plage `i32` est rejeté par l'extracteur axum (@400,
@@ -208,7 +208,7 @@ Handles:
     duplication app ↔ miryad-core est le prix de la décision Phase 1 « handlers axum
     custom à côté de resource_router » (cf. `./mod.sdd`).
   - Passage à l'échelle de l'identité : @resolve_user(&db, `user.subject`, `user.email`)
-    est ici CONSOMMÉ (passé à @can_write), contrairement à `./local_tools.rs` qui jette
+    est ici CONSOMMÉ (passé à @can_write), contrairement à `./local_tools.rs` (retiré C2) qui jette
     son résultat — même appel, deux usages.
 
 Must:
@@ -319,7 +319,7 @@ Scenario: mcp_test_result_serialize_en_un_tableau_sous_la_cle_tools
   When il est sérialisé par @serde_json::to_value
   Then l'objet a EXACTEMENT une clé `tools`, tableau de deux chaînes dans l'ordre
   And (test À ÉCRIRE — aucun test de sérialisation du type, précédent :
-    `local_tool_serialize_en_name_et_description` de `./local_tools.sdd`)
+    `local_tool_serialize_en_name_et_description` de `./local_tools.rs` (retiré C2))
 
 Scenario: test_server_sans_cookie_repond_401
   Given un @AppState de test (config figé, @crate::auth::test_support::@test_auth_state,

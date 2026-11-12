@@ -7,7 +7,9 @@ Purpose:
   clé (clé/valeur JSON). Contrat posé le 2026-10-04 : ils sont configurables par l'API avec un
   jeton d'administrateur et par l'interface si l'utilisateur en a les droits. Le premier réglage
   est `default_model` : le modèle par défaut utilisé pour amorcer les agents système d'un
-  utilisateur qui n'a encore AUCUN profil de modèle (../../system_agents.sdd). Lecture
+  utilisateur qui n'a encore AUCUN profil de modèle (l'amorçage `system_agents.rs` a été
+  retiré en C2 du chantier lymaille, 2026-11-12 ; la destination du réglage est l'agent de
+  catalogue par défaut — cf. `../../sessions/catalog.sdd` Tasks `[?]`). Lecture
   ouverte à tout utilisateur authentifié (les valeurs ne sont pas secrètes : un identifiant de
   fournisseur global et un nom de modèle), écriture réservée aux administrateurs. Fichier neuf,
   conception.
@@ -17,7 +19,7 @@ Owns:
 
 Can read:
   ../../migration/m20261005_000004_create_vanyline_app_settings.sdd
-  ../../system_agents.sdd
+  ../../sessions/catalog.sdd
   ./llm_providers.sdd
 
 Exposes:
@@ -36,8 +38,8 @@ Exposes:
 
 Handles:
   La création de la ligne `default_model` est faite par l'administrateur (API ou interface) ; une
-  clé absente signifie « pas de modèle par défaut » (comportement `NoModelProfile` de
-  ../../system_agents.sdd).
+  clé absente signifie « pas de modèle par défaut ». (Historique : l'amorçage
+  `NoModelProfile` de `../../system_agents.sdd` a été retiré en C2 du chantier lymaille.)
 
 Must:
   Réserver l'écriture aux administrateurs ; garder la lecture ouverte aux utilisateurs authentifiés.

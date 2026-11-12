@@ -9,7 +9,7 @@ Purpose:
   (@ensure_owner). CE fichier ne monte AUCUNE route — c'est le fait déjà relevé par
   `./mod.sdd` : `pub mod owners;` y est déclaré sans aucun handler branché, le module est
   atteint par `crate::api::owners` depuis `./me.rs`, `./projects.rs`, `./sandboxes.rs`,
-  `../ws/chat.rs` et `../ws/sandbox_state.rs`. Un seul contrat pour CE fichier : la
+  `../ws/sandbox_state.rs`. Un seul contrat pour CE fichier : la
   résolution/création paresseuse du Owner, dont le déclencheur d'écriture unique est
   @create_project (`./projects.rs`, décision développeur « lazy provisioning restreint »
   commentée dans le fichier) ; toutes les autres surfaces n'appellent que @resolve_owner_name
@@ -28,7 +28,7 @@ Can read:
   ./mod.rs — déclaration `pub mod owners;` sans route montée.
   ./me.rs, ./projects.rs, ./sandboxes.rs — appelants REST de @resolve_owner_name ;
     @create_project (`./projects.rs`) est l'appelant exclusif de @ensure_owner.
-  ../ws/chat.rs, ../ws/sandbox_state.rs — appelants WS de @resolve_owner_name.
+  ../ws/sandbox_state.rs — appelant WS de @resolve_owner_name.
   ../k8s.rs — @crate::k8s::client (cache de découverte, @AppError::K8sConfigError → 502).
   ../error.rs — @AppError et ses @From (@sea_orm::DbErr → `VNL-DB-006`, @VnyError).
   ../main.rs — @AppState (champs `auth.db`, `config`, `k8s`).
@@ -194,7 +194,7 @@ Handles:
   - Consommateurs de @resolve_owner_name et interprétation de `@None` (contrat de chaque
     appelant, listé pour traçabilité) : `./me.rs` (champ `k8s_owner_name: @Option` de la
     réponse `/api/me`), `./projects.rs` (3 lectures), `./sandboxes.rs` (7 lectures),
-    `../ws/chat.rs`, `../ws/sandbox_state.rs`.
+    `../ws/sandbox_state.rs`.
   - Idempotence en trois couches : (1) early-return sur lien existant (zéro k8s, zéro DB) ;
     (2) get_owner avant create (Owner déjà présent côté cluster, ex. lien perdu, → pas de
     recréation, l'upsert vient raccrocher le lien) ; (3) upsert ON CONFLICT (user_id) — la
@@ -301,7 +301,7 @@ Depends on:
     sans cluster ; convention anti-mock kube (`../k8s.sdd`) pour les Scenarios cluster.
   RFC 1123 (norme externe) : sémantique de l'étiquette DNS visée par @sanitize_owner_name.
   Consommateurs (visibilité `pub`) : ./mod.sdd, ./me.rs, ./projects.rs, ./sandboxes.rs,
-    ../ws/chat.rs, ../ws/sandbox_state.rs.
+    ../ws/sandbox_state.rs.
   Hérite de `../../../vanyline.sdd` et du harnais `../../../tooling.sdd`.
 
 Tasks:

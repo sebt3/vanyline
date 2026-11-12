@@ -17,20 +17,18 @@ Owns:
   ./mod.rs
 
 Structure:
-  ./mod.rs — quinze déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
-    `pub mod agents;`, `pub mod app_settings;`, `pub mod chat_contexts;`, `pub mod conversations;`,
-    `pub mod llm_providers;`, `pub mod mcp_servers;`, `pub mod messages;`,
+  ./mod.rs — douze déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
+    `pub mod agents;`, `pub mod app_settings;`,
+    `pub mod llm_providers;`, `pub mod mcp_servers;`,
     `pub mod model_profiles;`, `pub mod owner_links;`, `pub mod project_workflows;`,
     `pub mod projects;`, `pub mod sandboxes;`, `pub mod skills;`, `pub mod toolsets;`,
-    `pub mod workflow_runs;`.
+    `pub mod workflow_runs;` (les trois entités du chat maison — `chat_contexts`,
+    `conversations`, `messages` — retirées en C2 du chantier lymaille, 2026-11-12).
   ./projects.sdd, ./sandboxes.sdd — entités d'identité `projects` / `sandboxes` (tables
     `vanyline_projects` / `vanyline_sandboxes`), 2026-10-23.
   ./agents.sdd — entité `agents` (table `vanyline_agents`), spec à venir.
-  ./chat_contexts.sdd — entité `chat_contexts` (table `vanyline_chat_contexts`), spec à venir.
-  ./conversations.sdd — entité `conversations` (table `vanyline_conversations`), spec à venir.
   ./llm_providers.sdd — entité `llm_providers` (table `vanyline_llm_providers`), spec à venir.
   ./mcp_servers.sdd — entité `mcp_servers` (table `vanyline_mcp_servers`), spec à venir.
-  ./messages.sdd — entité `messages` (table `vanyline_messages`), spec à venir.
   ./model_profiles.sdd — entité `model_profiles` (table `vanyline_model_profiles`), spec à venir.
   ./owner_links.sdd — entité `owner_links` (table `vanyline_owner_links`), spec à venir.
   ./skills.sdd — entité `skills` (table `vanyline_skills`), spec à venir.
@@ -42,8 +40,8 @@ Structure:
 
 Must:
   - Exposer chaque sous-module en `pub` : les consommateurs y accèdent par le chemin
-      `crate::db::entities::<entite>::…` (`config_store.rs`, `api/conversations.rs`,
-      `api/owners.rs`, `api/llm_providers.rs`).
+      `crate::db::entities::<entite>::…` (`config_store.rs`, `api/owners.rs`,
+      `api/llm_providers.rs`).
 
 Must not:
   - Porter une fonction, constante, `impl`, type ou réexportation dans ./mod.rs
@@ -52,10 +50,11 @@ Must not:
       volontairement les consommateurs listés ci-dessus.
 
 Depends on:
-  ./agents.rs, ./chat_contexts.rs, ./conversations.rs, ./llm_providers.rs,
-    ./mcp_servers.rs, ./messages.rs, ./model_profiles.rs, ./owner_links.rs,
+  ./agents.rs, ./llm_providers.rs,
+    ./mcp_servers.rs, ./model_profiles.rs, ./owner_links.rs,
     ./project_workflows.rs, ./skills.rs, ./toolsets.rs, ./workflow_runs.rs — chaque
-    enfant dépend de `sea_orm`.
+    enfant dépend de `sea_orm`. (`chat_contexts.rs`, `conversations.rs`, `messages.rs`
+    retirés en C2 du chantier lymaille.)
 
 Tasks:
   [ ] Enregistrer dans ./mod.rs toute entité enfant issue de sa propre spec (ordre

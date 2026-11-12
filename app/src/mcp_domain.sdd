@@ -7,7 +7,9 @@ Purpose:
   qui pilotent les objets de domaine vanyline qui ne sont PAS des ressources SQL génériques —
   projets, sandboxes (CR Kubernetes), santé du code, workflows et runs. Le CRUD de la
   configuration relève du MCP générique de miryad-core (`POST /mcp`). Les deux sont consommés par
-  les agents système (../system_agents.sdd) avec un jeton d'API de l'utilisateur, et sont
+  les agents (agents de catalogue lymaille — `./sessions/catalog.sdd`, l'amorçage
+  `system_agents.sdd` étant retiré en C2 du chantier lymaille) avec un jeton d'API de
+  l'utilisateur, et sont
   utilisables par tout client MCP autorisé. Chaque outil agit au nom de l'utilisateur
   authentifié, dans le namespace de son Owner, par les MÊMES fonctions que les routes REST
   (aucune seconde implémentation de la logique ni de l'autorisation). Fichier neuf, conception.
@@ -66,7 +68,8 @@ Handles:
   avec un marqueur, jamais rendue entière. Les outils destructifs portent la mention
   « destructif » dans leur description, à titre d'information : aucune confirmation n'est exigée
   côté outil (le comportement de l'agent face à une action destructive relève de son prompt,
-  ./system_agents.sdd). Une erreur d'outil rend un résultat
+  porté par l'agent de catalogue — ./sessions/catalog.sdd, les prompts `system_agents.rs`
+  étant retirés en C2 du chantier lymaille). Une erreur d'outil rend un résultat
   `isError: true` avec un message, jamais un code JSON-RPC (même convention que la
   sandbox — clarification validation M1 : la clause porte sur l'EXÉCUTION d'un outil
   nommé ; l'enveloppe garde ses codes protocolaires, exactement la convention sandbox :

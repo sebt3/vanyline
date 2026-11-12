@@ -1,19 +1,22 @@
 Spec: Ws
 
 Purpose:
-  Module `ws` de l'`app` : point d'entrée des WebSocket côté backend (chat, push de
-  l'état des sandboxes). Le fichier ./mod.rs ne fait que déclarer les deux sous-modules —
-  aucun comportement propre : le contrat vit dans les specs des sous-modules (règle
+  Module `ws` de l'`app` : point d'entrée des WebSocket côté backend (push de l'état des
+  sandboxes). Le fichier ./mod.rs ne fait que déclarer les sous-modules — aucun
+  comportement propre : le contrat vit dans les specs des sous-modules (règle
   `mod.rs` de `/vanyline.sdd` et `.specdd/bootstrap.project.md`).
 
 Owns:
   ./mod.rs
 
 Structure:
-  ./mod.rs — déclarations `pub mod chat;`, `pub mod sandbox_state;`, rien d'autre.
-  ./chat.sdd — WebSocket chat de l'app (transport des échanges LLM vers le frontend).
+  ./mod.rs — déclaration `pub mod sandbox_state;`, rien d'autre.
   ./sandbox_state.sdd — WebSocket `/api/ws/sandbox-state` (push des phases de sandbox).
+  Retiré en C2 du chantier lymaille (2026-11-12) : ./chat.rs et sa spec — le chat
+    lymaille est servi par miryad-core sous `/api/v1/lymaille` (REST + SSE, contrat
+    `../sessions/mod.sdd`), plus de WebSocket de chat propre à l'app.
 
 Done when:
-  ./mod.rs continue de ne porter que les deux déclarations ; toute fonction, constante,
-    type ou impl ajouté dans ./mod.rs exige d'étendre cette spec en conséquence.
+  ./mod.rs continue de ne porter que la déclaration de `sandbox_state` ; toute fonction,
+    constante, type ou impl ajouté dans ./mod.rs exige d'étendre cette spec en
+    conséquence.

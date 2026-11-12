@@ -4,8 +4,8 @@ Purpose:
   Registre des modules `api` du crate `vanyline-app` ET assembleur des deux routers
   intermédiaires de l'API REST : @api_v1_router (endpoints métier non-CRUD des ressources
   portées par `resource_router` de miryad-core — `llm-providers`, `mcp-servers`) et
-  @api_router (routes métier du frontend : local-tools, me, conversations, projects,
-  sandboxes). Un seul contrat pour CE fichier : la table de routage (chemins, méthodes,
+  @api_router (routes métier du frontend : me, projects, sandboxes). Un seul contrat pour
+  CE fichier : la table de routage (chemins, méthodes,
   handlers) telle que le frontend l'appelle ; le montage sous les préfixes `/api` et
   `/api/v1`, l'état, les routes WS, le CRUD `resource_router`, swagger et le fallback
   statique appartiennent à `../main.rs` (assemblage final — cf. Handles).
@@ -18,26 +18,30 @@ Purpose:
   `.layer()`, pas de `.with_state()`, pas de fallback — uniquement des déclarations
   `pub mod` et des enregistrements `.route(...)`. Le comportement des handlers eux-mêmes
   est le contrat des specs enfants (`./me.sdd`, `./owners.sdd`, `./projects.sdd`,
-  `./sandboxes.sdd`, `./conversations.sdd`, `./llm_providers.sdd`, `./mcp_servers.sdd`,
-  `./local_tools.sdd` — en cours de rédaction).
+  `./sandboxes.sdd`, `./llm_providers.sdd`, `./mcp_servers.sdd` — en cours de rédaction).
+  Retraits actés : `./conversations.rs` et `./local_tools.rs` (chat maison, chantier
+  lymaille C2 — les conversations sont servies par miryad-core sous `/api/v1/lymaille`,
+  cf. `../sessions/mod.sdd`).
 
 Owns:
   ./mod.rs
 
 Exposes:
-  - Déclarations `pub mod` (9) : ./conversations.rs, ./llm_providers.rs, ./local_tools.rs,
-    ./mcp_servers.rs, ./me.rs, ./owners.rs, ./projects.rs, ./sandboxes.rs, ./workflows.rs —
+  - Déclarations `pub mod` (7) : ./llm_providers.rs, ./mcp_servers.rs,
+    ./me.rs, ./owners.rs, ./projects.rs, ./sandboxes.rs, ./workflows.rs —
     dans cet ordre
     alphabétique. `pub` est nécessaire y compris pour les modules sans route montée ici :
     @resolve_owner_name / @ensure_owner / @sanitize_owner_name de ./owners.rs sont appelés
     en-dehors du module via `crate::api::owners` (./me.rs, ./projects.rs, ./sandboxes.rs,
-    `../ws/chat.rs`, `../ws/sandbox_state.rs`). ./owners.rs est le seul module déclaré ici
+    `../ws/sandbox_state.rs`). ./owners.rs est le seul module déclaré ici
     dont AUCUN handler n'est branché sur une route de CE fichier — c'est une boîte à
     outils interne, pas un endpoint.
   - @fn api_v1_router() -> @Router<@AppState> — Router d'état NON fixé construit par
     3 enregistrements `.route` (table en Structure). Aucun état, aucune couche appliquée.
   - @fn api_router() -> @Router<@AppState> — Router d'état NON fixé construit par
-    12 enregistrements `.route` (table en Structure). Aucun état, aucune couche appliquée.
+    17 enregistrements `.route` (table en Structure — chiffre resserré en C2, chantier
+    lymaille : 21 avant retrait, moins local-tools et les trois enregistrements de
+    conversations). Aucun état, aucune couche appliquée.
   - Imports utilisés : @Router, @routing::{@any, @get, @post, @put} d'axum et
     @crate::AppState — les quatre fabriques de @MethodRouter sont employées (`get`, `post`,
     `put`, `any`) ; `put` ne sert qu'à `/llm-providers/{id}/default`.
@@ -53,12 +57,7 @@ Structure:
   - `POST` `/mcp-servers/{id}/test` → `/api/v1/mcp-servers/{id}/test`
     → ./mcp_servers.rs @test_server
   @api_router() — monté par @nest("/api", …) dans `../main.rs` :
-  - `GET` `/local-tools` → `/api/local-tools` → ./local_tools.rs @list_local_tools
   - `GET` `/me` → `/api/me` → ./me.rs @handler_me
-  - `GET` + `POST` `/conversations` → ./conversations.rs @list_conversations
-    / @create_conversation (un seul @MethodRouter combiné `get(…).post(…)`)
-  - `GET` + `DELETE` `/conversations/{id}` → @get_conversation / @delete_conversation
-  - `GET` `/conversations/{id}/messages` → @get_messages
   - `GET` + `POST` `/projects` → ./projects.rs @list_projects / @create_project
   - `GET` + `DELETE` `/projects/{name}` → @get_project / @delete_project
   - `GET` + `POST` `/sandboxes` → ./sandboxes.rs @list_sandboxes / @create_sandbox
@@ -80,10 +79,10 @@ Structure:
     (`req.uri().path()`) et IGNORE le paramètre décodé par @Path (cf. ./sandboxes.rs).
   Syntaxe des paramètres : `{id}` / `{name}` / `{*path}` — la forme axum 0.8 (accolades),
   pas la forme axum 0.7 `:id` / `*path`.
-  Les 21 handlers branchés reçoivent tous l'identité par l'extracteur @AuthUser de
-    miryad-core (vérifié par grep `user: AuthUser` sur les 8 enfants) : l'authentification
-    vit dans les handlers, JAMAIS dans une couche posée ici. Les commentaires
-    `// Conversations (OIDC)` / `// Projects (OIDC)` / `// Sandboxes (OIDC)` du fichier
+  Les handlers branchés reçoivent tous l'identité par l'extracteur @AuthUser de
+    miryad-core (vérifié par grep `user: AuthUser` sur les 6 enfants branchés) :
+    l'authentification vit dans les handlers, JAMAIS dans une couche posée ici. Les
+    commentaires `// Projects (OIDC)` / `// Sandboxes (OIDC)` du fichier
     sont des annotations informatives sans effet d'exécution (cf. Tasks `[?]`).
 
 Accepts:
@@ -104,7 +103,7 @@ Accepts:
 Returns:
   - @api_v1_router() : @Router<@AppState> portant exactement les 3 routes de la table,
     rien d'autre (ni CRUD, ni health, ni swagger).
-  - @api_router() : @Router<@AppState> portant exactement les 12 enregistrements de la
+  - @api_router() : @Router<@AppState> portant exactement les 17 enregistrements de la
     table (les méthodes additionnelles par chemin sont portées par les @MethodRouter
     combinés), rien d'autre (ni `/api/ws/…`, ni `/health`, ni `/api/v1`).
   - Les deux routers sont sans état, sans couche, sans fallback : toute la composition
@@ -124,22 +123,24 @@ Handles:
   - Montage (consommateur unique : `../main.rs`) — @nest("/api/v1", @api::api_v1_router())
     et @nest("/api", @api::api_router()) sur le router racine, APRÈS les @merge
     (@auth_router, 6 @resource_router, swagger) et AVANT les routes WS racine
-    `/api/ws/chat/{conversation_id}` et `/api/ws/sandbox-state`.
+    `/api/ws/sandbox-state`.
   - Cohabitation `/api/v1` : le CRUD des 6 ressources est @merge au niveau racine sous
     `/api/v1/…` (chemins complets), les endpoints custom de @api_v1_router arrivent par
     le nest `/api/v1` — deux mécanismes distincts pour le même préfixe externe ; les
     patterns explicites du merge sont plus spécifiques que le wildcard interne du nest,
     ce qui rend les deux tables complémentaires sans collision (cf. Tasks `[?]`).
-  - Priorité sur les routes WS : `/api/ws/chat/{conversation_id}` et
-    `/api/ws/sandbox-state` sont déclarées à la racine de `../main.rs` APRÈS le
-    @nest("/api", …) et sont effectivement servies par `../ws/` — la priorité matchit
+  - Priorité sur la route WS : `/api/ws/sandbox-state` est déclarée à la racine de
+    `../main.rs` APRÈS le
+    @nest("/api", …) et est effectivement servie par `../ws/` — la priorité matchit
     (segments littéraux sur le wildcard du nest) est le mécanisme implicite qui rend
-    cela possible (cf. Tasks `[?]`).
+    cela possible (cf. Tasks `[?]`). Le retire de `/api/ws/chat/{conversation_id}`
+    (C2) ne change rien à ce mécanisme, il ne subsiste qu'une route WS racine.
   - Consommateurs réels des chemins (frontend, même origine, aucune base API absolue) :
-    `../../../frontend/src/api/httpConfigRepo.ts` (`/api/local-tools`,
+    `../../../frontend/src/api/httpConfigRepo.ts` (
     `/api/v1/llm-providers/{id}/default` en PUT, `/api/v1/llm-providers/{id}/test` et
-    `/api/v1/mcp-servers/{id}/test` en POST), `../../../frontend/src/api/httpChatBackend.ts`
-    (`/api/conversations`, `/api/conversations/{id}/messages`),
+    `/api/v1/mcp-servers/{id}/test` en POST ; ses appels `GET /api/local-tools` survivent
+    côté frontend jusqu'au retrait D3 du chantier lymaille et répondront 404 entre C2 et
+    D3 — fenêtre assumée par le chantier),
     `../../../frontend/src/api/sandboxWs.ts` (`/api/sandboxes/{name}/ws-ticket`),
     `../../../frontend/src/api/gitClient.ts` (les ~15 appels
     `/api/sandboxes/{name}/git/…` couverts par la route @any),
@@ -170,7 +171,7 @@ Must:
     `../main.rs` puisse composer l'application (l'appliquer ici changerait le type et
     doublerait la gestion d'état).
   - Déclarer `pub mod owners;` même sans route montée ici : les helpers
-    @resolve_owner_name / @ensure_owner sont atteints depuis `../ws/chat.rs` et
+    @resolve_owner_name / @ensure_owner sont atteints depuis
     `../ws/sandbox_state.rs` via `crate::api::owners` (visibilité `pub(crate)` minimum
     requis, `pub` est l'état actuel).
   - Rester le point d'entrée unique de la zone `api` : tout nouveau module `api/*.rs`
@@ -206,21 +207,23 @@ Scenario: api_v1_router expose exactement les trois actions custom
     @AuthUser refuse avant tout accès DB ; le code exact du refus est le contrat de
     miryad-core et n'est pas asserté ici) — les trois routes sont donc branchées
 
-Scenario: api_router expose les routes d'identité local-tools et me
+Scenario: api_router expose la route d'identité me
   Given le même @AppState de test et @Router::new().@nest("/api",
     @api_router()).@with_state(state)
-  When `GET /api/local-tools` et `GET /api/me` sont adressés non authentifiés via
+  When `GET /api/me` est adressé non authentifié via
     @oneshot
-  Then aucune des deux réponses n'est @StatusCode::NOT_FOUND (routes branchées ; refus
+  Then la réponse n'est pas @StatusCode::NOT_FOUND (route branchée ; refus
     d'auth en aval, hors contrat de CE fichier)
 
-Scenario: api_router expose les quatre chemins de conversations
+Scenario: les routes du chat maison ne sont plus montées
+  # Retrait C2 du chantier lymaille ; les conversations vivent désormais sous
+  # `/api/v1/lymaille` (contrat `../sessions/mod.sdd`, testé dans `../main.rs`).
   Given le même montage @nest("/api", @api_router()).@with_state(state)
   When cinq requêtes non authentifiées sont adressées via @oneshot : `GET` et `POST`
     `/api/conversations`, `GET` et `DELETE` `/api/conversations/7`,
-    `GET /api/conversations/7/messages`
-  Then aucune des cinq réponses n'est @StatusCode::NOT_FOUND — les cinq combinaisons
-    méthode+chemin des conversations sont montées
+    `GET /api/local-tools`
+  Then les cinq réponses sont @StatusCode::NOT_FOUND — aucune route du chat maison
+    retiré en C2 ne subsiste sur CE router
 
 Scenario: api_router expose les deux chemins de projects
   Given le même montage @nest("/api", @api_router()).@with_state(state)
@@ -274,9 +277,10 @@ Depends on:
   @axum (@Router, @routing::{@any, @get, @post, @put}, @MethodRouter — version 0.8 et sa
     syntaxe de patterns `{id}` / `{*path}`), @crate::AppState (struct en `../main.rs`,
     état threadé par les @nest).
-  ./me.rs, ./owners.rs, ./projects.rs, ./sandboxes.rs, ./conversations.rs,
-    ./llm_providers.rs, ./mcp_servers.rs, ./local_tools.rs — les 21 handlers branchés
-    (specs enfants en cours de rédaction ; leurs tests construisent déjà un @AppState
+  ./me.rs, ./owners.rs, ./projects.rs, ./sandboxes.rs,
+    ./llm_providers.rs, ./mcp_servers.rs, ./workflows.rs — les handlers branchés
+    (27 après le retrait C2 de ./conversations.rs et ./local_tools.rs ;
+    specs enfants en cours de rédaction ; leurs tests construisent déjà un @AppState
     via @crate::auth::test_support de `../auth/mod.rs` et @db::test_support de
     `../db/test_support.rs`, précédents réutilisables pour les Scenarios ci-dessus).
   ../main.rs — consommateur et assemblage final : @nest("/api/v1"/"/api"), @with_state,
@@ -311,11 +315,12 @@ Tasks:
       méthode différente il serait silencieusement éclipsé par le pattern plus spécifique
       du merge (route morte). Un test dans `../main.rs` (inventaire des chemins servis vs
       table attendue) est-il nécessaire, ou la délégation à matchit suffit ?
-  [?] Ordre de déclaration des routes WS dans `../main.rs` (`/api/ws/chat/…` et
-      `/api/ws/sandbox-state` APRÈS @nest("/api", …)) : le fonctionnement repose sur la
+  [?] Ordre de déclaration des routes WS dans `../main.rs` (`/api/ws/sandbox-state`
+      APRÈS @nest("/api", …)) : le fonctionnement repose sur la
       priorité matchit des segments littéraux sur le wildcard interne du nest — jamais
       asserté par un test. Contractualiser (test « GET /api/ws/sandbox-state → pas 404 »
-      dans la spec de `../main.rs`), déplacer ces routes dans @api_router, ou assumer ?
+      dans la spec de `../main.rs`), déplacer cette route dans @api_router, ou assumer ?
+      — réduit en C2 (2026-11-12) : `/api/ws/chat/…` retiré, il ne reste qu'une route WS.
   [?] Annotations `// … (OIDC)` uniquement sur Conversations/Projects/Sandboxes alors que
       /me, /local-tools et les endpoints v1 exigent aussi @AuthUser : commentaire purement
       informatif (à uniformiser ou supprimer) ou trace d'un projet de garde différenciée

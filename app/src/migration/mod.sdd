@@ -1,7 +1,7 @@
 Spec: Migration
 
 Purpose:
-  Orchestrateur des migrations SeaORM de l'`app` : déclaration des seize migrations enfants,
+  Orchestrateur des migrations SeaORM de l'`app` : déclaration des treize migrations enfants,
   contrat d'ORDRE d'application (vec d'enregistrement = ordre d'application en production),
   table de suivi dédiée `seaql_migrations_app` pour cohabiter avec le migrateur
   `miryad-core` sur la même base. ./mod.rs ne contient aucune fonction `run`/`migrate`
@@ -13,7 +13,7 @@ Purpose:
   vérification « les deux migrateurs s'appliquent contre une vraie base » du crate.
 
 Structure:
-  ./mod.rs — déclarations des seize sous-modules, `@Migrator`, table de suivi, test de
+  ./mod.rs — déclarations des treize sous-modules (000007 à 000009 retirées en C2), `@Migrator`, table de suivi, test de
     régression `migrations_apply_cleanly`.
   ./m20260825_000001_create_vanyline_skills.rs … ./m20260825_000010_create_vanyline_owner_links.rs —
     une migration chacune (table `vanyline_*` + `down` = `drop_table`), spec enfant propre.
@@ -27,13 +27,12 @@ Can read:
   ../db/test_support.rs
 
 Must:
-  Exiger que `@Migrator::migrations` retourne exactement seize migrations, dans l'ordre du
+  Exiger que `@Migrator::migrations` retourne exactement treize migrations, dans l'ordre du
     vec, cet ordre étant l'ordre d'application SeaORM (chaque migration est enregistrée par
     son nom dans la table de suivi avant la suivante) : `m20260825_000001_create_vanyline_skills`,
     `m20260825_000002_create_vanyline_toolsets`, `m20260825_000003_create_vanyline_llm_providers`,
     `m20260825_000004_create_vanyline_mcp_servers`, `m20260825_000005_create_vanyline_model_profiles`,
-    `m20260825_000006_create_vanyline_agents`, `m20260825_000007_create_vanyline_chat_contexts`,
-    `m20260825_000008_create_vanyline_conversations`, `m20260825_000009_create_vanyline_messages`,
+    `m20260825_000006_create_vanyline_agents`,
     `m20260825_000010_create_vanyline_owner_links`,
     `m20261005_000001_create_vanyline_project_workflows`,
     `m20261005_000002_create_vanyline_workflow_runs`,
@@ -43,15 +42,18 @@ Must:
     `m20261023_000002_create_vanyline_sandboxes` (identité Project/Sandbox, 2026-10-23).
   Respecter les contraintes minimales imposées par les clés étrangères entre tables de
     l'app : `…000003` (`vanyline_llm_providers`) avant `…000005` (`vanyline_model_profiles`),
-    `…000005` avant `…000006` (`vanyline_agents`), `…000006` et `…000007`
-    (`vanyline_chat_contexts`) avant `…000008` (`vanyline_conversations`), `…000008` avant
-    `…000009` (`vanyline_messages`). Les autres enfants (`…000001`, `…000002`, `…000004`,
-    `…000010`) ne dépendent que de `miryad_users`.
+    `…000005` avant `…000006` (`vanyline_agents`). Les contraintes liées aux tables
+    `…000007`/`…000008`/`…000009` (chat maison) ont disparu avec leur retrait (C2 du
+    chantier lymaille, 2026-11-12). Les autres enfants ne dépendent que de `miryad_users`
+    ou de leurs propres tables.
   Exiger que les migrations de l'app soient appliquées seulement APRÈS le migrateur
-    `miryad-core` sur la même base : sept enfants (`…000001`, `…000002`, `…000005`,
-    `…000006`, `…000008`, `…000009`, `…000010`) posent une FK vers `miryad_users`,
-    table créée par miryad-core (les trois autres — `…000003`, `…000004`, `…000007` —
-    n'ont aucune FK sortante, tables globales ou de contexte) — séquence du démarrage
+    `miryad-core` sur la même base : neuf enfants (`…000001`, `…000002`, `…000005`,
+    `…000006`, `…000010`, `m20261005_000001`, `m20261005_000002`,
+    `m20261023_000001`, `m20261023_000002`) posent une FK vers
+    `miryad_users`,
+    table créée par miryad-core (les quatre autres — `…000003`, `…000004`,
+    `m20261005_000003`, `m20261005_000004` —
+    n'ont aucune FK sortante, tables globales ou altérations) — séquence du démarrage
     dans `../main.rs`, même paire dans le harnais `../db/test_support.rs::real_db`.
   Exiger que `@Migrator::migration_table_name` retourne l'`@sea_orm::sea_query::Alias`
     `seaql_migrations_app` — table de suivi dédiée, jamais la table par défaut, pour ne pas
@@ -80,7 +82,7 @@ Must not:
 Depends on:
   ./m20260825_*.rs et ./m20261005_000001_*.rs / ./m20261005_000002_*.rs /
     ./m20261005_000003_*.rs / ./m20261005_000004_*.rs / ./m20261023_000001_*.rs /
-    ./m20261023_000002_*.rs — les seize
+    ./m20261023_000002_*.rs — les treize
     modules enfants, chacun sous sa spec.
   `@miryad_core::migration::Migrator` (crate externe `miryad-core`) — doit précéder ce
     migrateur (FK vers `miryad_users`).
@@ -91,12 +93,12 @@ Exposes:
   @Migrator — type public implémentant `@MigratorTrait` ; le module `migration` est privé
     (déclaré `mod migration;` dans `../main.rs`), donc atteignable depuis le crate `app`
     uniquement, jamais hors binaire.
-  @Migrator::migrations — enregistrement des seize enfants.
+  @Migrator::migrations — enregistrement des treize enfants.
   @Migrator::migration_table_name — table de suivi `seaql_migrations_app`.
   `@MigratorTrait::up` (méthode héritée, seule utilisée par les appelants).
 
 Returns:
-  `@Migrator::migrations` : `Vec<Box<dyn @MigrationTrait>>` — exactement seize éléments,
+  `@Migrator::migrations` : `Vec<Box<dyn @MigrationTrait>>` — exactement treize éléments,
     ordre d'application = ordre du vec.
   `@Migrator::migration_table_name` : `@sea_orm::sea_query::DynIden` identifiant
     `seaql_migrations_app`.
@@ -120,7 +122,7 @@ Tasks:
     ressynchronisés), 7 tests SQL bruts `migration::system_migrations` verts dont
     rejet de l'unicité `(owner_id, system_key)` cross-owner, sémantique NULL du
     composite, `down` vérifiant colonnes ET index absents.
-  [?] Politique d'irrémédiabilité : les seize enfants implémentent chacun un `down()` =
+  [?] Politique d'irrémédiabilité : les treize enfants implémentent chacun un `down()` =
       `drop_table` ; le runtime n'appelle ni `down`, ni `down_to`, ni `fresh` — depuis
       W0 (2026-10-10) DEUX tests d'enregistrement appellent `Migrator::down`
       (`down_supprime_les_tables`, sqlite en mémoire), ce qui fait de `down` un chemin
@@ -134,7 +136,7 @@ Tasks:
   [?] L'ordre miryad-core → app n'est protégé que par la séquence de code de `../main.rs`
       : en SQLite en mémoire (tests) les FK ne sont pas appliquées, l'ordre n'est vérifié
       qu'en PostgreSQL réel. Faut-il le contracter davantage (test, garde-fou) ?
-  [ ] Dériver un test du Scenario « les seize migrations s'appliquent dans l'ordre exact
+  [ ] Dériver un test du Scenario « les treize migrations s’appliquent dans l’ordre exact
       enregistré » : à ce jour seul le test d'application complète existe, l'ordre lui-même
       n'est vérifié par aucun test.
   [ ] Rattacher les specs enfants `./m20260825_0000XX_*.sdd` (en cours de rédaction) dans
@@ -146,29 +148,31 @@ Done when:
     de step, appel de `down`) ou toute onzième migration exige d'étendre cette spec et ses
     `Scenario` au préalable.
 
-Scenario: les seize migrations s'appliquent dans l'ordre exact enregistré
+Scenario: les treize migrations s'appliquent dans l'ordre exact enregistré
   # Redimensionné « dix »→« douze » le 2026-10-10 (W0 : deux migrations ajoutées en
   # fin de chaîne ; le test dérivé reste à écrire — voir Tasks). Redimensionné
   # « douze »→« seize » le 2026-10-13 (étape 8 : m20261005_000003/000004 ajoutées en
-  # fin de chaîne par la tâche que ses Tasks autorisait).
+  # fin de chaîne par la tâche que ses Tasks autorisait). Redimensionné « seize »→
+  # « treize » le 2026-11-12 (C2 du chantier lymaille : m20260825_000007/000008/000009
+  # retirées — tables propres, aucune migration drop).
   Given une base SQLite en mémoire vide avec `@miryad_core::migration::Migrator::up` déjà appliqué
   When `@Migrator::up` est appelé avec step `None`
-  Then la table `seaql_migrations_app` contient exactement seize lignes et l'ordre d'application est celui de `Must` : `m20260825_000001_create_vanyline_skills` en premier, `m20261023_000002_create_vanyline_sandboxes` en dernier, les seize noms intercalaires dans l'ordre croissant de leurs timestamps
+  Then la table `seaql_migrations_app` contient exactement treize lignes et l'ordre d'application est celui de `Must` : `m20260825_000001_create_vanyline_skills` en premier, `m20261023_000002_create_vanyline_sandboxes` en dernier, les onze noms intercalaires dans l'ordre croissant de leurs timestamps, et aucune ligne pour `m20260825_000007/000008/000009` (les tables `vanyline_chat_contexts`, `vanyline_conversations`, `vanyline_messages` n'existent pas)
 
 Scenario: l'historique de l'app est isolé dans seaql_migrations_app
   Given une base SQLite en mémoire vide
   When les deux migrateurs sont appliqués dans l'ordre (miryad-core puis app)
-  Then les seize lignes d'historique de l'app figurent uniquement dans `seaql_migrations_app` et aucune n'apparaît dans la table de suivi de miryad-core
+  Then les treize lignes d'historique de l'app figurent uniquement dans `seaql_migrations_app` et aucune n'apparaît dans la table de suivi de miryad-core
 
 Scenario: un second up complet est sans effet
   Given une base où `@Migrator::up` (step `None`) a déjà été appliqué
   When `@Migrator::up` est rappelé avec step `None`
-  Then aucun `DbErr` n'est retourné et `seaql_migrations_app` contient toujours exactement seize lignes — aucune migration enfant n'est rejouée
+  Then aucun `DbErr` n'est retourné et `seaql_migrations_app` contient toujours exactement treize lignes — aucune migration enfant n'est rejouée
 
 Scenario: un step partiel n'applique que le préfixe
   Given une base SQLite en mémoire vide avec miryad-core déjà appliqué
   When `@Migrator::up` est appelé avec step `Some(3)`
-  Then les trois premières migrations de `Must` (`m20260825_000001_create_vanyline_skills` à `m20260825_000003_create_vanyline_llm_providers`) sont appliquées et enregistrées, et les sept suivantes sont absentes de `seaql_migrations_app`
+  Then les trois premières migrations de `Must` (`m20260825_000001_create_vanyline_skills` à `m20260825_000003_create_vanyline_llm_providers`) sont appliquées et enregistrées, et les dix suivantes sont absentes de `seaql_migrations_app`
 
 Scenario: la paire complète de migrations s'applique contre un vrai schéma
   Given la base sqlite en mémoire de `@crate::db::test_support::real_db`, construite en appliquant les migrateurs miryad-core puis app

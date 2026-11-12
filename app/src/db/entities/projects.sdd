@@ -7,7 +7,8 @@ Purpose:
   d'un Project (clé, propriétaire, nom de la CR, première absence constatée) et jamais sa spec ni
   son status : la CR Kubernetes reste la golden source (`/vanyline.sdd`, « Modèle de données
   Project/Sandbox »). Elle existe pour que `project_workflows`, `workflow_runs` et
-  `chat_contexts` puissent s'y rattacher par clé étrangère (lots ultérieurs). Pas de
+  `chat_contexts` (retiré en C2 du chantier lymaille) puissent s'y rattacher par clé
+  étrangère. Pas de
   `MiryadResource` : l'entité n'est PAS exposée par le CRUD générique, seul le code de l'app
   (réconciliateur, routes projets) l'écrit. Aucun comportement : pas de fonction, pas de hook.
 

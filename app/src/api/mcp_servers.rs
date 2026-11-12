@@ -135,7 +135,6 @@ mod tests {
         let state = AppState {
             config,
             cookie_key: test_key(),
-            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state(),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
@@ -330,7 +329,6 @@ mod tests {
                 subagent_max_secs: 2700,
             },
             cookie_key: test_key(),
-            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state_with_db(
                 crate::db::test_support::real_db().await,

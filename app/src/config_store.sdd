@@ -19,9 +19,11 @@ Purpose:
   ../../cfgstore/src/store.sdd (« ses écritures retombent toutes sur VNL-CFG-009 et son
   default_agent est un None constant ») est CONFIRMÉE par le code. Les écritures de config
   de l'app ne passent JAMAIS par ce store : elles vivent dans le CRUD @resource_router de
-  miryad-core monté par ./main.rs. Seul constructeur observable : ./ws/chat.rs qui bâtit
-  `PgConfigStore::new(db.clone(), user_id)` par session de chat (le store est lié à UN
-  utilisateur, capturé à la construction).
+  miryad-core monté par ./main.rs. Constructeurs observables depuis le retrait C2 du
+  chantier lymaille : ./workflow/steps/rhai.rs qui bâtit `PgConfigStore::new(db.clone(),
+  user_id)` par step (le store est lié à UN
+  utilisateur, capturé à la construction ; ./ws/chat.rs, constructeur historique par
+  session de chat, a été retiré avec le chat maison).
   La traduction domaine est le point de convergence documenté par les specs entités
   (./db/entities/*.sdd) : « la transformation est le contrat de ./config_store.rs » y est
   répété — ce fichier est donc le propriétaire de : résolution `provider_id` → NOM de
@@ -41,7 +43,6 @@ Can read:
   ./db/entities/agents.rs
   ./db/entities/skills.rs
   ./db/test_support.rs
-  ./ws/chat.rs
   ./error.rs
   ./main.rs
   ../../cfgstore/src/store.rs
@@ -81,14 +82,15 @@ Depends on:
   @serde_json — @from_value des colonnes JSONB (@toolsets, @skills, @local_tools, @mcp),
     @Value des colonnes @options/@headers.
   @tracing — unique effet d'observable hors retour : @tracing::warn! de @list_mcp_servers.
-  Consommateurs (hors périmètre) : ./ws/chat.rs (@handle_message, session de chat),
+  Consommateurs (hors périmètre) : ./workflow/steps/rhai.rs (step de workflow, depuis le
+    retrait C2 du chantier lymaille qui a retiré ./ws/chat.rs),
     ./error.rs (@From<@CfgStoreError> → HTTP 500), la session ../../lib/src/session.rs
     via @Arc<dyn @ConfigStore>.
 
 Exposes:
   @PgConfigStore — `pub struct { db: @DatabaseConnection, user_id: i32 }`, les deux champs
     PRIVÉS ; constructeur @PgConfigStore::new(db, user_id) `pub` (seule voie de
-    construction, ./ws/chat.rs le lui fournit). @async_trait `impl ConfigStore for
+    construction ; constructeurs : ./workflow/steps/rhai.rs depuis le retrait C2). @async_trait `impl ConfigStore for
     @PgConfigStore` : @Send + @Sync satisfaits (les deux champs le sont). Aucun autre
     item `pub` du fichier.
   Lectures surchargées (8 — les seules méthodes propres) :
@@ -261,7 +263,7 @@ Handles:
     trancher.
   Chaîne d'erreurs descendante : @CfgStoreError -> ./error.rs @From ->
     @AppError::InternalError -> HTTP 500 avec le @Display complet (double marqueur
-    inclus) ; ./ws/chat.rs recharge la config par ce store à chaque message.
+    inclus) ; ./workflow/steps/rhai.rs recharge la config par ce store à chaque step.
   Two-query sans snapshot : @list_models (profils puis providers) et @list_agents (agents
     puis profils) lisent dans DEUX requêtes non transactionnelles — une écriture REST
     concurrente entre les deux est visible à moitié seulement (résolution sur un jeu
@@ -398,7 +400,7 @@ Tasks:
     `// 4. domain_mcp_server_sse_skipped` au-dessus de @domain_mcp_server_sse_mapped —
     réécrire selon cette spec ou laisser (vieille méthode) ?
   [?] @api_key des providers remonte en clair dans @Vec<@Provider> (et l'@Display du
-    domaine le masque quand @None seulement) : le consommateur ws/chat est in-process,
+    domaine le masque quand @None seulement) : les consommateurs sont in-process,
     mais la question du masque est déjà ouverte côté ./db/entities/llm_providers.sdd
     `[!]` — s'aligner sur son arbitrage.
   [?] @missing_docs (warn) : @PgConfigStore/new et les items `pub` n'ont aucun

@@ -4,9 +4,6 @@ mod m20260825_000003_create_vanyline_llm_providers;
 mod m20260825_000004_create_vanyline_mcp_servers;
 mod m20260825_000005_create_vanyline_model_profiles;
 mod m20260825_000006_create_vanyline_agents;
-mod m20260825_000007_create_vanyline_chat_contexts;
-mod m20260825_000008_create_vanyline_conversations;
-mod m20260825_000009_create_vanyline_messages;
 mod m20260825_000010_create_vanyline_owner_links;
 mod m20261005_000001_create_vanyline_project_workflows;
 mod m20261005_000002_create_vanyline_workflow_runs;
@@ -29,9 +26,6 @@ impl MigratorTrait for Migrator {
             Box::new(m20260825_000004_create_vanyline_mcp_servers::Migration),
             Box::new(m20260825_000005_create_vanyline_model_profiles::Migration),
             Box::new(m20260825_000006_create_vanyline_agents::Migration),
-            Box::new(m20260825_000007_create_vanyline_chat_contexts::Migration),
-            Box::new(m20260825_000008_create_vanyline_conversations::Migration),
-            Box::new(m20260825_000009_create_vanyline_messages::Migration),
             Box::new(m20260825_000010_create_vanyline_owner_links::Migration),
             Box::new(m20261005_000001_create_vanyline_project_workflows::Migration),
             Box::new(m20261005_000002_create_vanyline_workflow_runs::Migration),
@@ -71,6 +65,90 @@ mod migrations_apply_cleanly {
             .await
             .expect("querying a freshly migrated table succeeds");
         assert!(count.is_empty());
+    }
+
+    /// Scenario: `les treize migrations s'appliquent dans l'ordre exact enregistré`
+    /// (`./mod.sdd`, resserré à treize en C2 du chantier lymaille : `m20260825_000007/
+    /// 000008/000009` retirées — tables propres, aucune migration drop). L'ordre est lu par
+    /// `rowid` : la table de suivi est une table SQLite à clé `version` TEXT, le `rowid`
+    /// implicite suit l'ordre d'insertion = ordre d'application.
+    #[tokio::test]
+    async fn les_treize_migrations_sappliquent_dans_lordre_exact_enregistre() {
+        use sea_orm::{ConnectionTrait, Statement};
+        use sea_orm_migration::MigratorTrait;
+
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite connects");
+        miryad_core::migration::Migrator::up(&db, None)
+            .await
+            .expect("miryad-core migrations apply first");
+        crate::migration::Migrator::up(&db, None)
+            .await
+            .expect("app migrations apply cleanly");
+
+        let stmt = Statement::from_string(
+            db.get_database_backend(),
+            "SELECT version FROM seaql_migrations_app ORDER BY rowid",
+        );
+        let rows = db
+            .query_all_raw(stmt)
+            .await
+            .expect("tracking table is queryable");
+        let versions: Vec<String> = rows
+            .iter()
+            .map(|row| row.try_get_by_index::<String>(0).expect("version decodes"))
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                "m20260825_000001_create_vanyline_skills",
+                "m20260825_000002_create_vanyline_toolsets",
+                "m20260825_000003_create_vanyline_llm_providers",
+                "m20260825_000004_create_vanyline_mcp_servers",
+                "m20260825_000005_create_vanyline_model_profiles",
+                "m20260825_000006_create_vanyline_agents",
+                "m20260825_000010_create_vanyline_owner_links",
+                "m20261005_000001_create_vanyline_project_workflows",
+                "m20261005_000002_create_vanyline_workflow_runs",
+                "m20261005_000003_alter_vanyline_agents_system",
+                "m20261005_000004_create_vanyline_app_settings",
+                "m20261023_000001_create_vanyline_projects",
+                "m20261023_000002_create_vanyline_sandboxes",
+            ],
+            "la table de suivi doit porter exactement treize lignes dans l'ordre de `Must`"
+        );
+        for withdrawn in [
+            "m20260825_000007_create_vanyline_chat_contexts",
+            "m20260825_000008_create_vanyline_conversations",
+            "m20260825_000009_create_vanyline_messages",
+        ] {
+            assert!(
+                !versions.iter().any(|v| v == withdrawn),
+                "aucune ligne ne doit subsister pour la migration retirée {withdrawn}"
+            );
+        }
+
+        // Les trois tables du chat maison ne doivent plus jamais être créées.
+        for table in [
+            "vanyline_chat_contexts",
+            "vanyline_conversations",
+            "vanyline_messages",
+        ] {
+            let stmt = Statement::from_sql_and_values(
+                db.get_database_backend(),
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+                [table.into()],
+            );
+            let present = db
+                .query_one_raw(stmt)
+                .await
+                .expect("sqlite_master is queryable")
+                .expect("COUNT returns a row")
+                .try_get_by_index::<i64>(0)
+                .expect("count decodes");
+            assert_eq!(present, 0, "la table {table} ne doit pas exister");
+        }
     }
 }
 

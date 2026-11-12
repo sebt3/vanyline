@@ -1,11 +1,12 @@
 Spec: Alter Vanyline Agents — agents système
 
 Purpose:
-  Migration qui ajoute à `vanyline_agents` les colonnes des AGENTS SYSTÈME (voir
-  ../system_agents.sdd) : `system_key` (clé stable d'un agent préconfiguré, NULL pour un agent
+  Migration qui ajoute à `vanyline_agents` les colonnes des AGENTS SYSTÈME (l'amorçage
+  ../system_agents.rs est retiré en C2 du chantier lymaille ; la migration survit
+  jusqu'au retrait C3 de la table agents) : `system_key` (clé stable d'un agent préconfiguré, NULL pour un agent
   ordinaire) et `system_version` (version du prompt système embarqué dans le code, NULL pour un
   agent ordinaire). Un agent système est une vraie ligne d'agent (donc lisible partout :
-  ConfigStore, listes, conversations), mais son contenu est piloté par le code et seul son modèle
+  ConfigStore, listes), mais son contenu est piloté par le code et seul son modèle
   est modifiable par l'utilisateur. DDL EXACTE, identique sur PostgreSQL et SQLite. Fichier neuf,
   conception.
 

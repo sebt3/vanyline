@@ -17,15 +17,13 @@ pub enum AppError {
     #[error("VNL-MCP-001: MCP server error: {0}")]
     McpError(String),
     #[error("VNL-AGT-001: Agent not found")]
+    // Réservée, plus émise depuis C2 (seul constructeur : ./ws/chat.rs, retiré) — `error.sdd` Tasks `[?]`.
+    #[allow(dead_code)]
     AgentNotFound,
     #[error("{0}")]
-    UnprocessableReference(vanyline_lib::VnyError),
-    #[error("VNL-CNV-001: Conversation not found")]
-    ConversationNotFound,
-    // Réservée, plus émise (`api/conversations.sdd`, oracle d'existence fermé DÉCIDÉ 2026-10-18) : conservée pour `error.sdd`.
+    // Réservée, plus émise depuis C2 (seul constructeur manuel : ./api/conversations.rs, retiré) — `error.sdd` Tasks `[?]`.
     #[allow(dead_code)]
-    #[error("VNL-CNV-002: Access denied to conversation")]
-    ConversationAccessDenied,
+    UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-REQ-001: Request error: {0}")]
     RequestError(#[from] reqwest::Error),
     #[error("VNL-INT-001: Internal error: {0}")]
@@ -134,9 +132,7 @@ impl From<vanyline_cfgstore::CfgStoreError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::Forbidden | Self::ConversationAccessDenied => {
-                (StatusCode::FORBIDDEN, self.to_string())
-            }
+            Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
             Self::LlmError(_)
             | Self::McpError(_)
             | Self::RequestError(_)
@@ -144,7 +140,6 @@ impl IntoResponse for AppError {
             | Self::SandboxRelayUnavailable => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::LlmProviderNotFound
             | Self::AgentNotFound
-            | Self::ConversationNotFound
             | Self::K8sNotFound(_)
             | Self::WorkflowSandboxNotFound
             | Self::WorkflowRunNotFound
@@ -265,16 +260,6 @@ mod tests {
                 )),
                 "VNL-CFG-003: Unknown agent reference: 'ghost'".into(),
                 StatusCode::UNPROCESSABLE_ENTITY,
-            ),
-            (
-                AppError::ConversationNotFound,
-                "VNL-CNV-001: Conversation not found".into(),
-                StatusCode::NOT_FOUND,
-            ),
-            (
-                AppError::ConversationAccessDenied,
-                "VNL-CNV-002: Access denied to conversation".into(),
-                StatusCode::FORBIDDEN,
             ),
             (
                 AppError::RequestError(req),
@@ -596,14 +581,12 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production part precedes tests");
-        let expected: [(&str, usize); 31] = [
+        let expected: [(&str, usize); 29] = [
             ("VNL-AUTH-004", 1),
             ("VNL-LLM-001", 1),
             ("VNL-LLM-002", 1),
             ("VNL-MCP-001", 1),
             ("VNL-AGT-001", 1),
-            ("VNL-CNV-001", 1),
-            ("VNL-CNV-002", 1),
             ("VNL-REQ-001", 1),
             ("VNL-INT-001", 1),
             ("VNL-K8S-001", 1),

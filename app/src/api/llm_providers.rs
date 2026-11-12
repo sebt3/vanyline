@@ -207,7 +207,6 @@ mod tests {
         AppState {
             config: test_config(),
             cookie_key: cookie::Key::from(&[0u8; 64]),
-            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state_with_db(db),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),

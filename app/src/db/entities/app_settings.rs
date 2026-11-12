@@ -1,7 +1,8 @@
 //! Réglages globaux clé/valeur JSON de l'application — contrat : `./app_settings.sdd`.
 //! Lecture ouverte aux utilisateurs authentifiés, écriture réservée aux administrateurs ;
-//! seule clé connue en v1 : `default_model` (amorçage des agents système,
-//! cf. `../../system_agents.sdd`).
+//! seule clé connue en v1 : `default_model` (modèle par défaut de l'agent de catalogue,
+//! cf. `../../sessions/catalog.sdd` ; l'amorçage `../../system_agents.sdd` a été retiré en
+//! C2 du chantier lymaille).
 
 use miryad_core::auth::AuthPrincipal;
 use miryad_core::resource::{AccessPolicy, HookError, MiryadResource};
@@ -27,8 +28,9 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// Clé connue en v1 : le modèle par défaut utilisé pour amorcer les agents système d'un
-/// utilisateur sans aucun profil (`../../system_agents.sdd`, comportement `NoModelProfile`).
+/// Clé connue en v1 : le modèle par défaut, destination de l'agent de catalogue pour un
+/// utilisateur sans aucun profil (`../../sessions/catalog.sdd` ; historique : l'amorçage
+/// `NoModelProfile` de `../../system_agents.sdd` a été retiré en C2 du chantier lymaille).
 pub const KEY_DEFAULT_MODEL: &str = "default_model";
 
 /// Validation de la valeur d'un réglage POUR SA CLÉ (`app_settings.sdd` `Exposes`) :

@@ -105,7 +105,8 @@ Structure:
   - `system_key: Option<String>` — SQL `STRING` NULL (migration
     ./../migration/m20261005_000003_alter_vanyline_agents_system.sdd) ; NULL pour un agent
     ordinaire, clé stable (`"config"`/`"home"`/`"project"`/`"sandbox"`) pour un agent
-    système (../system_agents.sdd). Non requis, pas de défaut.
+    système ; l'amorçage `../system_agents.rs` est retiré en C2 du chantier lymaille, la
+    colonne reste en lecture jusqu'au retrait C3 de l'entité. Non requis, pas de défaut.
   - `system_version: Option<i32>` — SQL `INTEGER` NULL (même migration) ; version du
     prompt système embarqué ; NULL pour un agent ordinaire.
   Aucun champ temporel : la table ne porte ni `created_at` ni `updated_at` (déjà
@@ -181,22 +182,18 @@ Handles:
   - Consommation REST : `../main.rs` monte @resource_router::<agents::Entity,
     AppState>() et fusionne @resource_openapi::<agents::Entity>() dans le document
     OpenAPI (schéma nommé `Agent`).
-  - Consommation chat WS : `../ws/chat.rs` @handle_message résout `agent_id` → nom par
-    @Entity::find_by_id SANS filtre owner (introuvable → @AppError::AgentNotFound).
-    FAILLE DE SÉCURITÉ CONFIRMÉE (Sébastien, 2026-09-27) — voir `Tasks` : cette
-    résolution DOIT filtrer par owner, un `agent_id` d'un autre owner doit être traité
-    comme introuvable.
-  - Consommation conversations REST : `../api/conversations.rs` @to_output résout
-    `conv.agent_id` → nom (par id seul, sans filtre owner, N+1 accepté) — même faille,
-    même correction requise (cf. `../api/conversations.sdd`) ;
+  - Consommation chat WS et conversations REST : RETIRÉES en C2 du chantier lymaille
+    (2026-11-12) — `../ws/chat.rs` et `../api/conversations.rs` n'existent plus ; la
+    faille de résolution sans filtre owner qu'ils portaient (corrigée 2026-10-18,
+    cf. `Tasks`) disparaît avec eux.
     @resolve_agent_id recherche WHERE `owner_id = user_id AND name = agent_name`
     (introuvable → @AppError::UnprocessableReference(@VnyError::UnknownReference
     `"agent"`) — seul chemin d'accès qui filtre déjà explicitement par owner, le
     modèle à suivre pour les deux résolutions ci-dessus.
   - Cycle de vie FK entrant/sortant : suppression d'un utilisateur `miryad_users` →
     CASCADE sur ces lignes ; suppression du profil référencé → RESTRICT (impossible
-    tant qu'un agent pointe dessus) ; suppression d'un agent → `vanyline_conversations.agent_id`
-    remis à NULL (FK ON DELETE SET NULL de
+    tant qu'un agent pointe dessus). La FK sortante vers `vanyline_conversations.agent_id`
+    (ON DELETE SET NULL de
     ../migration/m20260825_000008_create_vanyline_conversations.rs).
 
 Must:
@@ -237,8 +234,8 @@ Must:
     qui applique déjà @AccessPolicy::OwnerOnly) DOIT filtrer par owner — décision
     Sébastien, 2026-09-27, en réponse à la faille documentée en `Handles` et `Tasks` :
     concrètement `../ws/chat.rs` @handle_message et `../api/conversations.rs`
-    @to_output doivent ajouter `owner_id = user_id` à leur `find_by_id`, sur le modèle
-    de @resolve_agent_id.
+    @to_output devaient ajouter `owner_id = user_id` à leur `find_by_id` — fait
+    2026-10-18, puis ces deux fichiers ont été retirés en C2 du chantier lymaille.
 
 Must not:
   - Valider en @before_create l'existence des noms référencés par `toolsets`/`skills` :
@@ -365,7 +362,7 @@ Depends on:
   ./mod.rs — déclaration `pub mod agents;` (cf. `./mod.sdd`, dont l'entrée
     « ./agents.sdd — spec à venir » devient obsolète avec la présente spec).
   Consommateurs (hors périmètre, comportements cités) : ../config_store.rs,
-    ../ws/chat.rs, ../api/conversations.rs, ../main.rs.
+    ../main.rs (`../ws/chat.rs` et `../api/conversations.rs` retirés C2).
   Supports de test : ../db/test_support.rs (@real_db, cf. son `../db/test_support.sdd`),
     @crate::auth::test_support::test_auth_state_with_db de `../auth/`,
     @miryad_core::auth::issue_token, @miryad_core::users::resolve_user,
@@ -448,3 +445,9 @@ Tasks:
       plus que dans le hook create (voir premier `[!]`). Réintroduire le CHECK dans une
       migration additive, ou considérer le hook comme la protection officielle (et
       alors documenter l'absence de garde en update dans la spec migration) ?
+  [?] Tests des hooks AGENTS SYSTÈME de ./agents.rs (`before_create_refuse_corps_portant_
+      system_key`, `before_update…`, `before_delete_refuse…`) : taggués jusqu'ici sur des
+      Scenario de `../../system_agents.sdd`, spec retirée en C2 du chantier lymaille
+      (2026-11-12). Les hooks restent contractés par le `Must` AGENTS SYSTÈME de la présente
+      spec — rapatrier ces trois Scenario ici (TTD oblige) ou les rattacher autrement ?
+      À trancher avec `../../sessions/catalog.sdd` (remplaçant de l'amorçage).

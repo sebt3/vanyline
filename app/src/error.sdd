@@ -5,8 +5,8 @@ Platform: Rust/vanyline-app/thiserror+axum
 Purpose:
   Type d'erreur unique du binaire `vanyline-app` (@AppError) : le type d'erreur de tous les
   handlers HTTP de l'app (les `Result<_, @AppError>` de ./api/*.rs, rendus par axum via
-  @IntoResponse) ET le véhicule de propagation des modules WebSocket (./ws/chat.rs,
-  ./ws/sandbox_state.rs) où l'erreur ne passe jamais par @IntoResponse — elle est loggée
+  @IntoResponse) ET le véhicule de propagation du module WebSocket (./ws/sandbox_state.rs)
+  où l'erreur ne passe jamais par @IntoResponse — elle est loggée
   par @tracing::error au wrapper de socket. Le fichier porte trois conversions @From
   manuelles (@sea_orm::DbErr, @vanyline_lib::VnyError, @vanyline_cfgstore::CfgStoreError)
   plus le @From<@reqwest::Error> généré par le `#[from]` de la variante @AppError::RequestError,
@@ -28,11 +28,9 @@ Can read:
   ./main.rs
   ./k8s.rs
   ./config.rs
-  ./api/conversations.rs
   ./api/sandboxes.rs
   ./api/llm_providers.rs
   ./api/mcp_servers.rs
-  ./ws/chat.rs
   ./ws/sandbox_state.rs
   ../Cargo.toml
   ../../lib/src/error.rs
@@ -82,8 +80,6 @@ Exposes:
         @VnyError::AgentNotFound)
       @AppError::UnprocessableReference(@vanyline_lib::VnyError) — `"{0}"` : rend
         directement le @Display du @VnyError embarqué, sans préfixe `VNL-*` propre à l'app
-      @AppError::ConversationNotFound — `"VNL-CNV-001: Conversation not found"`
-      @AppError::ConversationAccessDenied — `"VNL-CNV-002: Access denied to conversation"` (variante RÉSERVÉE, plus émise depuis 2026-10-18 : l'oracle d'existence est fermé, ./api/conversations.sdd ; conservée pour le compteur et les tests exhaustifs)
       @AppError::RequestError(@reqwest::Error) — `"VNL-REQ-001: Request error: {0}"` ; champ
         `#[from]` → @From<@reqwest::Error> généré + @std::error::Error::source() `Some`
       @AppError::InternalError(String) — `"VNL-INT-001: Internal error: {0}"` (identique à
@@ -183,8 +179,6 @@ Exposes:
       @AppError::McpError → 502 `BAD_GATEWAY`
       @AppError::AgentNotFound → 404 `NOT_FOUND`
       @AppError::UnprocessableReference → 422 `UNPROCESSABLE_ENTITY`
-      @AppError::ConversationNotFound → 404 `NOT_FOUND`
-      @AppError::ConversationAccessDenied → 403 `FORBIDDEN`
       @AppError::RequestError → 502 `BAD_GATEWAY`
       @AppError::InternalError → 500 `INTERNAL_SERVER_ERROR`
       @AppError::K8sConfigError → 502 `BAD_GATEWAY`
@@ -422,6 +416,12 @@ Tasks:
   [ ] Décider du sort du commentaire d'@doc du @From<@sea_orm::DbErr> (référence
     historique « Phase 3 (miryad-core-integration) ») : le reformuler vers ./error.sdd ou
     le conserver tel quel.
+  [?] `AgentNotFound`/`UnprocessableReference` : depuis C2 du chantier lymaille (2026-11-12),
+    plus AUCUN constructeur côté production (`./ws/chat.rs` et `./api/conversations.rs`
+    retirés ; le @From<@VnyError> ne produit jamais `UnprocessableReference`) — conservées
+    avec `#[allow(dead_code)]` dans ./error.rs sur le précédent de `ConversationAccessDenied`.
+    Les garder comme variantes réservées, ou les retirer avec leurs lignes `Exposes`/barème
+    et les gabarits `VNL-AGT-001` concernés ? À trancher avec la migration `./sessions/`.
 
 Done when:
   Chaque Scenario a son test dédié taggé par son titre et passe.
@@ -446,7 +446,7 @@ Scenario: display_exhaustif_des_variantes_apperror
     `WorkflowUnknownScope("x")`, `WorkflowSandboxForeignProject("x")`,
     `WorkflowSandboxNotRunning("x")`, `WorkflowEngineUnavailable("x")`,
     et les variantes sans payload : Forbidden, LlmProviderNotFound, AgentNotFound,
-    ConversationNotFound, ConversationAccessDenied, SandboxNotExposed, SandboxBranchEmpty,
+    SandboxNotExposed, SandboxBranchEmpty,
     GitPathInvalid, WorkflowNotFound, WorkflowEngineNotConfigured, WorkflowScopeNotEditable,
     WorkflowSandboxNotFound, WorkflowRunNotFound, WorkflowSandboxRequired,
     WorkflowSandboxNotAllowed)
@@ -460,9 +460,9 @@ Scenario: bareme_exhaustif_statuts_http_des_variantes
   Given une instance de chaque variante de @AppError (mêmes payloads fixés que
     `display_exhaustif_des_variantes_apperror`)
   When chacune est passée à @IntoResponse::into_response
-  Then les statuts sont exactement le barème d'`Exposes` : 403 (Forbidden,
-    ConversationAccessDenied), 502 (LlmError, McpError, RequestError, K8sConfigError), 404
-    (LlmProviderNotFound, AgentNotFound, ConversationNotFound, K8sNotFound,
+  Then les statuts sont exactement le barème d'`Exposes` : 403
+    (Forbidden), 502 (LlmError, McpError, RequestError, K8sConfigError), 404
+    (LlmProviderNotFound, AgentNotFound, K8sNotFound,
     WorkflowNotFound, WorkflowSandboxNotFound, WorkflowRunNotFound), 422
     (UnprocessableReference, SandboxBranchEmpty, WorkflowKindForbidden), 500
     (InternalError, K8sApiError), 409 (SandboxNotExposed, WorkflowNameTaken,
@@ -574,10 +574,12 @@ Scenario: marqueurs_propres_de_apperror_uniques_dans_le_fichier
     `VNL-DB-006` (une fois dans le commentaire d'@doc du @From, une fois dans le `format!`)
 
 Scenario: ws_ne_render_jamais_apperror_en_http
-  Given une fonction de socket WS (`run_socket` de ./ws/chat.rs ou ./ws/sandbox_state.rs)
-    qui retourne `Err(AppError::ConversationNotFound)` sur un handshake simulé, son wrapper
+  # ./ws/chat.rs retiré en C2 du chantier lymaille (2026-11-12) : il ne subsiste qu'une
+  # socket WS maison, sandbox_state.
+  Given `run_socket` de ./ws/sandbox_state.rs qui retourne
+    `Err(AppError::InternalError("harnais".into()))` sur un handshake simulé, son wrapper
     (`handle_socket`) instrumenté par une couche de capture @tracing
   When le wrapper consomme le résultat
   Then aucun statut HTTP n'est produit (@IntoResponse n'est pas appelée — la socket est
-    simplement terminée) et un log @tracing::error au format `ws chat error: VNL-CNV-001:
-    Conversation not found` (ou `ws sandbox-state error: …` selon le module) est émis
+    simplement terminée) et un log @tracing::error au format `ws sandbox-state error:
+    VNL-INT-001: Internal error: harnais` est émis

@@ -561,12 +561,11 @@ mod tests {
     }
 
     /// État de test branché sur une vraie base (migrations appliquées,
-    /// `db::test_support::real_db`) — mêmes conventions que `conversations.rs`.
+    /// `db::test_support::real_db`) — mêmes conventions que `./llm_providers.rs`.
     fn test_state_with_db(db: sea_orm::DatabaseConnection) -> AppState {
         AppState {
             config: test_config(),
             cookie_key: test_key(),
-            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state_with_db(db),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
@@ -581,7 +580,6 @@ mod tests {
         AppState {
             config: test_config(),
             cookie_key: test_key(),
-            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state(),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
@@ -593,7 +591,6 @@ mod tests {
         let state = AppState {
             config: test_config(),
             cookie_key,
-            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state(),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),

@@ -596,7 +596,7 @@ Depends on:
     et défauts serde), @Owner/@Application lus par ws_ticket.
   @miryad-core 0.1 (crates.io, source hors dépôt) — @AuthUser (`subject`,
     `email: @Option`, `id_token`) et @resolve_user (sémantique upsert, `[?]` partagé
-    avec ./me.sdd et ./local_tools.sdd).
+    avec ./me.sdd et ./local_tools.rs (retiré C2 du chantier lymaille)).
   ./owners.rs (@resolve_owner_name — ./owners.sdd) et ./mod.rs + `../main.rs` (montage
     @nest("/api") dont la RÉÉCRITURE d'URI conditionne @raw_git_tail).
   ../k8s.rs (@client lazy — ../k8s.sdd) et @vanyline_lib::k8s::@VnlK8sClient

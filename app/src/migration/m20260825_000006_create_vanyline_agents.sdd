@@ -16,9 +16,10 @@ Purpose:
   Place dans la chaîne (`./mod.sdd`) : position 6 dans `@Migrator::migrations`,
     immédiatement après `./m20260825_000005_create_vanyline_model_profiles.rs` (sa FK
     cible `vanyline_model_profiles`) et après le migrateur `miryad-core` (FK cible
-    `miryad_users`) ; aucune autre dépendance interne à la chaîne, et doit précéder
-    `…000008` (`vanyline_conversations`, dont la FK entrante `agent_id` → cette table
-    est `ON DELETE SET NULL`).
+    `miryad_users`) ; aucune autre dépendance interne à la chaîne. La contrainte
+    « doit précéder `…000008` » (FK entrante `conversations.agent_id` → cette table,
+    `ON DELETE SET NULL`) a disparu en C2 du chantier lymaille : la migration aval est
+    retirée, seul subsiste l'ordre croissant des timestamps de `./mod.sdd`.
   Lieu de naissance historique de la régression Phase 3 (cf. commentaire de ./mod.rs
     et `./mod.sdd`) : ce DDL a d'abord chaîné un `.index(...)` non-UNIQUE dans le
     `@Table::create()`, ce qui fait générer à sea-query un fragment `(...)` orphelin,
@@ -36,8 +37,8 @@ Can read:
     `seaql_migrations_app`, test de paire complète (filet unique du DDL de ce fichier).
   ./m20260825_000005_create_vanyline_model_profiles.rs — table cible de la FK
     `model_profile_id` (amont, doit précéder).
-  ./m20260825_000008_create_vanyline_conversations.rs — FK entrante
-    `conversations.agent_id` → `vanyline_agents.id` `SET NULL` (aval, doit suivre).
+  ./m20260825_000008_create_vanyline_conversations.rs — RETIRÉE en C2 du chantier
+    lymaille (2026-11-12) : plus de FK entrante `conversations.agent_id` sur cette table.
   ../db/entities/agents.rs — consommateur direct : les neuf champs de
     `@crate::db::entities::agents::Model` en correspondance un-à-un, défauts serde
     alignés sur les défauts SQL.
@@ -94,8 +95,8 @@ Exposes:
       anonyme, `.on_delete(@ForeignKeyAction::Restrict)` ; `on_update` non spécifié
       (`NO ACTION` côté PostgreSQL).
     Aucune autre instruction : pas de `.create_index(...)` séparé dans ce `up`
-      (contraste avec ./m20260825_000008_create_vanyline_conversations.rs qui en
-      émet deux), pas d'ALTER, pas de DML.
+      (contraste historique avec ./m20260825_000008_create_vanyline_conversations.rs,
+      retirée en C2 du chantier lymaille, qui en émettait deux), pas d'ALTER, pas de DML.
   @MigrationTrait::down — une seule instruction `drop_table` :
     `DROP TABLE "vanyline_agents"` (`@Table::drop().table(Agent::Table)`, sans
     `if_exists`, sans `CASCADE`) ; emporte avec la table la contrainte `UNIQUE` et les
@@ -147,13 +148,10 @@ Raises:
     collision d'objet existant : `IF NOT EXISTS` ne protège que la table elle-même, pas
     la contrainte `UNIQUE` ni les FK ; table existante en forme incompatible :
     `IF NOT EXISTS` saute la création sans comparer le schéma, sans erreur.
-  Cas concrets côté `down` : table absente → `DbErr` (pas d'`IF EXISTS`) ; en
-    PostgreSQL, la FK entrante `vanyline_conversations.agent_id` (SET NULL, posée par
-    ./m20260825_000008_create_vanyline_conversations.rs) BLOQUE le drop tant que la
-    table `vanyline_conversations` existe — un rollback complet ordonné par SeaORM
-    (ordre inverse) la dépose avant, mais un `down` isolé de cette seule migration
-    échoue en PostgreSQL ; SQLite sans FK applique le drop sans se soucier de la FK
-    entrante.
+  Cas concrets côté `down` : table absente → `DbErr` (pas d'`IF EXISTS`). (Le cas
+    « FK entrante `vanyline_conversations.agent_id` bloquant le drop en PostgreSQL » a
+    disparu en C2 du chantier lymaille : la migration aval est retirée, le `down` de
+    cette migration n'a plus de contrainte entrante.)
   Les violations de contrainte en écriture (NOT NULL, `UNIQUE (owner_id, name)`, FK)
     ne sont pas levées par ce fichier : il pose les contraintes, l'erreur remonte de la
     base au CRUD miryad-core ou aux tests.
@@ -175,9 +173,9 @@ Handles:
     (effectif en PostgreSQL ; le harnais `@real_db` n'active pas les FK — cf. Tasks).
   Suppression du profil de modèle référencé → refusée par `RESTRICT` tant qu'un agent
     pointe dessus (seule des deux FK de la table à être bloquante en suppression).
-  Suppression d'un agent → `vanyline_conversations.agent_id` remis à NULL — FK définie
-    dans ./m20260825_000008_create_vanyline_conversations.rs, citée ici pour le cycle
-    de vie seulement, pas contractée par ce fichier.
+  (FK sortante vers les conversations : sans objet depuis C2 du chantier lymaille —
+    la table `vanyline_conversations` est retirée, la dernière FK de la table agents
+    est la `RESTRICT` vers les profils.)
   Deux lignes `(owner_id, name)` identiques → refusées par la contrainte `UNIQUE`
     (`23505` PostgreSQL / `SQLITE_CONSTRAINT_UNIQUE` SQLite) ; même `name` pour deux
     `owner_id` distincts → accepté.
@@ -238,22 +236,24 @@ Must not:
       déléguée au hook `@before_create` de `../db/entities/agents.rs`, validation de
       forme jamais implémentée — sujets ouverts en Tasks et dans
       `../db/entities/agents.sdd`).
-  - Poser une colonne temporelle (`created_at`/`updated_at`) : la table n'en a pas
-      (contrairement à `vanyline_conversations`), et l'entité sœur n'en porte pas.
-  - Émettre du DDL sur `miryad_users`, `vanyline_model_profiles` ou
-      `vanyline_conversations` (les enums `@User`/`@ModelProfile` ne servent qu'à nommer
-      les cibles de FK), ni insérer/modifier/supprimer des lignes dans `up` ou `down`.
+  - Poser une colonne temporelle (`created_at`/`updated_at`) : la table n'en a pas,
+      et l'entité sœur n'en porte pas.
+  - Émettre du DDL sur `miryad_users` ou `vanyline_model_profiles` (les enums
+      `@User`/`@ModelProfile` ne servent qu'à nommer
+      les cibles de FK ; `vanyline_conversations` n'existe plus depuis C2), ni
+      insérer/modifier/supprimer des lignes dans `up` ou `down`.
   - Modifier les littéraux d'iden `vanyline_agents`, `miryad_users`,
       `vanyline_model_profiles`, renommer le fichier ou changer son préfixe temporel :
       le nom de fichier est l'identité d'historique et le nom de table est attendu par
-      `../db/entities/agents.rs`, par ./m20260825_000008_create_vanyline_conversations.rs
-      et par les consommateurs HTTP.
+      `../db/entities/agents.rs` et par les consommateurs HTTP
+      (./m20260825_000008_create_vanyline_conversations.rs, qui l'attendait aussi, est
+      retirée en C2 du chantier lymaille).
   - Ajouter une action `ON UPDATE`, changer `CASCADE`/`RESTRICT` en une autre action,
       ou ajouter `.if_exists()` / `CASCADE` au `down` sans extension préalable de cette
       spec.
   - Déclarer ici une entité SeaORM, une relation, un hook ou toute logique applicative
-      — le domaine vit dans `../db/entities/agents.sdd`, `../config_store.rs` et
-      `../ws/chat.rs`.
+      — le domaine vit dans `../db/entities/agents.sdd` et `../config_store.rs`
+      (`../ws/chat.rs` retiré C2).
 
 Depends on:
   `sea-orm-migration` 2 (`@MigrationTrait`, `@SchemaManager`, macros
@@ -261,22 +261,23 @@ Depends on:
     (`@Table`, `@ColumnDef`, `@Index`, `@ForeignKey`, `@ForeignKeyAction`, `@Expr`) et
     `@async_trait` ; `@sea_orm::DbErr` — versions verrouillées par `Cargo.lock` ; la
     traduction PostgreSQL/SQLite du builder appartient à ces librairies.
-  ./mod.sdd — chaîne d'application (position 6, ordre vs `…000005` et `…000008`), table
+  ./mod.sdd — chaîne d'application (position 6, ordre vs `…000005` (`…000008` retirée C2)), table
     de suivi `seaql_migrations_app`, règle Phase 3, interdit de modifier un `up`
     appliqué.
   `@miryad_core::migration::Migrator` (crate externe, hors dépôt) — indirect : crée
     `miryad_users`, cible de la FK, doit précéder (séquence `../main.rs`).
   ./m20260825_000005_create_vanyline_model_profiles.rs — cible de la FK
     `model_profile_id` (amont obligatoire, contractée par `./mod.sdd`).
-  ./m20260825_000008_create_vanyline_conversations.rs — aval : FK entrante
-    `agent_id` `SET NULL` vers cette table (contrainte d'ordre + blocage du `down` en
-    PostgreSQL).
+  (Aval retiré : `./m20260825_000008_create_vanyline_conversations.rs` et sa FK
+    entrante `agent_id` `SET NULL` ont disparu en C2 du chantier lymaille — la contrainte
+    d'ordre vs `…000008` et le blocage du `down` en PostgreSQL qui en découlaient sont
+    sans objet ; seul l'ordre croissant des timestamps subsiste.)
   ../db/entities/agents.sdd — miroir Rust bilatéral de cette DDL (correspondance des
     neuf colonnes et des défauts).
   Consommateurs d'aval (ne conditionnent pas ce fichier) : ../config_store.rs
-    (`@load_agent_records`), ../ws/chat.rs (`@handle_message`),
-    ../api/conversations.rs (`@resolve_agent_id`, `@to_output`), ../main.rs
-    (`/api/v1/agents` via `resource_router`).
+    (`@load_agent_records`), ../main.rs
+    (`/api/v1/agents` via `resource_router`) — les consommateurs chat WS et
+    conversations REST ont été retirés en C2 du chantier lymaille.
   ../db/test_support.rs — harnais `@real_db` où ce DDL est réellement exécuté ;
     ./mod.rs — enregistrement et test de paire complète.
 
@@ -308,8 +309,9 @@ Tasks:
   [?] `on_update` non spécifié sur les deux FK → `NO ACTION` (PostgreSQL) : suffisant
       (PK de `miryad_users`/`vanyline_model_profiles` jamais mutées ?) à confirmer.
   [!] Asymétrie de garde-fous : `up` défensif (`IF NOT EXISTS`) mais `down` sans
-      `IF EXISTS` — second `down` = erreur ; de plus en PostgreSQL le `down` est bloqué
-      par la FK entrante de `vanyline_conversations` (cf. `Raises`). Lié au `[?]` de
+      `IF EXISTS` — second `down` = erreur. (Le blocage du `down` en PostgreSQL par la
+      FK entrante de `vanyline_conversations` a disparu en C2 du chantier lymaille.)
+      Lié au `[?]` de
       politique de rollback de `./mod.sdd` : ne rien changer ici avant l'arbitrage.
   [?] Application des FK côté tests : `@real_db` (SQLite) n'active pas
       `PRAGMA foreign_keys` → CASCADE (`owner_id`), RESTRICT (`model_profile_id`) et FK
@@ -432,8 +434,8 @@ Scenario: down supprime uniquement la table vanyline_agents
     disparu avec son contenu, sa contrainte `UNIQUE` et ses deux FK
   And `vanyline_skills`, `vanyline_model_profiles` et `miryad_users` sont toujours
     présentes — le `down` ne touche que sa propre table
-  # En SQLite sans FK le drop réussit malgré la FK entrante de vanyline_conversations ;
-  # en PostgreSQL ce même appel isolé échouerait (cf. `Raises`).
+  # Depuis C2 du chantier lymaille, plus aucune FK entrante ne bloque ce drop isolé
+  # (la table vanyline_conversations est retirée).
 
 Scenario: un second down sur table absente échoue
   # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).

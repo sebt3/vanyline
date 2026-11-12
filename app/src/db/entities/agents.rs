@@ -95,8 +95,9 @@ impl MiryadResource for Entity {
     /// AGENTS SYSTÈME (`Must` agents.sdd l.191-197) : sur une ligne portant `system_key`,
     /// seul `model_profile_id` est modifiable — tout autre champ qui diverge de la ligne
     /// relue est refusé (`VNL-AGENT-002`, rendu 422 par miryad-core). Les lignes système
-    /// sont réécrites par `crate::system_agents::ensure_system_agents` directement en
-    /// base, hors de cette voie. `id`/`owner_id` ne sont pas comparés : `rest::core::update`
+    /// étaient réécrites par `crate::system_agents::ensure_system_agents` (retiré en C2 du
+    /// chantier lymaille) directement en base, hors de cette voie. `id`/`owner_id` ne sont
+    /// pas comparés : `rest::core::update`
     /// les force APRÈS ce hook (ils ne sont donc jamais un changement observable).
     /// Forme async à connexion générique : miryad-core 0.3.1 (hooks.sdd, DEC-2), comportement
     /// inchangé.

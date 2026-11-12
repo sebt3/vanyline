@@ -38,8 +38,9 @@ Must:
     une action humaine hors session (`FR-7`, `AC-5`).
 
 Must not:
-  Recréer les quatre agents système de ./../system_agents.rs : ils sont retirés avec l'ancien
-    chat (C2), le catalogue les remplace, aucune adaptation ni migration.
+  Recréer les quatre agents système de ./../system_agents.rs : ce fichier a été retiré
+    avec l'ancien chat (C2 du chantier lymaille, 2026-11-12), le catalogue le remplace,
+    aucune adaptation ni migration.
   Rendre la table écran → agent lisible ou modifiable par une session `Config` ou par REST.
   Écrire un contexte de type `H_` : les `H_` ne sont pas dans le catalogue (vu par ./host.sdd).
 

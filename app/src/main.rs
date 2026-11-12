@@ -22,13 +22,11 @@ mod mcp_domain;
 mod migration;
 mod naming;
 mod sessions;
-mod system_agents;
 mod workflow;
 mod ws;
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{Router, extract::FromRef, routing::get};
 use config::Config;
@@ -51,9 +49,6 @@ pub struct AppState {
     /// octets) ; seul consommateur en production : le clone injecté dans
     /// `MiryadAuthState` au démarrage.
     pub cookie_key: cookie::Key,
-    /// Verrou de tour de chat par `conversation_id` (i32 = PK des
-    /// conversations) — consommateurs : `ws/chat.rs`.
-    pub busy: Arc<Mutex<HashSet<i32>>>,
     /// Client K8s lazy : initialisé `None`, découverte à la première requête,
     /// jamais au démarrage (`k8s.sdd`).
     pub k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
@@ -179,7 +174,6 @@ async fn main() {
     let mut state = AppState {
         config,
         cookie_key,
-        busy: Arc::new(Mutex::new(HashSet::new())),
         k8s: Arc::new(tokio::sync::Mutex::new(None)),
         auth: auth_state,
         shared_sandbox_state: ws::sandbox_state::SharedState::new(),
@@ -258,10 +252,6 @@ fn build_router(state: AppState, static_dir: &str) -> Result<Router, AppError> {
         .merge(lymaille)
         .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
-        .route(
-            "/api/ws/chat/{conversation_id}",
-            get(ws::chat::ws_chat_handler),
-        )
         .route(
             "/api/ws/sandbox-state",
             get(ws::sandbox_state::ws_sandbox_state_handler),
@@ -406,7 +396,6 @@ mod tests {
                 subagent_max_secs: 2700,
             },
             cookie_key: cookie::Key::from(&[0u8; 64]),
-            busy: Arc::new(Mutex::new(HashSet::new())),
             k8s: Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state_with_db(db),
             shared_sandbox_state: ws::sandbox_state::SharedState::new(),
@@ -671,8 +660,8 @@ mod tests {
 
         // Segments propres au `conversations_router` de miryad-core (`history`, `events`,
         // `toolsets/…/draft`) : hors du préfixe, ils ne peuvent être servis que par lui.
-        // (Le `/api/conversations` de l'ANCIEN chat maison est une route propre de l'app, pas
-        // une route lymaille — son retrait est la tranche DEC-8, hors de B9.)
+        // (`/api/conversations/1/history` : la route de l'ancien chat maison a été retirée
+        // en C2 du chantier lymaille — elle répond désormais 404, jamais 401.)
         for (methode, uri) in [
             ("GET", "/api/v1/conversations"),
             ("GET", "/api/conversations/1/history"),

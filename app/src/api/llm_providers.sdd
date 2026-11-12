@@ -120,7 +120,7 @@ Returns:
 
 Raises:
   - @401 : cookie/porteur absent ou invalide — extracteur @AuthUser avant le corps
-    (miryad-core, même précédent que `./local_tools.sdd`).
+    (miryad-core, même précédent que `./local_tools.rs`, retiré en C2 du chantier lymaille).
   - Erreurs de @resolve_user et de @can_write propagées par @AppError::from — types
     d'erreur miryad-core (crate externe hors dépôt) : mapping @From réel non observable
     depuis ici (cf. Tasks `[?]`) ; @sea_orm::DbErr devient
@@ -425,7 +425,7 @@ Tasks:
   [?] Types d'erreur réels de @resolve_user et @can_write (miryad-core hors dépôt) et
       leurs @From vers @AppError : quel statut si l'utilisateur OIDC valide ne peut pas
       être résolu (DB KO, provisionnement refusé) ? Un test d'intégration sur @real_db
-      peut-il trancher, ou délégation assumée à miryad-core (précédent `./local_tools.sdd`) ?
+      peut-il trancher, ou délégation assumée à miryad-core (précédent `./local_tools.rs`, retiré C2) ?
   [?] @test_provider exige @can_write (écriture) alors que la ressource se lit en
       @Public : un utilisateur non-admin ne peut pas tester un provider. Choix voulu
       (l'appel réseau sortant avec secret justifie AdminOnly) ou droit de test à
