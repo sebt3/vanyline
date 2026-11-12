@@ -409,3 +409,24 @@ attaqué) :
 - **CI `Tests` rouge de longue date** : `runner::tests::timeout_tue_le_groupe` (crate `health`) échoue
   en CI comme en local, ce qui fait tomber « Rust tests », « Coverage » et « ts-rs ». Défaut préexistant
   du crate, indépendant de la release (le workflow `Release` ne dépend pas de `Tests`).
+
+---
+
+## Chantier lymaille (2026-11-12) — où reprendre
+
+Stack posée : miryad-core **0.3.1** (features `lymaille` + `matrix`, `vynil-core` ≥ 0.9.1, lymaille 0.2.1). 0.3.0 ne compile
+pas avec `vynil-core` 0.9.1 : viser 0.3.1. Le bump n'exige aucune migration `vanyline_*` (migrations `miryad_lymaille_*` dans le
+`Migrator` de miryad-core, table de suivi propre).
+
+Décisions prises avec le développeur : on construit **avec ce que livre la stack, sans autre aller-retour** vers miryad-core,
+lymaille ou vynil-core ; migration **destructive voulue**, aucune production, table propre (migrations d'origine retirées, bases
+de test à recréer) ; `app` mono-réplique pour les sessions ; contextes `H_` (Project/Sandbox) : `app` choisit l'agent par
+écran (`app/sessions#DEC-6`).
+
+- DSD écrits : `dsd/app/sessions.md`, `dsd/app/dashboards.md` (domaine `dsd/app.md`). Restent à écrire : `ui-actions`,
+  `widgets`, `artifacts`, `workflows`, `review`, `planning`, `configuration` (ordre proposé : `ui-actions`, `widgets`).
+- **Tâches déléguées à Qwen : `docs/chantier-lymaille.md`** (40 tâches, vagues A à G). Qwen ne décide rien : ses questions
+  sont des `[?]` dans les `Tasks` des specs concernées. **Première chose à faire à la reprise : relire ces `[?]`** (elles
+  guident la suite), puis trancher.
+- Limites connues portées par le DSD : événements `Host` non rejoués, horodatage d'historique approximatif, tableaux non
+  partagés entre utilisateurs (`dashboards#DEC-4`).
