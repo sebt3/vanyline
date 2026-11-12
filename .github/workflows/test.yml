@@ -75,6 +75,8 @@ jobs:
       - run: cargo test -p vanyline-lib --features ts-rs
       # régénère packages/protocol/src/generated/ depuis vanyline-health
       - run: cargo test -p vanyline-health --features ts-rs
+      # régénère packages/protocol/src/generated/ depuis vanyline-app (B8 — HostEvent)
+      - run: cargo test -p vanyline-app --features ts-rs
       - run: git diff --exit-code -- packages/protocol/src/generated/
 
   coverage:

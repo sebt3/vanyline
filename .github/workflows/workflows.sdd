@@ -19,7 +19,8 @@ Must:
   `clippy` (`cargo clippy --workspace --all-targets -- -D warnings`), `frontend`
   (check+test `@vanyline/protocol`, check+test `@vanyline/ui`, build+check+test `frontend`),
   `tsrs` (`cargo test -p vanyline-lib --features ts-rs` puis
-  `cargo test -p vanyline-health --features ts-rs`, puis
+  `cargo test -p vanyline-health --features ts-rs` puis
+  `cargo test -p vanyline-app --features ts-rs`, puis
   `git diff --exit-code -- packages/protocol/src/generated/`), et `coverage`
   (mesure de baseline, sans seuil, push sur `main` seulement).
   Vérifier dans le job `test`, en ÉTAPE SUPPLÉMENTAIRE (décidé 2026-10-14, tâche

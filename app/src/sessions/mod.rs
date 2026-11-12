@@ -13,3 +13,7 @@ pub(crate) use host::VnlLymailleHost;
 #[allow(dead_code)]
 // Montage B9 à venir (`./catalog.sdd` Tasks) ; catalog.rs consommé par ses seuls tests — tooling.sdd
 mod catalog;
+
+#[allow(dead_code)]
+// Montage B9 à venir (`./mod.sdd` Tasks) ; events.rs consommé par ses seuls tests — tooling.sdd
+mod events;

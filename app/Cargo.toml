@@ -74,10 +74,20 @@ sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio
 handlebars = "6.4"
 rhai = "1.26"
 vanyline-health = { path = "../health" }
+# B8 `app/src/sessions/events.rs` (events.sdd, Depends on) : export TypeScript de @HostEvent vers
+# `packages/protocol/src/generated/`. Version et features IDENTIQUES à `lib/Cargo.toml` (résolu
+# 12.0.1 dans `Cargo.lock`, `serde-json-impl` pour le mapping `serde_json::Value` → `any`) :
+# aucune dépendance nouvelle au graphe résolu, une seule identité de la crate.
+ts-rs = { version = "12", features = ["serde-json-impl"], optional = true }
 
 # `sqlx-sqlite` n'est nécessaire qu'aux tests (base sqlite en mémoire avec migrations réelles
 # appliquées, cf. `db::test_support::real_db` — même pattern que les tests internes de
 # miryad-core) : jamais utilisé en production (Postgres/CNPG uniquement, cf. AGENTS.md).
+[features]
+# B8 `app/src/sessions/events.sdd` — export ts-rs de @HostEvent (test `export_host_event_ts`,
+# job CI `tsrs`). Motif identique à `lib/Cargo.toml` : feature homonyme traitée par `dep:`.
+ts-rs = ["dep:ts-rs"]
+
 [dev-dependencies]
 # `test-util` : horloge pausable (`#[tokio::test(start_paused = true)]`) pour tester la borne
 # de `wait_owner_ready` sans attendre 30 s réelles (api/projects.rs). Feature seule, aucune crate ajoutée.
