@@ -47,6 +47,12 @@ pub struct Config {
     /// URL publique de déploiement de l'`app` déclarée à Restate pour l'enregistrement
     /// de l'endpoint (`VNL_WORKFLOW_DEPLOYMENT_URL`) — `None` ⇒ moteur non configuré.
     pub workflow_deployment_url: Option<String>,
+    /// Plafond de durée EXPLICITE posée sur les steps `subagent` de miryad-core au montage
+    /// (`VNL_SUBAGENT_MAX_SECS`, u64 de secondes, défaut `2700` = 45 min — `config.sdd`,
+    /// `dsd/app/sessions.md#FR-11`) ; la valeur par défaut de miryad-core n'est jamais
+    /// laissée implicite. Même contrat de parse et de repli que `OIDC_TIMEOUT_SECS` :
+    /// absente/vide/non parseable ⇒ défaut, jamais d'échec.
+    pub subagent_max_secs: u64,
 }
 
 impl Config {
@@ -100,6 +106,7 @@ impl Config {
             workflow_listen: read("VNL_WORKFLOW_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:9080".to_string()),
             workflow_deployment_url: read("VNL_WORKFLOW_DEPLOYMENT_URL").ok(),
+            subagent_max_secs: secs_or_default("VNL_SUBAGENT_MAX_SECS", 2700),
         })
     }
 
@@ -179,6 +186,44 @@ mod tests {
             restate_ingress_url: None,
             workflow_listen: "0.0.0.0:9080".to_string(),
             workflow_deployment_url: None,
+            subagent_max_secs: 2700,
+        }
+    }
+
+    /// Scenario: `from_env_subagent_max_secs_defaut` (amendement `config.sdd` 2026-11-12,
+    /// `dsd/app/sessions.md#FR-11`) — `VNL_SUBAGENT_MAX_SECS` absente : plafond explicite à
+    /// son défaut `2700` (45 min), jamais le défaut implicite de miryad-core.
+    #[test]
+    fn from_env_subagent_max_secs_defaut() {
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+
+        assert_eq!(config.subagent_max_secs, 2700);
+    }
+
+    /// Scenario : `from_env_subagent_max_secs_fourni` — la valeur posée est recopiée telle
+    /// quelle (u64 de secondes, même motif que `OIDC_TIMEOUT_SECS`).
+    #[test]
+    fn from_env_subagent_max_secs_fourni() {
+        let mut env = required_env();
+        env.insert("VNL_SUBAGENT_MAX_SECS", "999".to_string());
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(config.subagent_max_secs, 999);
+    }
+
+    /// Scenario : `from_env_subagent_max_secs_vide_ou_invalide_defaut` — le parse n'est
+    /// jamais fatal (motif `OIDC_TIMEOUT_SECS`) : valeur vide, non parseable ou négative ⇒
+    /// défaut `2700`, `@Ok` garanti.
+    #[test]
+    fn from_env_subagent_max_secs_vide_ou_invalide_defaut() {
+        for valeur in [String::new(), "abc".to_string(), "-3".to_string()] {
+            let mut env = required_env();
+            env.insert("VNL_SUBAGENT_MAX_SECS", valeur.clone());
+
+            let config = Config::from_env_with(env_read(env)).unwrap();
+
+            assert_eq!(config.subagent_max_secs, 2700, "valeur posée {valeur:?}");
         }
     }
 

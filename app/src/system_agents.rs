@@ -654,6 +654,7 @@ mod tests {
                 restate_ingress_url: None,
                 workflow_listen: "0.0.0.0:9080".to_string(),
                 workflow_deployment_url: None,
+                subagent_max_secs: 2700,
             },
             cookie_key: cookie::Key::from(&[0u8; 64]),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

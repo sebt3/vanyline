@@ -42,7 +42,10 @@ pub(crate) enum HostGatewayError {
 /// le namespace où il vit — rien de plus (`FR-3`, parcimonie des paramètres).
 #[derive(Clone, Debug)]
 pub(crate) struct HostEntity {
-    /// Nom porté par l'objet (DNS-1123).
+    /// Nom porté par l'objet (DNS-1123) — champ contractuel de la relecture (`host.sdd`,
+    /// « son nom porté par l'objet »), pas encore lu en production : les contextes `H_`
+    /// nomment l'entité par l'identifiant résolu, pas par la relecture — tooling.sdd
+    #[allow(dead_code)]
     pub name: String,
     /// `metadata.namespace` de l'objet (peut être absent hors cluster).
     pub namespace: Option<String>,
@@ -225,6 +228,9 @@ impl VnlLymailleHost {
 
 /// Encodage réversible `-` ↔ `_` des noms K8s dans les identifiants `H_` (`DEC-9`, `[?]`
 /// des Tasks de `host.sdd`) — alphabet `identity::classify` : alphanumérique + `_`.
+/// Constructeur d'identifiants lu par les tests ; appelants de production = tranche DEC-8
+/// (ouverture par écran) — tooling.sdd
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn encode_k8s_name(name: &str) -> String {
     name.replace('-', "_")
@@ -247,13 +253,19 @@ fn is_dns_label(s: &str) -> bool {
         && s.ends_with(|c: char| c.is_ascii_alphanumeric())
 }
 
-/// Identifiant `H_project_…` d'un projet (encodé, `FR-3`).
+/// Identifiant `H_project_…` d'un projet (encodé, `FR-3`). Constructeurs d'identifiants lus
+/// par les tests et les Scenario de `host.sdd` ; leurs appelants de production (ouverture par
+/// écran, tranche DEC-8/`DEC-6`) ne sont pas dans B9 — tooling.sdd
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn h_project_id(name: &str) -> String {
     format!("{PROJECT_PREFIX}{}", encode_k8s_name(name))
 }
 
 /// Identifiant `H_sandbox_<owner>_<nom>` d'une sandbox (deux parties encodées, `FR-2`).
+/// Constructeurs d'identifiants lus par les tests ; appelants de production = tranche DEC-8
+/// (ouverture par écran) — tooling.sdd
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn h_sandbox_id(owner: &str, name: &str) -> String {
     format!(

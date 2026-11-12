@@ -1560,6 +1560,7 @@ mod tests {
             restate_ingress_url: None,
             workflow_listen: "0.0.0.0:9080".to_string(),
             workflow_deployment_url: None,
+            subagent_max_secs: 2700,
         }
     }
 
@@ -1719,6 +1720,7 @@ mod tests {
         crate::workflow::runtime::start_with(
             cfg,
             miryad_core::workflow::StepRegistry::new(),
+            std::time::Duration::from_mins(45),
             std::time::Duration::from_millis(20),
             std::time::Duration::from_millis(50),
         )

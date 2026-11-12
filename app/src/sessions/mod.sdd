@@ -34,7 +34,12 @@ Must:
     puis `crate::migration::Migrator::up`) — les tables `miryad_lymaille_*` viennent de
     miryad-core, aucune migration `vanyline_*` pour elles (`CON-2`).
   Porter les identifiants d'erreur propres à la Solution sous `"VNL-APP-SES-NNN"` ; les refus de
-    miryad-core gardent leurs `"MRD-LYMAILLE-NNN"` sans réécriture (`FR-12`).
+    miryad-core gardent leurs `"MRD-LYMAILLE-NNN"` sans réécriture (`FR-12`). La suite est fixée
+    ainsi : `101..107` à ./host.rs, `108` à ./catalog.rs et ./events.rs (refus de charge et de
+    définition), et `109` au MONTAGE — panne de publication du catalogue au démarrage, montage
+    refusé sans hôte, plafond `subagent` hors plage refusé au registre (./../main.rs,
+    ./../workflow/runtime.rs) ; `109` est toujours une fatalité de démarrage, jamais une réponse
+    à une requête.
   Ne fonctionner qu'en une réplique d'`app` : le montage ne pose aucun verru distribué et
     n'affiche aucune avertissement multiréplique — la contrainte est portée par le déploiement
     (`DEC-1`, cf. ../../../controller/src/application.sdd).

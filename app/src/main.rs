@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{Router, extract::FromRef, routing::get};
 use config::Config;
+use error::AppError;
 use miryad_core::auth::{MiryadAuthState, OidcClient};
 use miryad_core::rest::openapi::{resource_openapi, swagger_ui_router};
 use miryad_core::rest::resource_router;
@@ -142,6 +143,16 @@ async fn main() {
             std::process::exit(1);
         });
 
+    // B9 sessions lymaille (`sessions/mod.sdd`, `main.sdd` amendé) : le catalogue est publié
+    // AVANT le bind (idempotent, `sessions/catalog.sdd`) ; panne = refus fermé, l'app ne
+    // démarre pas — identifiant `VNL-APP-SES-109`, suite des identifiants du montage.
+    sessions::catalog::ensure_catalog(&db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("VNL-APP-SES-109: catalogue lymaille non publié: {e}");
+            std::process::exit(1);
+        });
+
     let miryad_oidc_client = OidcClient::new(&config.oidc_config())
         .await
         .unwrap_or_else(|e| {
@@ -204,7 +215,10 @@ async fn main() {
         }
     }
 
-    let app = build_router(state, &static_dir);
+    let app = build_router(state, &static_dir).unwrap_or_else(|e| {
+        tracing::error!("VNL-APP-SES-109: assemblage du routeur refusé: {e}");
+        std::process::exit(1);
+    });
 
     let listener = tokio::net::TcpListener::bind(listen_addr)
         .await
@@ -222,8 +236,14 @@ async fn main() {
 /// Assemblage COMPLET du routeur racine (`main.sdd`, Scenario
 /// `routeur_de_production_assemble_sans_panique`) : extrait de `main` pour être testé tel
 /// qu'en production. Un conflit de chemins entre sous-routeurs fait paniquer axum au montage.
-fn build_router(state: AppState, static_dir: &str) -> Router {
-    Router::new()
+/// Le seul `Err` possible ici est le refus de montage des sessions lymaille — sans hôte,
+/// aucune route de conversation n'est servie (`sessions/mod.sdd`, `VNL-APP-SES-109`) ; l'état
+/// de l'app fournit toujours son hôte (`sessions::lymaille_shared_host`), le chemin `None`
+/// est l'oracle du refus, verrouillé par le test `montage_refuse_sans_hote`.
+fn build_router(state: AppState, static_dir: &str) -> Result<Router, AppError> {
+    let hote: miryad_core::lymaille::SharedHost = sessions::lymaille_shared_host(&state);
+    let lymaille = sessions::lymaille_router(Some(hote), state.auth.db.clone())?;
+    Ok(Router::new()
         .route("/health", get(health))
         .merge(miryad_core::auth::auth_router())
         .merge(resources_router())
@@ -231,6 +251,11 @@ fn build_router(state: AppState, static_dir: &str) -> Router {
         .merge(swagger_ui_router::<AppState>(openapi_spec()))
         .merge(mcp_config_router())
         .merge(mcp_domain::mcp_domain_router())
+        // Routes de conversation miryad-core (chemins COMPLETS `/api/v1/lymaille/…`, préfixe
+        // figé par la crate) mergées À LA RACINE et déclarées AVANT le `nest` `/api/v1` :
+        // les segments littéraux priment sur le wildcard du nest (jurisprudence matchit,
+        // `main.sdd`, `sessions/mod.sdd`) — hors de ce préfixe, AUCUNE route de conversation.
+        .merge(lymaille)
         .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
         .route(
@@ -244,7 +269,7 @@ fn build_router(state: AppState, static_dir: &str) -> Router {
         .with_state(state)
         .fallback_service(
             ServeDir::new(static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html"))),
-        )
+        ))
 }
 
 /// Les ressources CRUD `resource_router` de miryad-core, montées en chemins complets
@@ -378,6 +403,7 @@ mod tests {
                 restate_ingress_url: None,
                 workflow_listen: "0.0.0.0:9080".to_string(),
                 workflow_deployment_url: None,
+                subagent_max_secs: 2700,
             },
             cookie_key: cookie::Key::from(&[0u8; 64]),
             busy: Arc::new(Mutex::new(HashSet::new())),
@@ -501,7 +527,7 @@ mod tests {
         use tower::ServiceExt;
 
         let state = test_state().await;
-        let app = build_router(state, "./static");
+        let app = build_router(state, "./static").expect("le routeur complet s'assemble");
 
         for (method, uri) in [
             ("GET", "/api/v1/me"),
@@ -545,7 +571,7 @@ mod tests {
         let state = test_state().await;
         let user_cookie = session_cookie(&state, "alice", false).await;
         let admin_cookie = session_cookie(&state, "admin-user", true).await;
-        let app = build_router(state, "./static");
+        let app = build_router(state, "./static").expect("le routeur complet s'assemble");
 
         for (cookie, expect_admin) in [(user_cookie.as_str(), false), (admin_cookie.as_str(), true)]
         {
@@ -587,5 +613,88 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "sans session ⇒ 401"
         );
+    }
+
+    /// Scenario: `routes sous lymaille et pas ailleurs` (`sessions/mod.sdd`) — le routeur
+    /// complet sert les routes de conversation SOUS `/api/v1/lymaille` (401 sans
+    /// authentification, jamais 404 ; la liste répond 200 une fois authentifiée) et aucune
+    /// route de conversation n'existe hors de ce préfixe — ces mêmes chemins ailleurs ne
+    /// rendent jamais le 401 d'une route de conversation authentifiée.
+    #[tokio::test]
+    async fn routes_sous_lymaille_et_pas_ailleurs() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state().await;
+        let cookie = session_cookie(&state, "alice", false).await;
+        let app = build_router(state, "./static").expect("le routeur complet s'assemble");
+
+        for (methode, uri) in [
+            ("GET", "/api/v1/lymaille/conversations"),
+            ("POST", "/api/v1/lymaille/conversations"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(methode)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("requête valide"),
+                )
+                .await
+                .expect("le routeur répond");
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{methode} {uri} : monté sous le préfixe, 401 attendu sans authentification"
+            );
+        }
+
+        let liste = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/lymaille/conversations")
+                    .header("Cookie", cookie.as_str())
+                    .body(Body::empty())
+                    .expect("requête valide"),
+            )
+            .await
+            .expect("le routeur répond");
+        assert_eq!(
+            liste.status(),
+            StatusCode::OK,
+            "authentifiée, GET /api/v1/lymaille/conversations répond"
+        );
+
+        // Segments propres au `conversations_router` de miryad-core (`history`, `events`,
+        // `toolsets/…/draft`) : hors du préfixe, ils ne peuvent être servis que par lui.
+        // (Le `/api/conversations` de l'ANCIEN chat maison est une route propre de l'app, pas
+        // une route lymaille — son retrait est la tranche DEC-8, hors de B9.)
+        for (methode, uri) in [
+            ("GET", "/api/v1/conversations"),
+            ("GET", "/api/conversations/1/history"),
+            ("GET", "/conversations/1/events"),
+            ("DELETE", "/toolsets/monojet/draft"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(methode)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("requête valide"),
+                )
+                .await
+                .expect("le routeur répond");
+            assert_ne!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{methode} {uri} : aucune route de conversation lymaille ne doit être servie hors de /api/v1/lymaille"
+            );
+        }
     }
 }

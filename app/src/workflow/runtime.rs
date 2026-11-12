@@ -12,6 +12,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use miryad_core::lymaille::EnvSecretResolver;
+use miryad_core::lymaille::SharedHost;
+use miryad_core::lymaille::resource_module::ResourceRegistry;
 use miryad_core::resource::AccessPolicy;
 use miryad_core::resource::MiryadResource;
 use miryad_core::workflow::DagInterpreter;
@@ -19,12 +22,14 @@ use miryad_core::workflow::DagSteps;
 use miryad_core::workflow::RunHandle;
 use miryad_core::workflow::StepDispatcher;
 use miryad_core::workflow::StepRegistry;
+use miryad_core::workflow::SubagentDeps;
+use miryad_core::workflow::SubagentStep;
 use miryad_core::workflow::WorkflowConfig;
 use miryad_core::workflow::WorkflowDefinition;
 use miryad_core::workflow::WorkflowError;
 use miryad_core::workflow::WorkflowPolicy;
 use miryad_core::workflow::configure_policy;
-use miryad_core::workflow::recommended_options;
+use miryad_core::workflow::dispatcher::recommended_options_for;
 use miryad_core::workflow::register_deployment;
 use miryad_core::workflow::trigger_run;
 use restate_sdk::endpoint::Endpoint;
@@ -40,10 +45,12 @@ use crate::workflow::status::RestateAdmin;
 use crate::workflow::steps::StepEnv;
 use crate::workflow::steps::build_registry;
 
-/// Timeouts d'exécution `inactivity_timeout`/`abort_timeout` relevés à 25 h sur le service
-/// `StepDispatcher` (`runtime.sdd` `Handles`) : couvrent un step shell de 24 h
-/// (`steps/shell.sdd`). La politique de retry bornée de miryad-core
-/// (`recommended_options`, pause au 5e essai) reste à son défaut — jamais de retry permanent.
+/// Timeouts d'exécution `inactivity_timeout`/`abort_timeout` relevés à 25 h au NIVEAU SERVICE
+/// du `StepDispatcher` (`runtime.sdd` `Handles`) : couvrent un step shell de 24 h
+/// (`steps/shell.sdd`). Le handler `execute_long` (kind `subagent`, amendement DEC-29) reçoit
+/// lui les bornes de `recommended_options_for(subagent_ceiling)` — plafond explicite de
+/// `Config::subagent_max_secs`. La politique de retry bornée de miryad-core (pause au 5e
+/// essai) reste à son défaut — jamais de retry permanent.
 const ETAPE_LONGUE: Duration = Duration::from_hours(25);
 
 /// Premier délai de réessai d'enregistrement en production (doublement, plafond
@@ -214,14 +221,17 @@ impl RestateAdmin for WorkflowRuntime {
 
 /// Démarre le moteur depuis l'état de l'app : construit le `StepEnv` (`db`, `http`, `config`
 /// depuis l'`AppState` ; client K8s propre au moteur — la découverte lazy de l'`AppState` garde
-/// son contrat « première requête, jamais au démarrage », `k8s.sdd`) et le registre des kinds,
-/// puis délègue la séquence contractuelle à [`start_with`].
+/// son contrat « première requête, jamais au démarrage », `k8s.sdd`), le registre des kinds de
+/// vanyline, et y enregistre le step `subagent` de miryad-core avec le plafond d'application
+/// explicite `Config::subagent_max_secs` (amendement DEC-29, `runtime.sdd` — jamais le défaut
+/// implicite de la crate ; le kind `agent` de vanyline reste en place, son retrait est une
+/// tâche ultérieure). Délègue ensuite la séquence contractuelle à [`start_with`].
 ///
 /// # Errors
 ///
-/// Config invalide (`MRD-WORKFLOW-007` remonté), découverte K8s impossible, adresse
-/// d'endpoint non parseable ou bind refusé — jamais un échec d'enregistrement (réessayé en
-/// arrière-plan).
+/// Config invalide (`MRD-WORKFLOW-007` remonté), découverte K8s impossible, plafond subagent
+/// refusé au montage (`VNL-APP-SES-109`), adresse d'endpoint non parseable ou bind refusé —
+/// jamais un échec d'enregistrement (réessayé en arrière-plan).
 pub async fn start_runtime(
     state: &AppState,
     config: &WorkflowConfigApp,
@@ -239,13 +249,61 @@ pub async fn start_runtime(
         http: reqwest::Client::new(),
         config: Arc::new(state.config.clone()),
     };
+    let mut registry = build_registry(env);
+    let hote: SharedHost = crate::sessions::lymaille_shared_host(state);
+    registry
+        .register(sous_agent_step(
+            state.auth.db.clone(),
+            Some(hote),
+            state.config.subagent_max_secs,
+        )?)
+        .map_err(|e| {
+            AppError::InternalError(format!(
+                "VNL-APP-SES-109: enregistrement du kind subagent au registre: {e}"
+            ))
+        })?;
     start_with(
         config.clone(),
-        build_registry(env),
+        registry,
+        Duration::from_secs(state.config.subagent_max_secs),
         REGISTER_RETRY_INIT,
         REGISTER_RETRY_CAP,
     )
     .await
+}
+
+/// Assemble le step `subagent` de miryad-core (kind `"subagent"`) avec un plafond d'application
+/// EXPLICITE (`runtime.sdd` amendé 2026-11-12 — DEC-29 ; `dsd/app/sessions.md#FR-11`, `AC-8`) :
+/// `with_max_secs_ceiling(ceiling)`, jamais le défaut implicite de la crate. Deps de production
+/// : secrets par variable d'environnement (`EnvSecretResolver`), registre de ressources vide
+/// (les modules d'hôte ne sont pas montés dans cette tranche) et hôte lymaille fourni
+/// (`sessions/mod.sdd` `FR-1` — les rôles MCP des contextes `H_` d'un run sous-agent sont
+/// tranchés par sa décision, sous le principal du déclencheur). Séam `pub(crate)`
+/// (jurisprudence `start_with`/`assemble_registry`) : le plafond est observable par la
+/// validation de `run` du step, sans cluster ; `start_runtime` le branche sur
+/// `Config::subagent_max_secs`.
+///
+/// # Errors
+///
+/// [`AppError::InternalError`] citant `VNL-APP-SES-109` quand `ceiling` est hors de
+/// `1..=LONG_CEILING_MAX_SECS` (le montage refuse, jamais de repli implicite).
+pub(crate) fn sous_agent_step(
+    db: sea_orm::DatabaseConnection,
+    host: Option<SharedHost>,
+    ceiling: u64,
+) -> Result<SubagentStep, AppError> {
+    SubagentStep::new(SubagentDeps {
+        db,
+        secrets: Arc::new(EnvSecretResolver),
+        registry: Arc::new(ResourceRegistry::new()),
+        host,
+    })
+    .with_max_secs_ceiling(ceiling)
+    .map_err(|e| {
+        AppError::InternalError(format!(
+            "VNL-APP-SES-109: plafond subagent refusé au montage: {e}"
+        ))
+    })
 }
 
 /// Cœur de la séquence contractuelle de `runtime.sdd` — séam `pub(crate)` (jurisprudence
@@ -256,6 +314,7 @@ pub async fn start_runtime(
 pub(crate) async fn start_with(
     cfg: WorkflowConfigApp,
     registry: StepRegistry,
+    subagent_ceiling: Duration,
     retry_initial: Duration,
     retry_cap: Duration,
 ) -> Result<WorkflowRuntime, AppError> {
@@ -269,9 +328,12 @@ pub(crate) async fn start_with(
     // 2 — la politique `OwnerOnly` est posée ici, avant la moindre écoute (Must).
     poser_politique_proprietaire()?;
     // 3 — lier les deux services de miryad-core à l'endpoint. `StepDispatcher` reçoit le
-    // registre des kinds et les options relevées à 25 h ; `DagInterpreter` reste aux options
-    // par défaut (`runtime.sdd` `Handles` ne nomme que le dispatcher).
-    let options = recommended_options()
+    // registre des kinds et les options du plafond explicite : `recommended_options_for`
+    // (amendement DEC-29) cale les bornes du handler `execute_long` sur `subagent_ceiling` —
+    // LA MÊME valeur que `sous_agent_step` — et le service-Level 25 h couvre les kinds longs
+    // de vanyline (shell) ; `DagInterpreter` reste aux options par défaut (`runtime.sdd`
+    // `Handles` ne nomme que le dispatcher).
+    let options = recommended_options_for(subagent_ceiling)
         .inactivity_timeout(ETAPE_LONGUE)
         .abort_timeout(ETAPE_LONGUE);
     let endpoint = Endpoint::builder()
@@ -566,6 +628,10 @@ mod tests {
     const BACKOFF_TEST: (Duration, Duration) =
         (Duration::from_millis(20), Duration::from_millis(50));
 
+    /// Plafond sous-agent de test : la valeur par défaut de production
+    /// (`Config::subagent_max_secs`, `config.sdd`), jamais laissée implicite.
+    const CEILING_TEST: Duration = Duration::from_mins(45);
+
     /// Sonde de registre : un kind factice — `build_registry` exige un `StepEnv` avec un
     /// `VnlK8sClient` non constructible hors cluster (convention anti-mock `lib/src/k8s.sdd`,
     /// même jurisprudence que `assemble_registry` de `steps/mod.rs`).
@@ -617,6 +683,7 @@ mod tests {
             restate_ingress_url: None,
             workflow_listen: "0.0.0.0:9080".to_string(),
             workflow_deployment_url: None,
+            subagent_max_secs: 2700,
         }
     }
 
@@ -638,6 +705,7 @@ mod tests {
         let runtime = start_with(
             cfg_demarrage(&base, port),
             registre_sonde(),
+            CEILING_TEST,
             BACKOFF_TEST.0,
             BACKOFF_TEST.1,
         )
@@ -691,7 +759,14 @@ mod tests {
             deployment_url: "http://vanyline.media-station.svc:9410".to_string(),
             listen: format!("127.0.0.1:{port}"),
         };
-        let res = start_with(cfg, registre_sonde(), BACKOFF_TEST.0, BACKOFF_TEST.1).await;
+        let res = start_with(
+            cfg,
+            registre_sonde(),
+            CEILING_TEST,
+            BACKOFF_TEST.0,
+            BACKOFF_TEST.1,
+        )
+        .await;
         let Err(err) = res else {
             panic!("une config invalide ne doit jamais démarrer le moteur");
         };
@@ -719,6 +794,7 @@ mod tests {
             start_with(
                 cfg_demarrage(&base, port),
                 registre_sonde(),
+                CEILING_TEST,
                 BACKOFF_TEST.0,
                 BACKOFF_TEST.1,
             ),
@@ -767,6 +843,7 @@ mod tests {
         start_with(
             cfg_demarrage(&base, port),
             registre_sonde(),
+            CEILING_TEST,
             BACKOFF_TEST.0,
             BACKOFF_TEST.1,
         )
@@ -909,6 +986,7 @@ mod tests {
         let runtime = start_with(
             cfg_demarrage(&base, port),
             registre_sonde(),
+            CEILING_TEST,
             BACKOFF_TEST.0,
             BACKOFF_TEST.1,
         )
@@ -934,6 +1012,70 @@ mod tests {
             sends.as_slice(),
             [format!("/DagInterpreter/{}/run/send", anse.run_key)],
             "la cible est l'ingress, suffixe /send, clé de run dans l'URI"
+        );
+    }
+
+    // ── Scenario: plafond_sous_agent (runtime.sdd amendé 2026-11-12 — DEC-29 ;
+    // `dsd/app/sessions.md#FR-11`, `AC-8`) ──────────────────────────────────────
+    // Le step `subagent` est monté au registre avec un plafond d'application EXPLICITE
+    // valant `Config::subagent_max_secs` (défaut 2700), jamais le défaut implicite de
+    // miryad-core : un `max_secs` au-dessus du plafond est refusé dès la validation de la
+    // config (étape 1 du step, avant tout accès) ; un sous-agent de 40 min (`AC-8`) n'est
+    // jamais coupé par le plafond. `start_runtime` branche ce séam sur la config.
+    #[tokio::test]
+    async fn plafond_sous_agent_explicite() {
+        let db = crate::db::test_support::real_db().await;
+        let step = sous_agent_step(db, None, 2700).expect("un plafond de 2700 s est accepté");
+        let run = miryad_core::workflow::RunInfo {
+            run_key: "vanyline:plafond".to_string(),
+            step_id: "sous-agent".to_string(),
+            depth: 0,
+            vars: serde_json::json!({}),
+            trigger: None,
+        };
+        let err = step
+            .run(
+                &run,
+                serde_json::json!({"agent": "G_test", "task": "t", "max_secs": 2701}),
+                HashMap::new(),
+            )
+            .await
+            .expect_err("un max_secs au-dessus du plafond doit être refusé");
+        assert!(
+            err.message.contains("max_secs hors de 1..=2700"),
+            "le plafond appliqué doit être celui configuré, jamais le défaut implicite : {}",
+            err.message
+        );
+        // `AC-8` : 40 min (2400 s) passent la validation — l'échec vient APRÈS le plafond
+        // (aucune identité de déclenchement sur ce run de sonde), preuve qu'aucune coupe
+        // n'a eu lieu sur la durée demandée.
+        let err = step
+            .run(
+                &run,
+                serde_json::json!({"agent": "G_test", "task": "t", "max_secs": 2400}),
+                HashMap::new(),
+            )
+            .await
+            .expect_err("le run de sonde échoue faute d'identité de déclenchement");
+        assert!(
+            !err.message.contains("max_secs"),
+            "un step de 40 min ne doit pas être coupé par le plafond : {}",
+            err.message
+        );
+    }
+
+    /// Un plafond hors de la plage acceptée (`VNL_SUBAGENT_MAX_SECS=0` par exemple) est un
+    /// refus AU MONTAGE citant `VNL-APP-SES-109`, jamais un repli implicite sur le défaut
+    /// de miryad-core (`config.sdd` : le parse n'est pas fatal, c'est le montage qui tranche).
+    #[tokio::test]
+    async fn plafond_sous_agent_hors_plage_refuse_au_montage() {
+        let db = crate::db::test_support::real_db().await;
+        let Err(err) = sous_agent_step(db, None, 0) else {
+            panic!("un plafond de 0 s doit être refusé au montage");
+        };
+        assert!(
+            err.to_string().contains("VNL-APP-SES-109"),
+            "l'identifiant de montage doit être porté : {err}"
         );
     }
 

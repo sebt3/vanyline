@@ -77,6 +77,9 @@ pub(crate) async fn ensure_catalog(db: &DatabaseConnection) -> Result<(), AppErr
 /// Correspondance compilée écran → agent pour les contextes `H_` (`DEC-6`) ; `None` pour un
 /// contexte stocké, dont la nature et l'agent viennent du type lui-même (`Exposes`). La table
 /// n'est ni administrable ni lisible par une session `Config` : constante compilée, isolée ici.
+/// Appelant de production = l'ouverture par écran (tranche DEC-8, frontend + relais) ; B9 la
+/// branche côté tests — tooling.sdd
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn agent_pour_contexte(context: &str) -> Option<&'static str> {
     if parse_project_id(context).is_some() {
