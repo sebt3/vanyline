@@ -91,6 +91,17 @@ Depends on:
   ../../Cargo.toml — dev-dependencies activant `sqlx-sqlite` sur `sea-orm` et
     `sea-orm-migration` ; la feature est absente des dépendances runtime.
 
+Scenario: tables lymaille posées et paire de migrations rejouable
+  Given une base obtenue par `real_db()` — paire de migrations appliquée dans l'ordre de
+    `../main.rs` (`@miryad_core::migration::Migrator::up` puis `@crate::migration::Migrator::up`)
+  When on sonde `has_table` sur `miryad_lymaille_catalog_agents` et `miryad_lymaille_mcp_servers`
+  Then les deux tables existent — posées par le `Migrator` de miryad-core sous sa feature
+    `lymaille` ; aucune migration `vanyline_*` ne doit exister pour elles
+    (`../../../dsd/app/sessions.md#CON-2`)
+  When la paire est rejouée une seconde fois sur la même connexion
+  Then la seconde passe réussit sans effet : mêmes tables, aucune nouvelle ligne dans la
+    table de suivi des migrations
+
 Scenario: fixture absente du build de production
   Given le crate `vanyline-app` compilé sans `cfg(test)`
   When `cargo build -p vanyline-app` s'exécute
