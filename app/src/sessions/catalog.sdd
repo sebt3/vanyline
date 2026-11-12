@@ -69,9 +69,8 @@ Scenario: ouverture selon l'écran (`AC-4`)
     `H_` avec `G_vanyline_project` / `G_vanyline_sandbox`
 
 Tasks:
-  [?] B7 du chantier lymaille : code catalogue — dépend des API de stores miryad-core (noms
-    exacts à relever à l'implémentation, pas de décision de contrat en attente). Publication
-    faite et verte (`AC-4`) ; les trois observations relevées à l'implémentation, à confirmer :
+  [x] B7 du chantier lymaille : code catalogue — publié, idempotent, `AC-4` vert, batterie
+    validator verte 2026-11-12. Les trois observations ci-dessous restent `[?]` à ratifier.
   [?] « Via les stores de miryad-core » : @LymailleStores et ses stores (@SeaAgentStore,
     @SeaContextTypeStore, @SeaContextStore de miryad-core 0.3.1) exigent un sujet admin résolu
     en base (@check_write / @require_admin → @UnknownSubject sur une base fraîche au démarrage)

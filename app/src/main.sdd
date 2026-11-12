@@ -12,8 +12,8 @@ Purpose:
   miryad-core PUIS app est un contrat, cf. ./migration/mod.sdd —, client OIDC, état,
   bind, serve) ; (2) la construction de @AppState et son `impl @FromRef` vers
   @MiryadAuthState ; (3) l'assemblage du router racine (health, auth_router miryad-core,
-  6 @resource_router mergés en chemins complets, swagger, @nest `/api/v1/lymaille` des
-  sessions lymaille, @nest `/api` et `/api/v1`,
+  6 @resource_router mergés en chemins complets, swagger, merge des routes lymaille en chemins
+  complets sous `/api/v1/lymaille` déclarées avant les nest, @nest `/api` et `/api/v1`,
   routes WS, @with_state, @fallback_service statique SPA) — la frontière avec
   ./api/mod.sdd est celle-là : les préfixes `/api` et `/api/v1` sont la propriété
   EXCLUSIVE des @nest d'ici ; (4) @openapi_spec, la fusion des sept fragments OpenAPI.

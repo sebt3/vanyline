@@ -67,4 +67,4 @@ Scenario: routes sous lymaille et pas ailleurs
   Then les routes de conversation n'existent que sous `/api/v1/lymaille`
 
 Tasks:
-  [ ] B6-B9 du chantier lymaille : code de montage (dépend de ./host.sdd, ./catalog.sdd).
+  [x] B6-B9 du chantier lymaille : code de montage — batteries validator vertes 2026-11-12.

@@ -73,23 +73,23 @@ specs correspondantes, sans être tranchés.
 
 Specs, **parallélisables entre elles et avec A** :
 
-- [ ] **B1 — `app/src/sessions/mod.sdd`** : `FR-1`, `FR-12`, `CON-1`, `CON-2`, `DEC-1` (montage, routes `/api/v1/lymaille`).
-- [ ] **B2 — `app/src/sessions/host.sdd`** : `FR-2` à `FR-4`, `DEC-2`, `DEC-3`, `DEC-9`, `AC-1` à `AC-3`.
-- [ ] **B3 — `app/src/sessions/catalog.sdd`** : `FR-5` à `FR-7`, `DEC-6`, `DEC-7`, `AC-4`, `AC-5`.
-- [ ] **B4 — `app/src/sessions/events.sdd`** : `FR-8`, `FR-9`, `DEC-4`, `AC-6`.
-- [ ] **B5 — Amendements** : `app/src/main.sdd` (montage), `app/src/config.sdd` (plafond de durée des sous-agents, `FR-11`,
+- [x] **B1 — `app/src/sessions/mod.sdd`** : `FR-1`, `FR-12`, `CON-1`, `CON-2`, `DEC-1` (montage, routes `/api/v1/lymaille`).
+- [x] **B2 — `app/src/sessions/host.sdd`** : `FR-2` à `FR-4`, `DEC-2`, `DEC-3`, `DEC-9`, `AC-1` à `AC-3`.
+- [x] **B3 — `app/src/sessions/catalog.sdd`** : `FR-5` à `FR-7`, `DEC-6`, `DEC-7`, `AC-4`, `AC-5`.
+- [x] **B4 — `app/src/sessions/events.sdd`** : `FR-8`, `FR-9`, `DEC-4`, `AC-6`.
+- [x] **B5 — Amendements** : `app/src/main.sdd` (montage), `app/src/config.sdd` (plafond de durée des sous-agents, `FR-11`,
   `AC-8`), `controller/src/application.sdd` (une réplique pour `app`, `DEC-1`).
 
 Code, **séquentiel**, après A2 et la spec correspondante :
 
-- [ ] **B6 — `LymailleHost`** (`host.rs`) : réutilise `VnlK8sClient::owner_token` et `sandbox_mcp_url` ; lien
+- [x] **B6 — `LymailleHost`** (`host.rs`) : réutilise `VnlK8sClient::owner_token` et `sandbox_mcp_url` ; lien
   utilisateur↔Owner par `vanyline_owner_links`.
-- [ ] **B7 — Catalogue** (`catalog.rs`) : types de contexte, contextes `G_home` et `G_config`, agents `G_vanyline_*`, création
+- [x] **B7 — Catalogue** (`catalog.rs`) : types de contexte, contextes `G_home` et `G_config`, agents `G_vanyline_*`, création
   idempotente au démarrage, table écran → agent pour Project et Sandbox (`DEC-6`).
-- [ ] **B8 — Événements** (`events.rs`) : `HostEvent{kind, payload}`, publication par `EventHub::publish_host`, export
+- [x] **B8 — Événements** (`events.rs`) : `HostEvent{kind, payload}`, publication par `EventHub::publish_host`, export
   TypeScript (`export_typescript`) vers `packages/protocol/src/generated/`, job CI `tsrs` étendu (spec
   `.github/workflows/workflows.sdd`).
-- [ ] **B9 — Montage** (`mod.rs`, `main.rs`, `config.rs`) : état miryad-core avec l'hôte, routes de conversation, plafond de
+- [x] **B9 — Montage** (`mod.rs`, `main.rs`, `config.rs`) : état miryad-core avec l'hôte, routes de conversation, plafond de
   durée des sous-agents. **Fin de tranche mince** : `AC-1` à `AC-4` verts.
 
 ## C — `app` : retrait du tooling LLM maison (déclenché par B9, `sessions#DEC-8`)

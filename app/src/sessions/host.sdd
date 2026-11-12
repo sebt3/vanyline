@@ -56,6 +56,8 @@ Exposes:
 Depends on:
   vanyline-lib (feature `k8s`) — @VnlK8sClient.
   sea-orm — relecture de `vanyline_owner_links` et des entités Project/Sandbox côté hôte.
+  `lymaille` 0.2.1 — @ToolsetContext (retour de @resolve_context).
+  `zeroize` — @Zeroizing du jeton dans @McpGrant.
 
 Handles:
   Panne apiserver sur @owner_token ⇒ @HostError (refus fermé, `FR-1`) : la session continue
@@ -99,10 +101,11 @@ Tasks:
     apiserver injoignable. Portée par B6 (2026-11-12) : panne de lecture du lien et échec de
     @VnlK8sClient::discover (cluster injoignable, avant tout appel) ⇒ `HostError` ; sandbox
     absente et @TokenRequest en échec ⇒ `Denied`. À ratifier.
-  [?] @Depends on omis deux crates implicites dans le corps des `Must` : @ToolsetContext vient
+  [x] @Depends on omis deux crates implicites dans le corps des `Must` : @ToolsetContext vient
     de `lymaille` (0.2.1, version déclarée par miryad-core 0.3.1 — graphe résolu inchangé) et
     @Zeroizing de `zeroize`. Les deux dépendances ont été déclarées dans `../../Cargo.toml`
-    (2026-11-12). Les mentionner dans `Depends on` de cette spec.
+    (2026-11-12). Les mentionner dans `Depends on` de cette spec. — FAIT 2026-11-12 (mention
+    ajoutée au close B ; éditorial, pas une décision de contrat).
   [ ] Assertion de montage « @H_ jamais écrit » : l'écriture est refusée par les règles de
     miryad-core (`classify` rend `IdKind::Host` — testée en unitaire dans `host.rs`) ;
     vérifier au montage B9 (`./mod.sdd`) qu'aucune route REST, MCP ou session `Config`
