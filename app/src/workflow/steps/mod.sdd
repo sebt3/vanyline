@@ -3,7 +3,7 @@ Spec: Steps — registre des kinds et accès commun
 Platform: Rust/vanyline-app/miryad-core
 
 Purpose:
-  Construit le @StepRegistry du `StepDispatcher` (./../runtime.sdd) avec les quatre kinds de
+  Construit le @StepRegistry du `StepDispatcher` (./../runtime.sdd) avec les trois kinds de
   vanyline — `rhai`, `shell`, `gate` — et porte ce qu'ils partagent : l'environnement
   d'exécution (@StepEnv), la lecture du contexte de run injecté (`config._run`, voir
   ../run_context.sdd) et l'accès authentifié à la sandbox d'un run. Chaque kind a sa spec ; ce
@@ -68,7 +68,8 @@ Tasks:
   [x] Dépendances du module, ratifiées au Cargo.toml de l'app W2 2026-10-10 :
     `handlebars` 6.4 (./agent.sdd), `rhai` 1.26 (./rhai.sdd — MÊME paquet que celui du
     graphe miryad-core, zéro doublon dans le lock), `vanyline-health` (./gate.sdd —
-    membre du workspace).
+    membre du workspace). — RETIRÉ 2026-11-12 (C1) : handlebars n'est plus dépendance de
+    l'app, son dernier consommateur était ./agent.rs ; `rhai` et `vanyline-health` restent.
   [ ] Rattraper à la passe d'intégration cluster : @build_registry réel jamais exécuté
     hors cluster (convention anti-mock kube de ../../../lib/src/k8s.sdd) —
     `registre_exact` verrouille la mécanique d'assemblage sur stubs + les constantes

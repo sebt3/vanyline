@@ -96,7 +96,7 @@ Code, **séquentiel**, après A2 et la spec correspondante :
 
 Specs (parallélisables après B9), puis code séquentiel :
 
-- [ ] **C1 — Nœud `agent` de workflow → step `subagent` de miryad-core.** Specs `workflow/steps/agent.sdd`, `workflow/mod.sdd`,
+- [x] **C1 — Nœud `agent` de workflow → step `subagent` de miryad-core.** Specs `workflow/steps/agent.sdd`, `workflow/mod.sdd`,
   `mcp_domain.sdd` ; code `workflow/steps/agent.rs`. Le type de contexte de liaison est `SUBAGENT_CONTEXT_TYPE`
   (`miryad-core#CHANGELOG 0.3.0`).
 - [ ] **C2 — Chat maison.** Retirer `ws/chat.rs`, `api/conversations.rs`, `system_agents.rs`, `api/local_tools.rs`, les entités
