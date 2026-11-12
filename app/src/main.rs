@@ -21,6 +21,7 @@ mod k8s;
 mod mcp_domain;
 mod migration;
 mod naming;
+mod sessions;
 mod system_agents;
 mod workflow;
 mod ws;

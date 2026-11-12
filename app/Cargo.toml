@@ -49,6 +49,13 @@ miryad-core = { version = "0.3.1", default-features = false, features = [
     "lymaille",
     "matrix",
 ] }
+# `app/src/sessions/host.sdd` — @ToolsetContext construit par @VnlLymailleHost::resolve_context
+# (lymaille 0.2.1, version exactement déclarée par miryad-core 0.3.1 : le graphe résolu est
+# le même, une seule et même identité du type dans le trait) et @Zeroizing du jeton MCP
+# (`McpGrant.token`). Aucune dépendance nouvelle au graphe : les deux crates venaient déjà
+# via miryad-core.
+lymaille = "0.2.1"
+zeroize = "1"
 # W3 `app/src/workflow/runtime.rs` (runtime.sdd, Platform `restate-sdk`) : liaison des services
 # `DagInterpreter`/`StepDispatcher` à l'`Endpoint` et serveur HTTP/2 interne. Version identique à
 # celle déclarée par miryad-core 0.3.1 (`"0.12"`, résolu 0.12.1 dans `Cargo.lock`) et feature

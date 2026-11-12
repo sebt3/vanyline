@@ -88,3 +88,26 @@ Tasks:
     réversible `"-"` ↔ `"_"` proposé dans le `Must` (injectif sur DNS-1123, les noms d'objets
     K8s ne peuvent pas porter `"_"`). Alternative : amendement amont pour accepter `"-"` —
     écarté pour ce lot par la règle « on construit avec ce que livre la stack ». À ratifier.
+    Complément porté par B6 (2026-11-12) : pour `H_sandbox_<owner>_<nom>`, le `"_"` de jointure
+    est indistinguable d'un `"_"` encodé (`H_sandbox_jean_marc_web` = `jean-marc`×`web` ou
+    `jean`×`marc-web`). La résolution inverse rend TOUTES les lectures valides et l'appelant
+    lève l'ambiguïté par le lien d'owner de l'appelant (unique par utilisateur, `user_id`
+    unique dans `vanyline_owner_links`). À ratifier avec l'encodage ci-dessus.
+  [?] Frontière `Denied` / `HostError` sur @owner_token : le `Must` rend « @TokenRequest en
+    échec » par `Denied`, `Handles` rend « panne apiserver sur @owner_token » par `HostError`,
+    et @VnyError::K8sApiError aplatit la cause — l'app ne peut distinguer mint refusé et
+    apiserver injoignable. Portée par B6 (2026-11-12) : panne de lecture du lien et échec de
+    @VnlK8sClient::discover (cluster injoignable, avant tout appel) ⇒ `HostError` ; sandbox
+    absente et @TokenRequest en échec ⇒ `Denied`. À ratifier.
+  [?] @Depends on omis deux crates implicites dans le corps des `Must` : @ToolsetContext vient
+    de `lymaille` (0.2.1, version déclarée par miryad-core 0.3.1 — graphe résolu inchangé) et
+    @Zeroizing de `zeroize`. Les deux dépendances ont été déclarées dans `../../Cargo.toml`
+    (2026-11-12). Les mentionner dans `Depends on` de cette spec.
+  [ ] Assertion de montage « @H_ jamais écrit » : l'écriture est refusée par les règles de
+    miryad-core (`classify` rend `IdKind::Host` — testée en unitaire dans `host.rs`) ;
+    vérifier au montage B9 (`./mod.sdd`) qu'aucune route REST, MCP ou session `Config`
+    d'`app` n'ouvre de chemin d'écriture pour les `H_`.
+  [ ] Branche apiserver des `Scenario` de `resolve_mcp` (URL + jeton réels via
+    `K8sHostGateway`) : non testée en unitaire (convention anti-mock `../../../lib/src/k8s.sdd`),
+    couverte par les integration cluster de `../../../lib/src/k8s.sdd` ; le seam
+    `HostGateway` est testé avec un factice léger.
