@@ -58,7 +58,7 @@ specs correspondantes, sans être tranchés.
   `workflow`, `mcp`, **`lymaille`, `matrix`**. Adapter les cinq entités à hooks async, les fixtures `RunInfo`
   (`workflow/steps/rhai.rs`, `agent.rs`, `mcp_domain.rs`), tout `match` sur `PrincipalSource`. Valider : `cargo check
   --workspace`, puis la batterie complète.
-- [ ] **A3 — Test de migrations** (après A2). Dans `app/src/db/test_support.rs` (et sa spec), vérifier qu'après
+- [x] **A3 — Test de migrations** (après A2). Dans `app/src/db/test_support.rs` (et sa spec), vérifier qu'après
   `miryad_core::migration::Migrator::up` puis `crate::migration::Migrator::up` les tables `miryad_lymaille_*` existent et que la
   seconde passe est sans effet. Aucune migration `vanyline_*` à écrire pour elles (`sessions#CON-2`). La vérification sur
   PostgreSQL réel est faite à part, lors d'un déploiement de test (`docs/release-runbook.md`).
