@@ -16,7 +16,8 @@ Owns:
 References:
   /dsd/app/dashboards.md — `FR-1`..`FR-3`, `FR-5`, `FR-11`, `DEC-3`, `DEC-4`, `AC-1`, `AC-4`, `AC-6`
   ../../dashboards/mod.sdd — @validate_definition ; ../../dashboards/model.sdd — types
-  ../migration/m20261113_000001_create_vanyline_dashboards.sdd — le DDL (FK, index partiel)
+  ../migration/m20261113_000001_create_vanyline_dashboards.sdd — le DDL (FK, index d'unicité)
+  ./projects.sdd ./sandboxes.sdd — projets et sandboxes référencés (identité, propriétaire)
   ./project_workflows.sdd — précédent d'entité `OwnerOnly` à hook de cohérence colonnes
   ../../../tooling.sdd — harnais
 
@@ -32,14 +33,16 @@ Exposes:
       - `kind: String` — `"custom"|"complementary"` à l'écriture ; `"default"` et
         `"ephemeral"` refusés au hook (`Must`) : la base ne porte que ce que l'utilisateur
         écrit (`DEC-2`).
-      - `project: Option<String>` — écran projet ; NULL ailleurs.
-      - `sandbox: Option<String>` — écran sandbox ; NULL ailleurs. `[?]` (Tasks) : colonne
-        ajoutée par rapport au trio de clés `DEC-3`, sans elle deux sandboxes personnalisées
-        d'un même owner sont en collision.
+      - `project_id: Option<i32>` — le PROJET de l'écran (clé d'écran des scopes `project` et
+        `sandbox`, FK `vanyline_projects.id`, supprimée avec le projet) ; NULL pour `home`.
+        La vue d'ensemble de sandbox se personnalise par projet (`FR-1`), jamais par sandbox.
+      - `sandbox_id: Option<i32>` — information, hors clé d'écran : la sandbox depuis laquelle
+        la personnalisation de scope `sandbox` a été écrite (FK `vanyline_sandboxes.id`,
+        vidée à la suppression de la sandbox, la ligne est conservée) ; NULL ailleurs.
       - `title: String` — libellé (colonne, pas dupliquée dans `def`).
       - `def: Json` — `serde_json::Value` des colonnes `layout` + `widgets`
         (`{"layout": …, "widgets": […]}`, `DEC-3` « colonnes de clé plus une colonne
-        JSON ») ; `id`/`scope`/`kind`/`project`/`sandbox`/`title` du type `DashboardDef`
+        JSON ») ; `id`/`scope`/`kind`/`project_id`/`sandbox_id`/`title` de la ligne
         NE SONT PAS dans le JSON — reconstitués à la lecture par la résolution.
   @Entity/@Column/@PrimaryKey/@Relation — générés SeaORM ; `Relation` vide.
   @impl @MiryadResource for @Entity — `resource_name() = "dashboards"` ;
@@ -52,23 +55,32 @@ Structure:
   traduction miryad-core des `HookError`, message fixe, jamais le contenu d'un widget) :
     `VNL-APP-DSH-001` plus de 24 widgets · `002` définition sérialisée > 64 Kio ·
     `003` type de widget inconnu du registre · `004` coordonnées hors grille ou grille
-    hors `[4,24]` · `005` ids de widget dupliqués · `006` `config` non-objet ·
+    différente de 12 colonnes · `005` ids de widget dupliqués · `006` `config` non-objet ·
     `007` écran incohérent : `kind` hors `{custom, complementary}`, ou couple
-    (scope, project, sandbox) invalide, ou `def` non désérialisable en `DashboardDef`
-    (forme `layout`/`widgets` absente).
+    (scope, project_id, sandbox_id) invalide, ou projet / sandbox référencé qui n'est pas
+    celui de l'écrivain, ou `def` non désérialisable en `DashboardDef` (forme
+    `layout`/`widgets` absente) · `009` personnalisation `custom` déjà présente pour cet
+    écran. (`008` et `010` sont rendus par la résolution, `../../dashboards/resolve.sdd`.)
   Les codes `001..006` sont rendus par `crate::dashboards::validate_definition` (définitions
-  `layout`/`widgets` seules) ; `007` et les règles de colonnes sont propres au hook.
+  `layout`/`widgets` seules) ; `007` et `009` sont propres au hook.
   Règles de colonnes du hook, dans l'ordre :
     a. `kind ∈ {"custom", "complementary"}` → sinon 007.
-    b. `scope="home"` ⇒ `project` et `sandbox` NULL ; `"project"` ⇒ `project` non vide et
-      `sandbox` NULL ; `"sandbox"` ⇒ `sandbox` non vide et `project` NULL ; `scope`
-      inconnu ⇒ tout 007.
+    b. `scope="home"` ⇒ `project_id` et `sandbox_id` NULL ; `"project"` ⇒ `project_id`
+      renseigné et `sandbox_id` NULL ; `"sandbox"` ⇒ `project_id` renseigné, `sandbox_id`
+      facultatif ; `scope` inconnu ⇒ tout 007.
     c. `complementary` ⇒ `scope="project"` (les complémentaires sont des tableaux de
       projet, `FR-5`) → sinon 007.
     d. `title` non vide et ≤ 200 caractères → sinon 007.
     e. `def` désérialisable (tolérant aux clés inconnues) → sinon 007.
     f. `validate_definition(&reconstruit)` (règles 002, 001, 005, 003, 006, 004 — ordre de
       `../../dashboards/mod.sdd`).
+    g. références (connexion du hook) : `project_id` désigne un projet de l'écrivain et, si
+      `sandbox_id` est renseigné, c'est une sandbox de ce projet et de l'écrivain → sinon 007.
+    h. unicité (connexion du hook) : pour `kind="custom"`, aucune autre ligne `custom` du même
+      propriétaire sur le même écran `(scope, project_id)` (en mise à jour, hors la ligne
+      elle-même) → sinon 009.
+  Les règles a–f ne lisent pas la base ; g et h l'interrogent. Une écriture concurrente qui
+  passe h est arrêtée par l'index d'unicité de la migration (voir `Raises`).
   `before_delete` : aucun hook — supprimer une personnalisation EST le « rendre les
   défauts » (`FR-2`, `AC-3`).
 
@@ -83,13 +95,16 @@ Returns:
     de widgets — refuser, ne jamais corriger) ou `Err(@HookError::with_code(code, msg))`.
 
 Raises:
-  Uniquement `HookError` ; jamais de panic. `DbErr` de doublon (index partiel violé) :
-    propagée par miryad-core → 409 côté REST (contrat `miryad-core` `rest::core`, pas ici).
+  Uniquement `HookError` ; jamais de panic. Course résiduelle entre deux créations
+    concurrentes du même écran : l'index d'unicité rejette la seconde et miryad-core rend 500
+    `MRD-REST-003` (le contrat REST de miryad-core ne traduit pas la contrainte en 409 ;
+    ticket amont) — cas rare, jamais une deuxième ligne.
 
 Handles:
-  - Unicité : l'index partiel de la migration (UNIQUE `(owner_id, scope, project, sandbox)`
-    WHERE `kind='custom'`) — un second `custom` sur le même écran est un 409, pas un
-    007 ; les tests couvrent les deux moteurs (SQLite applique l'index partiel).
+  - Unicité : un second `custom` sur le même écran est refusé par le hook (règle h, `009`,
+    422), pas par la base ; l'index d'unicité de la migration (UNIQUE `(owner_id, scope,
+    COALESCE(project_id, 0))` WHERE `kind='custom'`) est le filet de la course ; les tests
+    couvrent les deux moteurs.
   - Lecture par `../../dashboards/resolve.sdd` : filtre `kind='custom'` + colonnes
     d'écran, `def` relu sous `DashboardDef`.
 
@@ -108,9 +123,8 @@ Must not:
     vivent dans `../../dashboards/defaults.rs`).
   Accepter `kind` `"default"` ou `"ephemeral"` : un tableau éphémère n'a ni ligne ni route
     (`FR-9`).
-  Valider l'existence du projet ou de la sandbox référencés : les widgets afficheront
-    l'erreur (`Sécurité` — données hors de portée = erreur de widget) ; la reference
-    invalidité est une question de fraicheur, pas d'écriture.
+  Accepter une référence à un projet ou une sandbox d'un autre utilisateur : une ligne ne
+    désigne que ce que son propriétaire possède (règle g).
   Interdire plusieurs `complementary` sur le même projet (pas d'index là-dessus, `FR-5`).
 
 Scenario: le CRUD de l'écran personnalisé est borné par les hooks
@@ -120,22 +134,31 @@ Scenario: le CRUD de l'écran personnalisé est borné par les hooks
     est refusée `VNL-APP-DSH-001` (422)
 
 Scenario: les écrans incohérents sont refusés 007
-  Given (`scope=home`, `project="p1"`), (`scope=project`, `project=NULL`),
-    (`scope=sandbox`, `sandbox=NULL`, `project="p1"`), `kind="default"`,
-    `kind="complementary"` avec `scope="home"`, `title=""`
-  When les six créations sont tentées
+  Given (`scope=home`, `project_id` d'un projet de l'appelant), (`scope=project`,
+    `project_id=NULL`), (`scope=sandbox`, `project_id=NULL`), `kind="default"`,
+    `kind="complementary"` avec `scope="home"`, `title=""`, `project_id` d'un projet d'un AUTRE
+    utilisateur, `sandbox_id` d'une sandbox d'un autre projet
+  When les huit créations sont tentées
   Then chacune est refusée `VNL-APP-DSH-007` — aucune ligne écrite
+
+Scenario: la vue de sandbox est clée par projet et retient la sandbox d'origine
+  Given une personnalisation `scope=sandbox` du projet « p1 » écrite avec `sandbox_id` = la
+    sandbox « s1 »
+  When la sandbox « s1 » est supprimée
+  Then la ligne subsiste avec `sandbox_id` NULL et la personnalisation s'applique toujours au
+    projet ; supprimer le PROJET « p1 » supprime la ligne
 
 Scenario: un type de widget inconnu refuse sans lire le registre du frontend
   Given un `def` portant le type `"scripted"` (réservé, `registry.sdd`)
   When la création est tentée
   Then `VNL-APP-DSH-003` — et avec le type `"markdown"` + `config: 3`, `VNL-APP-DSH-006`
 
-Scenario: deux personnalisations du même écran, c'est 409 pas 422
-  Given une première ligne `custom` `scope=project, project="p1"` de l'appelante
+Scenario: deux personnalisations du même écran sont refusées 009
+  Given une première ligne `custom` `scope=project` du projet « p1 » de l'appelante
   When une seconde création valide sur le même écran passe par l'API générique
-  Then l'index partiel rejette (409 de miryad-core) ; pendant ce temps un SECOND
-    `complementary` sur le même projet passe (`FR-5`, pas d'index)
+  Then refusée `VNL-APP-DSH-009` (422) avant l'écriture ; pendant ce temps un SECOND
+    `complementary` sur le même projet passe (`FR-5`, pas d'unicité) ; une insertion
+    contournant le hook (SQL brut de test) est rejetée par l'index d'unicité
 
 Scenario: un complementary d'un autre utilisateur n'est pas visible
   Given un complementary créé par ana sur « p1 »
@@ -148,20 +171,14 @@ Depends on:
     validate_definition).
 
 Tasks:
-  [?] Colonne `sandbox` ajoutée au trio de clés `DEC-3` (collision de deux écrans sandbox
-    sinon) — appliquée pour débloquer G4, ratifier ou trouver un autre codage (ex :
-    `project="sandbox:<nom>"` — écarté ici, type faible).
-  [?] `title ≤ 200` : borne posée ici (aucune dans le DSD) — valeur ?
-  [?] 409 vs 500 pour le doublon : `Raises`/`Handles` promettent « 409 côté REST par
-    miryad-core » ; miryad-core 0.3.1 (`rest::core`) traduit le `DbErr` de contrainte en 500
-    `MRD-REST-003`, pas 409. Le test (`deux_personnalisations_du_meme_ecran_sont_refusees`)
-    verrouille le refus (jamais 201, jamais 422) sans statuer sur le code. Le 409 appartient
-    au contrat miryad-core — ratifier là-bas ou amender ici.
-  [ ] Le 409 de doublon (index partiel) n'est pas encore documenté côté frontend (le
+  [ ] `dashboards.rs` : colonnes `project_id` / `sandbox_id` (à la place de `project` /
+    `sandbox`), règles g et h dans les hooks (`before_create`, `before_update` interrogent la
+    base par la connexion fournie), marqueur `009`.
+  [ ] Le refus de doublon `009` n'est pas encore documenté côté frontend (le
     bouton « personnaliser » sur écran déjà personnalisé doit faire un PUT, pas un POST) —
     à poser avec la spec frontend G3.
 
 Done when:
-  Les cinq Scenarios ont leurs tests DB réels (`real_db` + `rest::core`, motifs
+  Les six Scenarios ont leurs tests DB réels (`real_db` + `rest::core`, motifs
     ./project_workflows.sdd) et passent ; les marqueurs sont uniques dans le crate
     (grep `VNL-APP-DSH-`).

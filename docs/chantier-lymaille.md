@@ -165,7 +165,10 @@ Code, **séquentiel**, après A2 et la spec correspondante :
 
 - [x] **G4 — Modèle, registre, défauts, résolution** (`app/src/dashboards/`), entité, migration, ressource, route `resolve`.
 - [x] **G5 — Types** : export ts-rs vers `packages/protocol/src/generated/`, job CI `tsrs` étendu.
-- [ ] **G6 — Moteur de rendu et widgets standard** (après G5) : un widget à la fois, chacun avec ses tests.
+- [ ] **G4b — Aligner code et tests sur les specs `dashboards` amendées** (à faire AVANT G3/G6). Source : les tâches `[ ]` de
+  `app/src/dashboards/*.sdd`, `app/src/db/entities/dashboards.sdd`, `app/src/migration/m20261113_000001_*.sdd` et
+  `app/src/error.sdd` ; les décisions vivent dans ces specs, pas ici.
+- [ ] **G6 — Moteur de rendu et widgets standard** (après G5 et G4b) : un widget à la fois, chacun avec ses tests.
 - [ ] **G7 — Écrans par défaut** : accueil, projet et vue d'ensemble de sandbox en définitions par défaut ; retrait de
   `HomeDashboard.vue`, `ProjectDashboard.vue` et des specs et tests associés (`DEC-7`). `FR-9` (tableau éphémère) attend B8.
 

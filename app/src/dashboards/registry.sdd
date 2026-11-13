@@ -55,6 +55,9 @@ Structure:
   vérifie que « `config` est un objet JSON » (`Must`) — pas la grammaire du schéma.
 
 Must:
+  Ne porter que la SOURCE de données d'un type, jamais son rythme de rafraîchissement : les
+    rythmes de `FR-10` (sondage des runs à 10 s tant qu'un run est actif, flux d'états des
+    sandboxes) appartiennent au frontend.
   Lister EXACTEMENT les dix types du tableau — `known("scripted")` doit rendre `None`
     tant que `app/widgets` n'est pas ouverte (`FR-6` : « réservé au registre » = le nom est
     pris, pas le type).
@@ -94,9 +97,6 @@ Tasks:
   [?] Besoins de `chat` : `(0,0)` suppose que le widget prend le contexte de l'écran
     courant (`app/sessions` — le chat n'a pas de sélecteur) ; `OI-1` du DSD (widget vs
     colonne de conversation) peut le retirer de la grille. Ratifier avec la vague D/G3.
-  [?] Rythmes de rafraîchissement de `FR-10` (sondage runs 10 s) : laissés au frontend
-    (choix posé ici, le registre ne porte que la SOURCE) — confirmer avec la spec
-    frontend G3.
 
 Done when:
   Les trois Scenarios ont leurs tests ; le tableau est relu contre `FR-6` à chaque

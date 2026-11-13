@@ -27,10 +27,10 @@ Exposes:
   @ResolveQuery — { @scope: `String`, `#[serde(default)]` @project: `Option<String>`,
     `#[serde(default)]` @sandbox: `Option<String>` } (les paramètres absents valent `None` ;
     `scope` absent → 400 par la désérialisation axum, hors contrat de marqueur ici).
-  @Resolved — JSON `{"origin": "default" | "custom", "dashboard": {…@DashboardDef…}}` —
-    `dashboard.id` : l'id de la ligne pour `custom`, `null` pour `default` ; le `dashboard`
-    porte `scope`/`kind`/`project`/`sandbox` de l'ÉCRAN résolu (enveloppés dans la réponse,
-    pas dans la définition stockée).
+  @Resolved — la réponse, déclarée par `./model.sdd` (`@Resolved`, `@DashboardView`,
+    `@Origin`) : `{"origin": "default" | "custom", "dashboard": {…}}` — `dashboard.id` : l'id
+    de la ligne pour `custom`, `null` pour `default` ; le `dashboard` porte `scope`,
+    `project` et `sandbox` (NOMS) de l'ÉCRAN résolu, pas du JSON stocké.
   @validate_definition — importée de `./mod.sdd` (`pub(crate)`-accessible) : le garde-fou
     `FR-3` PARTAGÉ — appelée ici en défense en profondeur à la lecture d'une ligne
     stockée ; la garde d'écriture contractuelle est le hook de
@@ -41,11 +41,13 @@ Exposes:
 Accepts:
   - Écran accueil : `scope=home`, `project` et `sandbox` IGNORÉS si présents (pas d'erreur —
     le frontend n'en envoie pas).
-  - Écran projet : `scope=project` + `project` non vide ; `sandbox` ignoré. `project` absent
-    ou vide → `VNL-APP-DSH-008` (écran impossible, jamais un défaut à la place).
-  - Écran sandbox : `scope=sandbox` + `sandbox` non vide ; `project` ignoré (la vue
-    d'ensemble dérive son projet de la sandbox elle-même).
-  - `scope` inconnu (`"global"`, casse fausse) → `VNL-APP-DSH-008`.
+  - Écran projet : `scope=project` + `project` non vide, nom d'un projet de l'appelant ;
+    `sandbox` ignoré. Paramètre absent, vide ou projet inconnu de l'appelant →
+    `VNL-APP-DSH-010` (jamais un défaut à la place).
+  - Écran sandbox : `scope=sandbox` + `sandbox` non vide, nom d'une sandbox de l'appelant ;
+    `project` ignoré : la vue d'ensemble est celle du PROJET de la sandbox, déduit d'elle.
+    Sandbox absente, vide ou inconnue de l'appelant → `VNL-APP-DSH-010`.
+  - `scope` inconnu (`"global"`, casse fausse) → `VNL-APP-DSH-010`.
 
 Returns:
   - Personnalisation trouvée (ligne `kind=custom` de l'appelant sur cet écran) → `origin:
@@ -59,16 +61,23 @@ Returns:
 
 Raises:
   - @AppError::Forbidden/401 par @AuthUser hors session (contrat `../auth`, pas ici).
-  - @AppError::InternalError `VNL-APP-DSH-008` (400) : scope inconnu ou écran impossible.
+  - @AppError::DashboardScreenInvalid `VNL-APP-DSH-010` (400) : scope inconnu, écran impossible,
+    projet ou sandbox inconnu de l'appelant.
+  - @AppError::InternalError `VNL-APP-DSH-008` (500) : défaut livré absent ou illisible (faute
+    du serveur, jamais de la requête).
   - @AppError::InternalError (500) : `DbErr` par `?` (`VNL-DB-006` de `../../error.sdd`) ;
     définition stockée invalide → marqueur `VNL-APP-DSH-001..006` embarqué dans le message.
 
 Handles:
-  - Requête exacte (SeaORM) : `filter(owner_id = appelant) AND scope = s AND kind =
-    'custom' AND project ≡ p AND sandbox ≡ b` où `≡` est la comparaison NULL-safe du scope
-    (home : les deux NULL ; project : `project = p` et sandbox NULL ; sandbox : `sandbox =
-    b` et project NULL) — un `IS NOT DISTINCT FROM` en PostgreSQL, l'équivalent SQLite par
-    deux branches `IS NULL`/`EQ` (contracté par le test des deux moteurs).
+  - Traduction des noms en identifiants sous l'identité de l'appelant : le projet par
+    `vanyline_projects` (nom, owner), la sandbox par `vanyline_sandboxes` (nom, owner) puis
+    son projet. Requête exacte (SeaORM) : `owner_id = appelant AND scope = s AND kind =
+    'custom' AND project_id ≡ p` où `≡` est la comparaison NULL-safe du scope (home :
+    `project_id` NULL ; project et sandbox : `project_id = <projet de l'écran>`) — deux
+    branches `IS NULL`/`EQ`, équivalentes sur les deux moteurs. La colonne `sandbox_id` de la
+    ligne n'est JAMAIS un critère de résolution (elle n'est qu'une information).
+  - Le `dashboard` rendu pour `custom` porte, dans `sandbox`, le NOM de la sandbox demandée
+    (l'écran résolu), pas celui de `sandbox_id`.
   - Ligne `complementary` JAMAIS sollicitée ici : un tableau complémentaire s'ouvre par
     l'API générique (le widget `dashboards` le liste, `FR-5`) — `resolve` ne connaît que
     `custom` et le défaut.
@@ -79,7 +88,9 @@ Must:
   Utiliser `@validate_definition` en lecture d'une ligne trouvée, avec journalisation
     @tracing::error! du marqueur (la corruption n'est pas silencieuse).
   Rendre la définition du défaut par `./defaults.sdd::default_for` — aucune copie de
-    composition ici.
+    composition ici. Un scope sans défaut est `VNL-APP-DSH-008` (500, journalisé), pas 010.
+  Ne jamais rendre un identifiant interne (id de projet, de sandbox) : l'écran se décrit par
+    ses noms.
   Traiter l'absence de personnalisation comme le CHEMIN NORMAL (test dédié, pas un
     sous-produit du test de présence).
 
@@ -93,13 +104,13 @@ Must not:
 
 Scenario: sans personnalisation le défaut est rendu avec l'origine default
   Given une base migrée sans aucune ligne `dashboards` pour l'appelant
-  When `GET /api/dashboards/resolve?scope=project&projet=…` (paramètre `project`)
+  When `GET /api/dashboards/resolve?scope=project&project=…` (projet existant de l'appelant)
   Then 200 `{"origin":"default","dashboard":…}` et le `dashboard` est celui de
     `defaults.sdd` (widgets et ids stables), `id` null
 
 Scenario: la personnalisation de l'appelant prime
-  Given une ligne `kind=custom, scope=project, project="p1"` de l'appelant (insert via
-    l'entité, hook exercé)
+  Given une ligne `kind=custom, scope=project` sur le projet « p1 » de l'appelant (insert
+    via l'entité, hook exercé)
   When la résolution du même écran est demandée
   Then 200 `origin:"custom"`, `dashboard.id` = id de la ligne, widgets = ceux stockés
     (aucun widget du défaut ajouté)
@@ -115,11 +126,24 @@ Scenario: rendre les défauts revient au défaut
     bouton « rendre les défauts »)
   Then la résolution suivante rend `origin:"default"` (`AC-3`, bout en bout)
 
-Scenario: écran impossible et scope inconnu refusent 008
-  Given `scope=project` sans `project`, et `scope=global`
-  When les deux résolutions sont demandées
-  Then les deux rendent le marqueur `VNL-APP-DSH-008` (400) — jamais le défaut accueil en
-    repli
+Scenario: la vue de sandbox est celle du projet
+  Given une personnalisation `scope=sandbox` du projet « p1 », écrite depuis la sandbox
+    « s1 », et une seconde sandbox « s2 » du même projet
+  When l'écran sandbox est résolu pour « s2 »
+  Then `origin:"custom"` : la personnalisation du projet s'applique à toutes ses sandboxes ;
+    `dashboard.sandbox` vaut « s2 », `project` vaut « p1 »
+
+Scenario: écran impossible et scope inconnu refusent 010
+  Given `scope=project` sans `project`, `scope=project` sur un projet inconnu de l'appelant,
+    `scope=sandbox` sur une sandbox d'un autre utilisateur, et `scope=global`
+  When les quatre résolutions sont demandées
+  Then les quatre rendent 400 avec le marqueur `VNL-APP-DSH-010` — jamais le défaut accueil
+    en repli, jamais la confirmation qu'une ressource d'autrui existe
+
+Scenario: un défaut livré absent est une faute du serveur
+  Given un scope sans défaut (cas de test, aucun scope livré n'en manque)
+  When le défaut est demandé à la résolution
+  Then 500 avec le marqueur `VNL-APP-DSH-008` journalisé en error
 
 Scenario: une ligne stockée corrompue est visible, pas silencieuse
   Given une ligne `custom` insérée en contournant le hook (SQL brut de test) dont la
@@ -131,21 +155,17 @@ Scenario: une ligne stockée corrompue est visible, pas silencieuse
 Depends on:
   @axum (@Query, @Json), @crate::AppState (db via @MiryadAuthState), @AuthUser
     (`../auth`), ./model.sdd, ./defaults.sdd, ../db/entities/dashboards.rs (Entity,
-    Column), ../../error.sdd (@AppError).
+    Column), ../db/entities/projects.sdd et ../db/entities/sandboxes.sdd (traduction des
+    noms d'écran en identifiants, lecture seule), ../../error.sdd (@AppError).
 
 Tasks:
   [ ] Le Scenario « rendre les défauts revient au défaut » supprime en test par
     `Entity::delete_by_id` au lieu du DELETE de l'API générique que dit son `When`
     (validator G4, 2026-11-13) — le Then est asserté, le bout-en-bout strict (voie
     `rest::core::delete`) reste à faire.
-  [?] Forme exacte de la réponse (`{origin, dashboard}` avec clés d'écran à l'intérieur de
-    `dashboard` porté par la réponse, DSD `DEC-5` « ASSUMPTION ») — figée ici, miroir TS en
-    G3/G5 ; validée avec le moteur de rendu frontend.
-  [?] 400 vs 500 pour `VNL-APP-DSH-008` : `Raises` écrit « @AppError::InternalError (400) »
-    mais le barème de `../../error.sdd` rend `InternalError` en 500. Le test
-    (`ecran_impossible_et_scope_inconnu_refusent_008`) est écrit sur 500 + marqueur. Soit
-    réaffecter la variante (variante « requête de l'utilisateur », 400), soit amender
-    `Raises` en 500 — ratifier.
+  [ ] `resolve.rs` : traduction nom → identifiant (projet, sandbox → projet), requête par
+    `project_id`, `AppError::DashboardScreenInvalid` (`010`) à la place de l'`InternalError`
+    de `008`, types de réponse importés de `./model.rs`.
 
 Done when:
-  Les six Scenarios ont leurs tests DB réels (`real_db`, deux identités) et passent.
+  Les huit Scenarios ont leurs tests DB réels (`real_db`, deux identités) et passent.

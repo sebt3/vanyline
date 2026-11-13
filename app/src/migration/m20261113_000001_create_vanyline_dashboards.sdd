@@ -4,8 +4,8 @@ Platform: Rust/vanyline-app — SeaORM MigrationTrait
 
 Purpose:
   Crée `vanyline_dashboards`, table des définitions portées (`DEC-3` du DSD
-  `dsd/app/dashboards.md`) : colonnes de clé (owner, scope, kind, project, sandbox),
-  libellé, définition JSON. Aucune donnée insérée — les défauts sont codés
+  `dsd/app/dashboards.md`) : colonnes de clé (owner, scope, kind, projet), sandbox
+  d'origine (information), libellé, définition JSON. Aucune donnée insérée — les défauts sont codés
   (`../../dashboards/defaults.sdd`, `DEC-2`). Fichier neuf, conception.
 
 Owns:
@@ -16,29 +16,36 @@ References:
   ./mod.sdd — chaîne d'application, table de suivi, règle « ne pas modifier un `up`
     appliqué », politique de rollback `[?]`
   ../m20261023_000002_create_vanyline_sandboxes.rs — précédent (FK miryad_users, JSONB en
-    dur, index)
+    dur, index) et table `vanyline_sandboxes` (cible de `sandbox_id`)
+  ../db/entities/projects.sdd — table `vanyline_projects` (cible de `project_id`)
 
 Must:
   `up` : `CREATE TABLE IF NOT EXISTS "vanyline_dashboards"` — colonnes exactement :
     `id` `IntegerType` `auto_increment` PK ; `owner_id` `IntegerType` non null, FK anonyme
     `@ForeignKey::create()` → `miryad_users.id` `@ForeignKeyAction::Cascade` (même motif
     que les sœurs — un utilisateur supprimé emporte ses personnalisations) ;
-    `scope` `StringType` non null ; `kind` `StringType` non null ; `project`
-    `StringType` NULL ; `sandbox` `StringType` NULL ; `title` `StringType` non null ;
+    `scope` `StringType` non null ; `kind` `StringType` non null ; `project_id`
+    `IntegerType` NULL, FK → `vanyline_projects.id` `Cascade` (un projet supprimé emporte
+    ses tableaux) ; `sandbox_id` `IntegerType` NULL, FK → `vanyline_sandboxes.id`
+    `SetNull` (une sandbox supprimée n'emporte rien : la personnalisation appartient au
+    projet) ; `title` `StringType` non null ;
     `def` en dur `@ColumnType::JsonBinary` (rendu `JSONB` PostgreSQL, typage dynamique
     SQLite — précédent m20261005_000004 pour les colonnes JSON, commentaire à citer).
-  Puis UN index partiel dans ce même `up` : `@Index::create()` `.name("idx_dashboards_custom_screen")`
-    `.unique(true)` sur `(owner_id, scope, project, sandbox)`, `.partial()` WHERE
-    `kind = 'custom'` ( SeaORM `Index::partial` sur un `Select` de la table, condition
-    litérale) — un seul `custom` par écran et par owner ; les `complementary` multiples
-    passent (`FR-5`).
-  `down` : `DROP TABLE "vanyline_dashboards"` seul (l'index partiel tombe avec la table),
+  Puis UN index d'unicité des personnalisations, dans ce même `up`, en SQL brut IDENTIQUE
+    sur les deux moteurs : `CREATE UNIQUE INDEX idx_dashboards_custom_screen ON
+    vanyline_dashboards (owner_id, scope, COALESCE(project_id, 0)) WHERE kind = 'custom'` —
+    un seul `custom` par écran et par owner ; les `complementary` multiples passent (`FR-5`).
+    Pourquoi une expression : une clé NULL ne collide jamais dans un index unique
+    (`NULL != NULL`), un index sur `(owner_id, scope, project_id)` laisserait passer des
+    doublons sur l'écran d'accueil ; `COALESCE(project_id, 0)` est sûr car aucun projet n'a
+    l'identifiant 0. Les deux moteurs supportent index d'expressions et `WHERE`.
+  `down` : `DROP TABLE "vanyline_dashboards"` seul (l'index tombe avec la table),
     sans `IF EXISTS` (politique des sœurs, `[?]` de `./mod.sdd`).
   S'enregistrer EN FIN de chaîne dans `@Migrator::migrations` (timestamp `20261113`
     croissant après `m20261023_000002`) et être la SEPTIÈME des migrations de l'app
     (`./mod.sdd` amendé à cette tâche).
-  Dépendre du seul migrateur miryad-core en amont (FK `miryad_users`) — aucune FK vers les
-    tables retirées C2/C3, aucune autre table de l'app.
+  Dépendre en amont du migrateur miryad-core (FK `miryad_users`) et des tables de l'app
+    `vanyline_projects` et `vanyline_sandboxes` — aucune FK vers les tables retirées C2/C3.
   Compiler sous le harnais : aucun `unwrap`/`expect`/panic en dehors de `cfg(test)`.
 
 Must not:
@@ -51,45 +58,37 @@ Must not:
   Modifier ce `up` une fois appliqué sur une base de développement (`./mod.sdd` règle
     Phase 3) : toute évolution passe par une migration suivante.
 
-Scenario: la table naît avec ses colonnes et son index partiel
+Scenario: la table naît avec ses colonnes et son index d'unicité
   Given `real_db()` (migrateurs miryad-core puis app)
   When le schéma de `vanyline_dashboards` est inspecté (PRAGMA/information_schema des
     deux moteurs)
   Then les huit colonnes existent avec nullabilité et types du `Must`, et l'index
-    `idx_dashboards_custom_screen` est UNIQUE et partiel (WHERE `kind='custom'` visible
-    dans la définition SQLite)
+    `idx_dashboards_custom_screen` est UNIQUE, sur l'expression `COALESCE(project_id, 0)`, avec
+    `WHERE kind='custom'` visible dans sa définition
 
-Scenario: le partiel garde sa promesse sur les deux moteurs
-  Given deux inserts SQL bruts `custom` sur le même écran `(owner, project)` et un insert
-    `complementary` sur le même projet
-  When les trois sont exécutés
-  Then le troisième `custom` est rejeté (contrainte), le `complementary` passe ; la FK
-    emporte tout par CASCADE à la suppression de l'utilisateur
+Scenario: l'unicité garde sa promesse sur les deux moteurs
+  Given un `custom` du même owner sur l'écran d'accueil, puis un second ; un `custom` sur le
+    projet « p1 » ; un `custom` sur un AUTRE projet ; un `complementary` sur « p1 »
+  When les inserts SQL bruts sont exécutés
+  Then le second `custom` d'accueil est rejeté (contrainte) ; le `custom` d'un autre projet
+    passe (pas de sur-restriction), le `complementary` passe
+
+Scenario: les suppressions suivent les FK
+  Given une personnalisation `scope=sandbox` du projet « p1 » avec `sandbox_id` = « s1 »
+  When la sandbox « s1 » est supprimée, puis le projet « p1 », puis un utilisateur ayant des
+    lignes
+  Then la ligne subsiste avec `sandbox_id` NULL après la première, disparaît avec le projet, et
+    les lignes de l'utilisateur disparaissent par CASCADE
 
 Depends on:
   @sea_orm_migration, @`miryad_users` (FK cible par `iden` — enum local `@sea_orm(iden =
     "miryad_users")`, précédent des sœurs).
 
 Tasks:
-  [ ] Le Scenario « le partiel garde sa promesse » ne vérifie pas l'absence de
-    sur-restriction : un `custom` sur un écran DIFFÉRENT du même owner doit passer
-    (validator G4, 2026-11-13) — ajouter l'insertion et son assertion.
-  [?] L'index partiel n'existe pas côté PostgreSQL via le builder SeaORM si
-    `.partial()` n'émet pas le WHERE attendu — le test des deux moteurs tranche ; repli
-    éventuel : deux index partiels émis en `Schema::raw` par moteur (à éviter). Constat
-    G4 : `.partial()` n'existe pas sous sea-query 1.0 ; le WHERE est bien rendu par le
-    builder SQLite/PostgreSQL (`ConditionalStatement::and_where`), mais VOIR l'entrée
-    suivante, qui prime.
-  [?] Clé NULL dans l'UNIQUE — trou dans le `Must` : posé sur `(owner_id, scope, project,
-    sandbox)` avec `project`/`sandbox` NULLABLES, l'index ne rejette RIEN sur aucun écran —
-    une clé NULL ne collide jamais, `NULL != NULL` (première passe TDD : un second `custom`
-    `project='p1', sandbox=NULL` est accepté, prouvé en test). Repli APPLIQUÉ dans l'`up` :
-    index d'expressions en SQL brut, DDL IDENTIQUE sur les deux moteurs — `CREATE UNIQUE
-    INDEX … (owner_id, scope, COALESCE(project, ''), COALESCE(sandbox, '')) WHERE
-    kind = 'custom'` (les deux moteurs supportent index d'expressions + WHERE partiel).
-    Ratifier ce `Must` (ou un autre codage des clés, ex : `''` plutôt que NULL à
-    l'écriture — écarté ici, déplace le problème dans le hook).
+  [ ] `m20261113_000001_create_vanyline_dashboards.rs` : colonnes `project_id` / `sandbox_id`
+    et leurs FK, index sur `COALESCE(project_id, 0)`, nouveaux Scenarios. `up` modifié en
+    place car jamais déployé : les bases de développement et de test sont à recréer.
 
 Done when:
-  Les deux Scenarios ont leurs tests (`../migration/` harnais `real_db`) et passent ;
+  Les trois Scenarios ont leurs tests (`../migration/` harnais `real_db`) et passent ;
   `./mod.sdd` compte sept migrations.

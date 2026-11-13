@@ -35,10 +35,10 @@ Exposes:
     résolution et pour les définitions éphémères (`FR-9`), jamais requis à la
     désérialisation (`#[serde(default)]` → `Custom` n'est pas le défaut : le défaut serde
     est posé par chaque consommateur explicite, cf. `Must`).
-  @Layout — `pub struct` { @columns: `u16` } ; la grille standard vaut `12`
-    (`FR-1` : « grille de 12 colonnes ») ; `columns` est une donnée de la définition
-    (l'éditeur de grille du frontend s'y cale), bornée à l'écriture par la règle
-    d'`../db/entities/dashboards.sdd`. `Default` = `{ columns: 12 }`.
+  @Layout — `pub struct` { @columns: `u16` } ; la grille vaut toujours `12`
+    (`FR-1` : « grille de 12 colonnes »). Le champ reste dans la forme `{layout, widgets}`
+    pour que la grille puisse évoluer sans changer le format ; toute autre valeur est
+    refusée à l'écriture (`./mod.sdd`, `VNL-APP-DSH-004`). `Default` = `{ columns: 12 }`.
   @Widget — `pub struct` { @id: `String`, `#[serde(rename = "type")]` @widget_type:
     `String`, @config: `serde_json::Value`, @x: `u16`, @y: `u16`, @w: `u16`, @h: `u16` }.
     `config` est un objet JSON dont la grammaire appartient au type déclaré
@@ -50,12 +50,32 @@ Exposes:
     désérialisation tolérante des consommateurs ; le JSON STOCKÉ (colonne `def`) ne porte
     que `{layout, widgets}` — la colonne `title` de la ressource fait foi côté persistance
     (cf. `../db/entities/dashboards.sdd`).
-  @DASHBOARD_GRID_COLUMNS — constante `pub u16 = 12` : la borne haute structurelle de la
-    grille utilisée par le hook de validation et les défauts ; `Layout::columns` peut la
-    porter autrement (définition importée) mais AUCUN défaut livré ne le fait.
+  @DASHBOARD_GRID_COLUMNS — constante `pub u16 = 12` : l'unique valeur légale de
+    `Layout::columns`, utilisée par la validation et les défauts.
+  @Origin — `pub enum` serde `snake_case` : `Default` (aucune personnalisation, défaut livré),
+    `Custom` (personnalisation de l'appelant) — exactement deux. Mêmes derives que `@Scope`.
+  @DashboardView — `pub struct` : le tableau effectif rendu par `./resolve.sdd` — { @id:
+    `Option<i32>` (id de la ligne pour `custom`, `None` pour `default`), @title: `String`,
+    @scope: `@Scope`, @project: `Option<String>` et @sandbox: `Option<String>` (NOMS d'écran,
+    jamais les identifiants internes), @layout: `@Layout`, @widgets: `Vec<@Widget>` }.
+    `scope`, `project`, `sandbox` sont ceux de l'ÉCRAN résolu, pas du JSON stocké ; pour un
+    écran de sandbox, `project` est le projet de la sandbox. Derives `Debug`, `Clone`,
+    `Serialize`, `Deserialize`, `TS`.
+  @Resolved — `pub struct` { @origin: `@Origin`, @dashboard: `@DashboardView` } : la réponse
+    de `GET /api/dashboards/resolve` (`DEC-5`), forme unique côté Rust et TypeScript.
   @serializes_within_limit(def, max_bytes) — fonction utilitaire `pub(crate)` :
     sérialise et compare la longueur à `max_bytes` (sert la borne 64 Kio du hook sans
     dupliquer `serde_json` ailleurs).
+
+Must:
+  Porter la forme de la réponse de résolution (`@Resolved`, `@DashboardView`, `@Origin`) avec
+    les types de définition : `./resolve.sdd` la construit, il ne la déclare pas, de sorte que
+    l'export TypeScript n'a qu'une source.
+  Exporter tous les types publiés dans UN SEUL fichier agrégé `dashboard-domain.ts` (la chaîne
+    `export_chat_event_ts`/`export_host_event_ts` agrège déjà par domaine ; ts-rs 12 n'exporte
+    pas par type sans attributs `export_to` ni gestion des imports croisés). Toute évolution de
+    ce périmètre passe par CE fichier `.sdd`, jamais par une instruction donnée en cours de
+    session à un agent.
 
 Must not:
   Contenir de dépendance à `sea_orm`, `axum`, `miryad_core` ou à la base : ces types sont
@@ -74,6 +94,13 @@ Structure:
   ~120 lignes : cinq types (+ constante + utilitaire), derives serde/ts-rs, un module
   `#[cfg(test)] mod tests` (scénarios ci-dessous). Aucun `impl` comportemental hors
   derives, `Default` de `Layout` et `FromStr`/`Display` de `Scope`.
+
+Scenario: la réponse de résolution porte les noms d'écran
+  Given un `@Resolved` d'origine `Custom` pour un écran de sandbox (projet « p1 »,
+    sandbox « s1 », id `Some(7)`)
+  When il est sérialisé
+  Then le JSON porte `origin: "custom"` et `dashboard.scope: "sandbox"`, `project: "p1"`,
+    `sandbox: "s1"`, `id: 7` — aucun identifiant interne de projet ou de sandbox
 
 Scenario: aller-retour serde stable de la forme FR-1
   Given une `@DashboardDef` complète (deux widgets dont un `markdown`, grille 12, id
@@ -99,7 +126,8 @@ Scenario: export ts-rs des formes publiées
   # vanyline-app depuis B8 — rien à changer dans .github/workflows/, hors commentaire).
   Given le crate compilé avec la feature `ts-rs`
   When le test d'export est exécuté
-  Then le fichier généré déclare `DashboardDef`, `Widget`, `Layout`, `Scope`, `Kind` et la
+  Then le fichier généré déclare `DashboardDef`, `Widget`, `Layout`, `Scope`, `Kind`,
+    `Origin`, `DashboardView`, `Resolved` et la
     déclaration de `Widget` porte `type` comme clé du type de widget (pas `widget_type`)
     And le fichier agrégé ne porte AUCUNE ligne `import type` (ts-rs 12 en émet par type
     vers des frères inexistants en fichier unique — le test les filtre et l'asserte ;
@@ -111,21 +139,11 @@ Depends on:
     — le fichier généré COMMITÉ par le test d'export de CE fichier (G5).
 
 Tasks:
-  [!] Périmètre de l'export : UN fichier agrégé `dashboard-domain.ts` pour les cinq types
-    (chaîne du dépôt : `export_chat_event_ts`/`export_host_event_ts` agrègent déjà par
-    domaine ; ts-rs 12 n'a pas d'export par type sans attributs `export_to` + gestion des
-    imports croisés). Une instruction survenue EN COURS DE SESSION avec un sous-agent ne
-    peut pas amender ce contrat : les amendements passent par CE fichier .sdd seulement.
-    (Leçon G5, 2026-11-13.)
   [x] G5 — export ts-rs effectif vers `../../../packages/protocol/src/generated/` et job CI
     `tsrs` vérifiant la fraîcheur : FAIT 2026-11-13 (le job couvrait déjà vanyline-app
     depuis B8 ; commentaire de .github/workflows/test.yml mis à jour).
-  [?] `Layout.columns` : laissé comme donnée libre bornée [1,24] par le hook, ou champ
-    supprimé tant que tout vaut 12 (`OI-2` du DSD — bornes à ajuster à l'usage) ?
-    Proposé : conservé, borné [4,24], défaut 12.
-  [?] `DashboardDef.id` en `Option<i32>` : la réponse de résolution éphémère
-    (`app/ui-actions`, non ouverte) devra rendre `null` — forme confirmée, ou id opaque
-    `String` pour préparer un autre stockage ?
+  [ ] `model.rs` : `Layout.columns` imposé à 12 par la validation ; `Origin`, `DashboardView`
+    et `Resolved` déclarés ici (et non dans `resolve.rs`), exportés dans `dashboard-domain.ts`.
 
 Done when:
   Les trois Scenarios ont leurs tests taggués et passent ; le type est exporté en

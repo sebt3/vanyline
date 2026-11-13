@@ -32,14 +32,18 @@ Exposes:
       3. ids de widgets uniques → `VNL-APP-DSH-005`
       4. chaque `widget_type` `registry::known` → `VNL-APP-DSH-003`
       5. chaque `config` est un objet JSON → `VNL-APP-DSH-006`
-      6. coordonnées dans la grille (`x < colonnes`, `w ≥ 1`, `x + w ≤ colonnes`,
-      `w ≤ 64`, `h ∈ [1, 64]`, `y < 4096`) → `VNL-APP-DSH-004`
-    où `colonnes = def.layout.columns` borné `[4, 24]` (hors bornes → 004).
+      6. grille et coordonnées → `VNL-APP-DSH-004` : `layout.columns` vaut 12 ; chaque widget a
+      `w ≥ 1`, `x + w ≤ 12`, `h ∈ [1, 64]`, `y < 4096`.
+    La grille est fixe (`FR-1`). `h ≤ 64` et `y < 4096` sont des garde-fous de rendu (une
+    définition de 24 widgets ne peut pas déborder la pagination du moteur), pas des règles
+    du DSD ; ils ne se relâchent qu'avec une décision du DSD.
     La fonction ne PANIQUE pas et ne lit ni DB ni registre dynamique.
   @DASHBOARD_MAX_WIDGETS — `pub const usize = 24` ; @DASHBOARD_MAX_BYTES —
     `pub const usize = 65_536` : les deux bornes `OI-2` du DSD, une seule définition.
 
 Must:
+  Porter @validate_definition dans `mod.rs` : ni l'entité ni `resolve` ne sont propriétaires
+    d'une règle qu'elles partagent.
   Rester sans état : aucune fonction ne capture de connection, de config ou de
     registre mutable (`DEC-1` : le registre est statique).
   Évaluer les règles DANS L'ORDRE ci-dessus — la granularité des marqueurs sert au
@@ -68,9 +72,8 @@ Depends on:
   ./model.sdd (types), ./registry.sdd (`known`), @serde_json (mesure de taille).
 
 Tasks:
-  [?] Emplacement de @validate_definition : `mod.rs` (choix posé — ni l'entité ni resolve
-    ne peuvent être « propriétaires » d'une règle qu'ils partagent) ou fichier séparé
-    `validate.rs` ? Ratifier à l'usage.
+  [ ] `mod.rs` : la règle 6 impose `columns = 12` et `w ≤ 12` (plus de borne `[4, 24]` ni de
+    `w ≤ 64`) ; mise à jour de la fonction et de ses tests.
 
 Done when:
   Les deux Scenarios ont leurs tests (testable sans DB) ; l'entité et resolve appellent

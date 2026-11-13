@@ -84,11 +84,15 @@ Hors périmètre :
 
 - **FR-1 - MUST:** Un tableau est `{id, scope, kind, project?, title, layout, widgets[]}` : `scope` ∈ `home`, `project`, `sandbox` ;
   `kind` ∈ `default`, `custom`, `complementary`, `ephemeral` ; un widget est `{id, type, config, x, y, w, h}` sur une grille de
-  12 colonnes ; `config` est un objet JSON validé par le type (`FR-4`).
+  12 colonnes, toujours (`layout.columns` vaut 12) ; `config` est un objet JSON validé par le type (`FR-4`). Pour les scopes
+  `project` et `sandbox`, `project` désigne le projet de l'écran : la personnalisation de la vue d'ensemble de sandbox est
+  celle du **projet**, partagée par ses sandboxes (`app#BR-6`). Une personnalisation de scope `sandbox` retient en plus, à
+  titre d'information, la sandbox depuis laquelle elle a été écrite (`sandbox?`, vide quand cette sandbox est supprimée).
     - **Source:** `app#Glossaire` (tableau de bord, widget)
     - **Verified by:** `AC-1`
 
-- **FR-2 - MUST:** Pour un écran donné (`scope`, projet éventuel, sandbox éventuelle), l'application résout le **tableau effectif** :
+- **FR-2 - MUST:** Pour un écran donné (`scope`, projet éventuel ; pour une sandbox, le projet de cette sandbox), l'application
+  résout le **tableau effectif** :
   la personnalisation de l'utilisateur pour cet écran si elle existe, sinon le tableau par défaut livré avec l'application. Rendre
   les défauts à l'état d'origine supprime la personnalisation.
     - **Source:** `app#BR-6`
@@ -176,8 +180,9 @@ Hors périmètre :
 
 - **DEC-3 - Les définitions sont des `MiryadResource` d'un propriétaire**
     - **Decision:** une ressource `dashboards` de miryad-core (REST, MCP, OpenAPI, module `resources` de lymaille), lecture et
-      écriture `OwnerOnly` ; la définition est stockée en colonnes de clé (`scope`, `kind`, `project`) plus une colonne JSON
-      (`miryad-core#DEC-17`). L'agent de configuration l'écrit par le module `resources` sous le droit de l'utilisateur, sans
+      écriture `OwnerOnly` ; la définition est stockée en colonnes de clé (`scope`, `kind`, projet référencé par identité) plus une
+      colonne JSON (`miryad-core#DEC-17`). Supprimer un projet supprime ses tableaux ; supprimer une sandbox ne supprime rien
+      (la sandbox retenue à titre d'information est alors vidée). L'agent de configuration l'écrit par le module `resources` sous le droit de l'utilisateur, sans
       route propre.
     - **Consequences:** aucune API CRUD maison ; seule la **résolution** (`FR-2`) est une route de `app`.
     - **Source:** `miryad-core#DEC-14`, `DEC-17`, `DEC-21`
