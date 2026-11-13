@@ -77,6 +77,10 @@ Handles:
   /sandbox/src/mcp.rs l.104, 143, 178).
 
 Must:
+  Porter le relais de santé du code EN INTERNE (les deux outils santé, via @SandboxAccess de
+    `../workflow/steps/mod.sdd`, texte borné à 8 KiB) : l'app n'a aucune route REST de relais
+    `code-health` ; si le frontend en demande une, elle consommera CES fonctions sans les
+    dupliquer.
   Appeler les mêmes fonctions de service que les routes REST.
   Vérifier la propriété avant toute action sur un objet nommé par le client.
   Borner toutes les sorties.
@@ -87,11 +91,6 @@ Must not:
   Accepter un nom d'Owner ou de namespace du client.
 
 Tasks:
-  [!] Le relais REST `code-health` n'existe dans AUCUNE route de l'app (grep
-    api/ + main.sdd 2026-10-11) : les deux outils santé portent le relais EN
-    INTERNE via @SandboxAccess (../workflow/steps/mod.sdd), texte borné 8 KiB ;
-    si une route REST de relais est demandée plus tard (frontend), elle devra
-    consommer CES fonctions, pas les dupliquer.
   [ ] Rattraper à la passe cluster : les outils projets/sandboxes dont le
     dernier maillon est @VnlK8sClient (liste/création/suppression/lecture CR,
     création de projet `meme_logique_que_rest`) ne sont pas verrouillables hors

@@ -58,8 +58,7 @@ Structure:
   uniquement parce que @make_app doit construire un @AppState complet).
   Le module de test construit un @Router autonome
   `Router::new().route("/me", get(handler_me))`
-  avec un @AppState figé (config littéral, @test_auth_state de `../auth/mod.rs`,
-  cookie_key `[0u8; 64]`) et frappe la route via @tower::@ServiceExt::oneshot —
+  avec un @AppState figé (config littéral, @test_auth_state de `../auth/mod.rs`) et frappe la route via @tower::@ServiceExt::oneshot —
   précédent réutilisable pour les Scenarios non encore écrits.
 
 Accepts:
@@ -232,8 +231,8 @@ Tasks:
 
 Scenario: GET /me sans session retourne 401
   Given un @Router `Router::new().route("/me", get(handler_me))` avec
-    @with_state sur un @AppState de test (config figé, @test_auth_state,
-    cookie_key `[0u8; 64]`) comme construit par @make_app du fichier
+    @with_state sur un @AppState de test (config figé, @test_auth_state)
+    comme construit par @make_app du fichier
   When `GET /me` est adressé sans cookie ni header @Authorization via
     @tower::@ServiceExt::oneshot
   Then la réponse a le statut @StatusCode::UNAUTHORIZED, et le corps du

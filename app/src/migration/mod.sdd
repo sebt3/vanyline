@@ -30,6 +30,15 @@ Can read:
   ../db/test_support.rs
 
 Must:
+  Tenir les migrations pour irréversibles en production : les `down()` (un `drop_table` par
+    enfant) n'existent que pour les tests d'enregistrement ; le runtime n'appelle ni `down`,
+    ni `down_to`, ni `fresh`, et aucun Scenario de rollback n'est exigé.
+  Garder deux historiques séparés : la table de suivi de miryad-core est
+    `seaql_migrations_miryad_core` (source de miryad-core 0.3.1), celle de l'app
+    `seaql_migrations_app` ; un test affirme que chacune ne contient que ses versions.
+  Laisser l'ordre miryad-core → app protégé par la séquence de `../main.rs` (FK `miryad_users`,
+    non appliquées en SQLite en mémoire, vérifiées sur PostgreSQL réel) : pas de garde-fou
+    supplémentaire.
   Exiger que `@Migrator::migrations` retourne exactement sept migrations, dans l'ordre du
     vec, cet ordre étant l'ordre d'application SeaORM (chaque migration est enregistrée par
     son nom dans la table de suivi avant la suivante) :
@@ -124,20 +133,6 @@ Tasks:
     ressynchronisés), 7 tests SQL bruts `migration::system_migrations` verts dont
     rejet de l'unicité `(owner_id, system_key)` cross-owner, sémantique NULL du
     composite, `down` vérifiant colonnes ET index absents.
-  [?] Politique d'irrémédiabilité : les sept enfants implémentent chacun un `down()` =
-      `drop_table` ; le runtime n'appelle ni `down`, ni `down_to`, ni `fresh` — depuis
-      W0 (2026-10-10) DEUX tests d'enregistrement appellent `Migrator::down`
-      (`down_supprime_les_tables`, sqlite en mémoire), ce qui fait de `down` un chemin
-      testé mais jamais nominal. Le `down` nominal est-il le contrat voulu, ou
-      faut-il déclarer les migrations irréversibles en production (rouler les
-      `down`/interdire tout rollback) ? À trancher avec Sébastien — aucun `Scenario` de
-      rollback n'est dérivé tant que ce n'est pas décidé.
-  [?] Nom exact de la table de suivi de miryad-core (défaut `seaql_migrations` ?) : le
-      crate n'est pas lisible ici ; nécessaire pour un test affirmant que les deux
-      historiques ne se mélangent pas.
-  [?] L'ordre miryad-core → app n'est protégé que par la séquence de code de `../main.rs`
-      : en SQLite en mémoire (tests) les FK ne sont pas appliquées, l'ordre n'est vérifié
-      qu'en PostgreSQL réel. Faut-il le contracter davantage (test, garde-fou) ?
   [x] Dériver un test du Scenario « les sept migrations s’appliquent dans l’ordre exact
       enregistré » — FAIT en C3 du chantier lymaille (2026-11-13, validator vert) : le test
       assertion exactement les 6 versions dans l'ordre (rowid) + absence explicite des 9

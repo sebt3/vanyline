@@ -13,10 +13,11 @@ Purpose:
   pas seulement leur préfixe, est le contrat (cf. `Exposes`/`Scenario`).
   Le triplet {variables requises + variables posées par le controller} forme le contrat
   de déploiement entre le reconciler Application (../../controller/src/application.rs,
-  env du Deployment `app`) et ce fichier. Les variables vides ou malformées passent ici
+  env du Deployment `app`) et ce fichier. Une variable présente mais vide vaut une variable
+  absente (`FOO=""` ≡ `FOO` non posée) : une requise vide échoue ici en nommant la variable,
+  une optionnelle ou à défaut retombe sur son absence. Les variables malformées passent ici
   et ne font échouer le processus qu'ensuite, dans ./main.rs (cookie, listen addr) ou
-  miryad-core/sea-orm (OIDC, DB) — ce décalage fail-fast est le comportement actuel,
-  documenté tel quel, pas un contrat de validation de ce fichier.
+  miryad-core/sea-orm (OIDC, DB) — ce fichier ne valide pas le contenu des valeurs.
   Fichier isolé : un seul contrat, pas de regroupement.
 
 Owns:
@@ -86,8 +87,7 @@ Accepts:
       @u64 de secondes, converti en @std::time::@Duration::from_secs. Jamais d'échec :
       absente, vide (`""`) ou non parseable (`"abc"`, `"12.5"`, négatif) ⇒ le défaut `5`
       s'applique (même règle « jamais d'échec » que les autres variables à défaut, avec
-      le parse en plus — la valeur vide n'est pas conservée ici, contrairement aux
-      requis/optionnels).
+      le parse en plus).
     `OIDC_TIMEOUT_SECS` (défaut `15`) → @Config::oidc_timeout, même contrat de parse et
       de repli que `OIDC_CONNECT_TIMEOUT_SECS`, défaut `15`.
       (Arbitrage Sébastien 2026-10-05 : timeouts du client OIDC configurables par env —
@@ -99,8 +99,8 @@ Accepts:
     `STATIC_DIR` (défaut `"./static"`) → racine du @ServeDir serving la SPA (./main.rs).
     `VNL_WORKFLOW_LISTEN` (défaut `"0.0.0.0:9080"`) → @Config::workflow_listen en @String
       brut, même motif que @listen_addr (aucun parse en @SocketAddr ici — consommateur
-      ./workflow/runtime.sdd) ; la valeur présente vide est CONSERVÉE (`""`, jamais
-      remplacée par le défaut — same rule que `LISTEN_ADDR`).
+      ./workflow/runtime.sdd) ; vide ≡ absente : le défaut s'applique, comme pour
+      `LISTEN_ADDR`.
   Variables optionnelles — @env::var(…).ok(), absente ⇒ @None :
     `OIDC_CA_CERT` → @Config::oidc_ca_cert (PEM de la CA de l'émetteur, transmis tel quel
       à miryad-core via @oidc_config).
@@ -142,9 +142,11 @@ Accepts:
       (30 à 45 min de compilation et de tests), un sous-agent de 40 min n'est donc jamais
       interrompu par le plafond (`AC-8`). Même contrat de parse et de repli que
       `OIDC_TIMEOUT_SECS` (jamais d'échec, défaut sur valeur invalide).
-  Valeur présente vide (`FOO=""`) : @env::var réussit → traitée comme PRESENTE pour les
-    requises (champ @String vide dans le @Config), et comme `Some("")` pour les
-    optionnelles. Cf. `Tasks`.
+  Valeur présente vide (`FOO=""`) ≡ absente, pour TOUTES les variables : une requise vide
+    échoue avec le message (et le marqueur) de son absence ; une variable à défaut retombe
+    sur son défaut ; une optionnelle vaut @None (jamais `Some("")`). Valeur non-Unicode : une
+    requise échoue avec son marqueur et le message « <NOM> is not valid unicode » (distinct
+    de « is required ») ; une à défaut ou optionnelle retombe sur son absence.
 
 Returns:
   @from_env — @Ok(@Config) intégralement peuplé dès que les six requises sont présentes,
@@ -181,23 +183,14 @@ Handles:
     OIDC) ; l'environnement n'est lu qu'à cet instant — modifier une variable en cours
     de vie du processus est sans effet (le @Config cloné dans @AppState fait foi jusqu'au
     redémarrage du pod).
-  Fail-fast diffééré (comportement actuel, frontières hors du fichier) : une requise
-    vide (`DATABASE_URL=""`, `OIDC_ISSUER_URL=""`, …) passe @from_env puis fait échouer
-    ./main.rs plus loin — connexion DB (`"VNL-DB-003"` + exit 1), client OIDC
-    (`"VNL-AUTH-004"` + exit 1) — avec un marqueur qui ne dit plus quelle variable est
-    en cause. `LISTEN_ADDR` non parseable → `"VNL-CFG-008"` + exit 1 (./main.rs).
-    `COOKIE_SECRET` de moins de 64 octets (après repli octets bruts si non-base64) →
-    `"VNL-CFG-005: COOKIE_SECRET must be at least 64 bytes"` + exit 1 (./main.rs) : le
-    marqueur `"VNL-CFG-005"` est donc émis par deux fichiers pour deux causes
-    distinctes (absence ici, longueur là) — cf. `Tasks`.
-  `OIDC_SCOPES=""` : la variable étant présente, le défaut ne s'applique pas, la découpe
-    de la chaîne vide produit `[""]` — un scope vide unique, transmis tel quel à
-    miryad-core. Idem un segment vide en tout position (`"openid,"` → `["openid", ""]`).
-    Comportement verrouillé en Scenario, validité OIDC à trancher (`Tasks`).
-  Optionnel vide : `OIDC_CA_CERT=""` → `Some("")` (et idem `VNL_K8S_NAMESPACE` — déjà
-    questionné sous ./k8s.sdd — , `VNL_APPLICATION_NAME`, les quatre `VNL_DEFAULT_*`) :
-    un Some("") atteint le consommateur (miryad-core pour la CA, @discover pour le
-    namespace, @ensure_owner pour les défauts de stockage). Normalisation à trancher.
+  Échecs différés hors du fichier : `LISTEN_ADDR` non parseable → `"VNL-CFG-008"` + exit 1
+    (./main.rs) ; `COOKIE_SECRET` de moins de 64 octets (après repli octets bruts si
+    non-base64) → `"VNL-CFG-007: COOKIE_SECRET must be at least 64 bytes"` + exit 1
+    (./main.rs). Chaque marqueur `VNL-CFG-*` désigne une seule cause : `005` est « COOKIE_SECRET
+    is required », `007` « COOKIE_SECRET trop court ».
+  `OIDC_SCOPES` : les segments vides sont écartés après découpe et trim (`"openid,"` →
+    `["openid"]`) ; si la liste résultante est vide (variable absente, vide ou faite de
+    séparateurs), le défaut `"openid,email,profile"` s'applique.
   Consommation lazy des champs K8s : @Config::k8s_namespace n'est lu qu'à la première
     découverte du client (./k8s.sdd) ; application_name et les quatre default_*
     uniquement dans la branche de création lazy de @ensure_owner (./api/owners.rs) —
@@ -213,8 +206,11 @@ Must:
   Échouer avec le message EXACT (caractère par caractère, préfixe + `": "` + texte) de
     `Exposes` pour chacune des six variables requises absentes, dans l'ordre de
     déclaration du littéral quand plusieurs manquent.
-  Appliquer `split(',')` + @trim + @collect aux scopes FOURNIS comme au défaut ; le
-    défaut exact est `"openid,email,profile"` (trois scopes, dans cet ordre).
+  Appliquer `split(',')` + @trim + filtre des segments vides aux scopes FOURNIS comme au
+    défaut ; le défaut exact est `"openid,email,profile"` (trois scopes, dans cet ordre), pris
+    aussi quand la liste fournie est vide.
+  Traiter une valeur présente vide comme absente, pour toutes les variables (requises : échec
+    nommant la variable ; à défaut : défaut ; optionnelles : @None).
   Retourner `"0.0.0.0:8080"` et `"./static"` comme défauts littéraux de
     respectivement `LISTEN_ADDR` et `STATIC_DIR`, sans jamais les valider.
   Mapper @oidc_config champ à champ (six clones + @Some du secret + deux @Duration de
@@ -225,18 +221,17 @@ Must:
     @Duration::from_secs sur le @u64 parsé, avec repli silencieux sur les défauts 5 / 15
     quand la valeur est absente, vide ou non parseable — jamais de message d'erreur.
   Dériver @Clone sur @Config : @AppState est @Clone et embarque config par valeur.
-  Rester un constructeur unique sans validation sémantique : seule la PRÉSENCE
-    (@env::var en @Ok) est contrôlée sur les requises.
+  Rester un constructeur unique sans validation sémantique : seule la PRÉSENCE non vide
+    est contrôlée sur les requises.
 
 Must not:
   Valider le contenu des valeurs ici : URL OIDC, préfixe `postgres://`, longueur de
     `COOKIE_SECRET`, parseable de `LISTEN_ADDR`, nom de namespace K8s, valeurs
     d'accessMode — tous ces contrôles vivent (ou devraient vivre) ailleurs ; ce fichier
     les ignore tous volontairement aujourd'hui.
-  Traiter une valeur vide comme une absence (requis comme optionnel).
   Réémettre les marqueurs `"VNL-CFG-001"`…`"VNL-CFG-006"` depuis un autre fichier de
-    l'app avec une autre sémantique que « variable d'env absente » (le cas
-    `"VNL-CFG-005"` de ./main.rs est une dette signalée, pas un précédent à imiter).
+    l'app avec une autre sémantique que « variable d'env absente » : un marqueur, une cause
+    (le secret trop court de ./main.rs est `"VNL-CFG-007"`).
   Utiliser @AppError ou ./error.rs pour ces erreurs : @from_env retourne @String.
   Lire l'environnement ailleurs que dans @from_env (ni les consommateurs, ni
     @oidc_config : ils ne touchent que @Config).
@@ -245,65 +240,31 @@ Must not:
     mécaniquement un changement de harnais multi-fichiers).
 
 Depends on:
-  std::env — @env::var et sa sémantique (@Err sur absente ET non-Unicode, @Ok sur vide).
+  std::env — @env::var et sa sémantique (@Err sur absente ET non-Unicode, @Ok sur vide :
+    ce fichier traite le vide comme l'absence).
   miryad-core (../Cargo.toml, version `0.3.1`, `default-features = false`, feature
     `swagger-ui`) — @miryad_core::auth::OidcConfig (8 champs, toujours en 0.3.1, redirects
     retirés, timeouts obligatoires) ; consommé par ./main.rs::@OidcClient::new.
   ./main.rs — unique appelant de @from_env/@oidc_config au démarrage ; validations
-    différées downstream (`"VNL-CFG-008"`, longueur du cookie `"VNL-CFG-005"`) et
+    différées downstream (`"VNL-CFG-008"`, longueur du cookie `"VNL-CFG-007"`) et
     exit(1) ; @AppState qui clone @Config.
-  ./k8s.rs — consommateur de k8s_namespace (./k8s.sdd, y compris son `[?]` sur
-    `VNL_K8S_NAMESPACE=""`).
+  ./k8s.rs — consommateur de k8s_namespace (`None` quand `VNL_K8S_NAMESPACE` est vide).
   ./api/owners.rs — consommateur de application_name et des quatre default_* dans
     @ensure_owner (branch conditionnelle @ProjectDefaults).
   ../../controller/src/application.rs — producteur cluster des variables
     `OIDC_REDIRECT_URL`, `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`, `VNL_DEFAULT_*`
     du Deployment `app` (contrat ../../controller/src/application.sdd).
-  ../../cfgstore/src/error.sdd — co-titulaire de l'espace de noms `"VNL-CFG-*"` (cf.
-    `[!]` dans `Tasks`).
+  ../../cfgstore/src/error.sdd — co-titulaire de l'espace de noms `"VNL-CFG-*"` jusqu'au
+    retrait du crate cfgstore (règle de `../../vanyline.sdd` : un espace par crate).
 
 Tasks:
   [x] Variables du moteur de workflow (2026-10-04) — FAIT 2026-10-10 (validation W0 :
     les 4 variables contractées ci-dessus — 3 en optionnelles, `VNL_WORKFLOW_LISTEN` en
     défaut `0.0.0.0:9080` vide conservé ; 3 tests `from_env_workflow_*` portant les
     Scenario ci-dessous ; 133 tests app, clippy -D warnings VERT, validator-PASS).
-  [!] Collision d'espace de noms `"VNL-CFG-*"` avec vanyline-cfgstore — cohérence avec
-    le `[?]` de ../../cfgstore/src/error.sdd : ./config.rs (001–006) et ./main.rs (005
-    bis, 008) émettent EN DUR les mêmes marqueurs que @CfgStoreError::001…010 pour des
-    sémantiques sans rapport (absences d'env vs erreurs de store de configuration).
-    Règle « un espace `"VNL-CFG-*"` par crate » à confirmer, ou renommer les marqueurs
-    de l'app (ex: `VNL-ENV-*`) — une règle à poser dans vanyline.sdd. NON TRANCHÉ, à
-    décider avec Sébastien dans les deux specs à la fois ; les Scenarios ci-dessous
-    verrouillent les chaînes actuelles telles quelles.
-  [?] `"VNL-CFG-007"` n'est émis nulle part dans l'app (séquence 001–006 ici, 008 dans
-    ./main.rs) : trou historique (code supprimé ?) à documenter comme réservé, ou code
-    manquant à identifier.
-  [?] Double usage de `"VNL-CFG-005"` au sein de l'app : absence de `COOKIE_SECRET`
-    (ici) et secret trop court (./main.rs) partagent le marqueur. Faut-il dissocier
-    (ex: 005 = absente, 007 = trop courte — 007 étant justement libre) ?
-  [?] `OIDC_SCOPES=""` → `vec!["".to_string()]` (un scope vide) et non le défaut
-    `"openid,email,profile"` ; segments vides en position médiane/finale conservés de
-    même (`"openid,"` → deux entrées dont `""`). Normaliser (filtrer les segments vides,
-    retomber sur le défaut si liste vide) ou considérer que l'opérateur ne pose jamais
-    ces valeurs (le reconciler Application ne pose jamais `OIDC_SCOPES` — défaut libre
-    côté déploiement) ?
-  [?] Requis vide accepté : `OIDC_ISSUER_URL=""` (et idem les cinq autres) passe
-    @from_env puis fait mourir le processus avec `"VNL-AUTH-004"`/`"VNL-DB-003"`, des
-    marqueurs qui ne nomment plus la variable fautive. Le fail-fast mérite-t-il une
-    règle « requis = non vide » dans @from_env (nouveaux messages à verrouiller), ou
-    le comportement actuel est-il l'accident assumé ?
-  [?] Valeur non-Unicode sur une requise : @env::var échoue, le message dit « is
-    required » alors que la variable EST posée. Distinguer ou accepter (cas rarissime) ?
-  [?] `Some("")` sur les optionnels (`OIDC_CA_CERT`, `VNL_K8S_NAMESPACE`,
-    `VNL_APPLICATION_NAME`, les quatre `VNL_DEFAULT_*`) : normalisation `"" → @None` à
-    ce niveau (règle générale une fois pour toutes) ou contrat « ne jamais poser une de
-    ces variables vide » ? Le `[?]` `VNL_K8S_NAMESPACE` de ./k8s.sdd se résoudrait ici.
-  [?] Les deux littéraux `"/#/"` de @oidc_config sont dupliqués à l'identique dans
-    ./main.rs (@MiryadAuthState.post_login_redirect/post_logout_redirect construits à la
-    main) : deux sources de vérité pour la même constante SPA. Les faire converger
-    (constante ou lecture depuis @oidc_config) ? — RÉSOLU 2026-10-05 par miryad-core
-    0.1.5 : @OidcConfig ne porte plus les redirects, @MiryadAuthState (./main.rs) en est
-    la seule source de vérité ; ce fichier ne contient plus aucun littéral `"/#/"`.
+  [ ] `config.rs` : vide ≡ absent pour toutes les variables, scopes filtrés (défaut si liste
+    vide), message « is not valid unicode » ; Scenarios ci-dessous (anciens Scenarios de
+    conservation du vide remplacés).
   [x] Timeouts OIDC configurables par env (arbitrage Sébastien 2026-10-05, miryad-core
     0.1.5) : @Config::oidc_connect_timeout / @Config::oidc_timeout (@Duration), variables
     `OIDC_CONNECT_TIMEOUT_SECS` (défaut 5) et `OIDC_TIMEOUT_SECS` (défaut 15) selon le
@@ -313,16 +274,10 @@ Tasks:
     `from_env_timeout_non_parseable_defaut`, `from_env_timeouts_classees_a_defaut`,
     `oidc_config_copie_les_huit_champs` (remplace `oidc_config_maps_all_fields`).
     Batterie validator verte 2026-10-05.
-  [?] Stratégie de test de @from_env : @env::var se pilote au niveau du processus, et
-    l'edition 2024 rend @env::set_var/@remove_var `unsafe` (le harnais ../../tooling.sdd
-    deny `unsafe_code` — exemption `#[cfg(test)]` à justifier ligne de spec). Tests
-    série/`#[serial]` sur l'env process, ou extraction d'un noyau testable
-    (`from_env_with(f: impl Fn(&str) -> Result<String, …>)`) — choix d'implémentation à
-    valider avant d'écrire les tests. — VALIDÉ Sébastien 2026-10-05 : noyau privé @from_env_with(`read: impl Fn(&str) ->
+  [x] Stratégie de test de @from_env — noyau privé @from_env_with(`read: impl Fn(&str) ->
     @Result<@String, @std::env::@VarError>`), @from_env() déléguant à
-    @from_env_with(@std::env::@var) ; les Scenarios @from_env s'écrivent contre le noyau
-    (fermeture en mémoire, déterministe, parallèle-sûr, zéro `unsafe`, contrat public de
-    @from_env inchangé). Choix d'implémentation, pas de changement de contrat.
+    @from_env_with(@std::env::@var) ; les Scenarios s'écrivent contre le noyau (fermeture en
+    mémoire, déterministe, parallèle-sûr, zéro `unsafe`).
   [x] Convertir chaque Scenario sans test existant en un test taggé par son titre
     (implementer) ; les Scenario timeout sont déjà couverts (voir tâche « Timeouts OIDC
     configurables par env », close). Reste les ~14 Scenario `from_env_*` historiques,
@@ -337,8 +292,6 @@ Tasks:
 Done when:
   Chaque Scenario est couvert par au moins un test taggé par son titre et passe ; les
     six messages exacts sont verrouillés caractère par caractère (pas par `contains`).
-  Les `[?]` et le `[!]` de `Tasks` ont une décision écrite de Sébastien, répercutée ici
-    (et dans ../../cfgstore/src/error.sdd pour la collision), et la spec relue fait foi.
   La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
     verte sur le workspace.
 
@@ -394,13 +347,18 @@ Scenario: from_env_premiere_erreur_en_ordre_de_declaration
     required"` — un seul message, celui du premier champ déclaré manquant, jamais la
     liste des six absences
 
-Scenario: from_env_requise_vide_acceptee
+Scenario: from_env_requise_vide_refusee
   Given un environnement où toutes les requises sont posées et `OIDC_ISSUER_URL=""`
     (présente mais vide)
   When @Config::from_env est appelé
-  Then le résultat est un @Ok
-  And son champ oidc_issuer_url est la chaîne vide (la présence seule fait foi, la
-    validation sémantique est différée hors du fichier)
+  Then le résultat est l'@Err de l'absence de `OIDC_ISSUER_URL` (même message, même
+    marqueur `VNL-CFG-001`)
+
+Scenario: from_env_requise_non_unicode
+  Given un environnement où `OIDC_ISSUER_URL` est posée avec une valeur non-Unicode
+  When @Config::from_env est appelé
+  Then l'@Err porte `VNL-CFG-001` et le texte « OIDC_ISSUER_URL is not valid unicode »,
+    distinct de « is required »
 
 Scenario: from_env_defaut_listen_addr
   Given un environnement complet en requises, `LISTEN_ADDR` absente
@@ -424,12 +382,12 @@ Scenario: from_env_scopes_decoupe_et_trim
   Then le champ oidc_scopes est `["openid", "email", "profile"]` — chaque segment
     @trim()é, le trim s'applique à la valeur fournie et non seulement au défaut
 
-Scenario: from_env_scopes_vide_donne_un_scope_vide
-  Given un environnement complet en requises et `OIDC_SCOPES=""` (présente vide)
-  When @Config::from_env est appelé
-  Then le champ oidc_scopes est `[""]` — un unique segment vide, PAS le défaut
-    `"openid,email,profile"` (verrouille le comportement actuel, validité à trancher
-    via le `[?]` associé dans `Tasks`)
+Scenario: from_env_scopes_vide_donne_le_defaut
+  Given un environnement complet en requises et `OIDC_SCOPES=""`, puis `OIDC_SCOPES=","`,
+    puis `OIDC_SCOPES="openid,"`
+  When @Config::from_env est appelé dans chaque cas
+  Then oidc_scopes vaut `["openid", "email", "profile"]` dans les deux premiers cas (liste
+    vide ⇒ défaut) et `["openid"]` dans le troisième (segment vide écarté)
 
 Scenario: from_env_optionnels_absents_aucun
   Given un environnement complet en requises et en variables à défaut, et les SEPT
@@ -449,12 +407,11 @@ Scenario: from_env_optionnels_lus_tels_quels
     normalisation (`application_name == Some("app-principale")`,
     `default_home_access_mode == Some("ReadWriteOnce")`, idem les cinq autres)
 
-Scenario: from_env_optionnel_vide_some_vide
-  Given un environnement complet en requises et `OIDC_CA_CERT=""` (posée vide), les
-    autres optionnelles absentes
+Scenario: from_env_optionnel_vide_vaut_none
+  Given un environnement complet en requises et `OIDC_CA_CERT=""`, `VNL_K8S_NAMESPACE=""`,
+    `VNL_APPLICATION_NAME=""` (posées vides), les autres optionnelles absentes
   When @Config::from_env est appelé
-  Then le champ oidc_ca_cert vaut `Some("")` et non @None — verrouille le comportement
-    actuel atteint miryad-core, normalisation à trancher (`Tasks`)
+  Then ces trois champs valent @None et non `Some("")`
 
 Scenario: oidc_config_copie_les_huit_champs
   Given un @Config construit par littéral (fonction `full_config` du module `tests` :
@@ -509,12 +466,12 @@ Scenario: moteur_workflow_fournies_recopiees
   Then les quatre champs @Config recopient les valeurs BRUTES (aucun parse, aucune
     normalisation)
 
-Scenario: moteur_workflow_vide_conservee
-  # Ajouté W0 — porte le test `from_env_workflow_vide_conservee`.
+Scenario: moteur_workflow_vide_vaut_absente
+  # Remplace `moteur_workflow_vide_conservee` ; porte le test `from_env_workflow_vide_vaut_absente`.
   Given les quatre variables posées MAIS VIDES (`FOO=""`)
   When @from_env lit
-  Then les trois optionnels sont `@Some("")` et @Config::workflow_listen est `""`
-    (règle « valeur présente vide = PRÉSENTE », comme `LISTEN_ADDR`)
+  Then les trois optionnels sont @None et @Config::workflow_listen est `"0.0.0.0:9080"` (le
+    défaut), comme `LISTEN_ADDR` vide
 
 Scenario: from_env_timeouts_classees_a_defaut
   Given un environnement complet en requises et en variables à défaut, et les SEPT

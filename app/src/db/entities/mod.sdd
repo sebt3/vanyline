@@ -66,6 +66,3 @@ Tasks:
       `workflow_runs` enregistrés W0 2026-10-10 (validator-PASS).
   [ ] Spec de chaque entité enfant (colonnes, clé primaire, relations, correspondance
       avec les migrations) — en cours, une spec par fichier enfant.
-  [?] Le préfixe de table `vanyline_` est une convention portée par les enfants, pas
-      une contrainte de ./mod.rs : à confirmer comme contrat global (ou non) lors de
-      la spec de `./../mod.sdd` ou de la spec migrations.

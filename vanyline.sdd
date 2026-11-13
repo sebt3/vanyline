@@ -34,6 +34,11 @@ Must:
   le comportement observable du fichier.
   Exiger la batterie complète de vérification (AGENTS.md, et `test.yml` pour la CI) avant
   qu'une `Tasks` passe à `[x]`.
+  Ne spécifier d'une dépendance externe (miryad-core, lymaille, kube…) que NOTRE usage, jamais
+  le crate lui-même : aucune spec miroir de son comportement ; ce que nous en attendons est
+  vérifié par nos propres tests.
+  Réserver un espace de marqueurs `VNL-<X>-*` à chaque crate et attribuer un marqueur à une
+  seule cause : deux erreurs distinctes ne partagent pas un identifiant.
   Garder `packages/protocol/src/generated/` généré par `vanyline-lib` et `vanyline-health`
   (feature `ts-rs` de chacun) : jamais de modification manuelle des types générés.
   Authentifier tout accès HTTP/WebSocket à une sandbox par le SEUL jeton JWT émis par
@@ -172,8 +177,6 @@ Tasks:
     2026-11-07 : parcours des CR `Owner` du namespace d'application puis des namespaces `<app-ns>-<owner>`,
     cf. `dsd/workspaces/identity.md#DEC-5`) ; traduire kube `AlreadyExists` en 409 et `Invalid` en 422 dans
     `app/src/error.rs` avec pré-validation du nom (`DEC-6`), et réécrire les Scenarios de `app/src/api/` qui figent le 500.
-  [?] Watch + resync 60 s, ou resync seul toutes les 30 s (moins de code, adoption jusqu'à 30 s
-    plus lente) ? Contrat provisoire du bloc `Must` : watch + resync 60 s.
   [ ] Modification d'une sandbox (arbitrage 2026-10-23, « option C ») : possible en tout temps,
     sans exiger de suspension et sans redémarrage automatique du Pod. Quand le changement
     demande un redémarrage (toolchains, ressources, image, branche, et tout champ que le

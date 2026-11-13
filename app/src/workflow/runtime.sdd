@@ -48,7 +48,7 @@ Exposes:
     @from_config rend @Ok(@None) SILENCIEUSEMENT seulement si AUCUNE des trois variables
     d'engagement (`VNL_RESTATE_ADMIN_URL`, `VNL_RESTATE_INGRESS_URL`,
     `VNL_WORKFLOW_DEPLOYMENT_URL`) n'est posée (déploiement sans workflows — le moteur est
-    voulu éteint). Dès l'une posée — même vide — le déploiement s'est engagé et la
+    voulu éteint ; une variable vide vaut absente, `./config.sdd`). Dès l'une posée le déploiement s'est engagé et la
     configuration doit être COMPLÈTE : @Err dès qu'une des deux URL `VNL_RESTATE_*`
     manque ou est vide, ou que la deployment URL est à la fois absente ET non dérivable
     (nom d'application ou namespace absents/vide) — la deployment URL posée explicitement
@@ -152,9 +152,9 @@ Scenario: config_partielle_fail_fast
   Then @Err (aucun @None silencieux) — rendu `VNL-WF-001` + exit(1) par ./../../main.rs
 
 Scenario: deployment_non_derable_fail_fast
-  # URL toutes posées mais nom d'Application ou namespace vides ⇒ deployment URL
-  # non dérivable : fail-fast aussi (2026-10-14).
-  Given les trois URL posées et un nom d'application vide
+  # Deployment URL non posée, nom d'Application ou namespace absents (vides ≡ absents) ⇒
+  # deployment URL non dérivable : fail-fast aussi (2026-10-14).
+  Given les deux URL `VNL_RESTATE_*` posées, la deployment URL absente et un nom d'application absent
   When @WorkflowConfigApp::from_config
   Then @Err
 

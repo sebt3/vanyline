@@ -73,6 +73,9 @@ Exposes:
         `"VNL-K8S-001: Cannot reach Kubernetes cluster: {0}"` ; `#[cfg(feature = "k8s")]`
       @VnyError::K8sApiError(String) — `"VNL-K8S-002: Kubernetes API error: {0}"` ;
         `#[cfg(feature = "k8s")]`
+      @VnyError::K8sNotFound(String) — `"VNL-K8S-003: Kubernetes resource not found: {0}"` ;
+        `#[cfg(feature = "k8s")]` ; rendue quand l'apiserver répond 404 — c'est elle, et non le
+        texte d'une `K8sApiError`, qui porte la sémantique « introuvable » vers `app`
   @From<@vanyline_cfgstore::CfgStoreError> pour @VnyError — implémentation manuelle,
     totale (toutes les variantes de la source aboutissent), non panicante :
       @CfgStoreError::Config(msg) → @VnyError::ConfigError(msg) — marqueur `VNL-CFG-001`
@@ -142,8 +145,8 @@ Must:
     byte-identiques à ceux de /cfgstore/src/error.rs : la conversion @From est déclarée
     préservant le rendu pour ces deux variantes (documenté dans les specs sœurs qui citent
     `"VNL-CFG-002"`/`"VNL-CFG-003"` comme marqueurs observés).
-  Gater @VnyError::K8sConfigError et @VnyError::K8sApiError par `#[cfg(feature = "k8s")]`
-    exactement comme le module ./k8s.rs l'est dans ./lib.rs.
+  Gater @VnyError::K8sConfigError, @VnyError::K8sApiError et @VnyError::K8sNotFound par
+    `#[cfg(feature = "k8s")]` exactement comme le module ./k8s.rs l'est dans ./lib.rs.
   Conserver les @From générés par `#[from]` sur @VnyError::IoError et
     @VnyError::JsonError : les fonctions `Result<_, @VnyError>` du crate s'appuient sur `?`.
   Couvrir toutes les variantes de @CfgStoreError par la conversion manuelle, avec
@@ -165,6 +168,9 @@ Must not:
     l'état contractuel est la stringification dans le message (arbitrée en `Tasks`).
 
 Tasks:
+  [ ] `error.rs` : variante @VnyError::K8sNotFound (feature `k8s`) ; `k8s.rs` la produit sur une
+    réponse 404 de l'apiserver (la spec de `k8s.rs` porte ce comportement) ; Scenario
+    `display_exhaustif_des_marqueurs_vnl` étendu à la variante.
   [ ] Ajouter les tests unitaires du module (aucun test n'existe dans ./error.rs ni dans
     le crate pour lui) : un test par Scenario, taggé par son titre.
   [?] Le marqueur `"VNL-LLM-001"` est dupliqué en dur dans ./event.rs
@@ -237,8 +243,8 @@ Scenario: variantes_k8s_reservees_a_la_feature
   Given le crate compilé sans la feature cargo `k8s`
   When `cargo check -p vanyline-lib` s'exécute (puis `--features k8s`)
   Then sans la feature @VnyError compile avec ses 18 variantes et aucune référence
-    possible à @VnyError::K8sConfigError/@VnyError::K8sApiError ; avec la feature les
-    variantes `VNL-K8S-001`/`VNL-K8S-002` existent et s'affichent selon `Exposes`
+    possible à @VnyError::K8sConfigError/@VnyError::K8sApiError/@VnyError::K8sNotFound ;
+    avec la feature les variantes `VNL-K8S-001`/`VNL-K8S-002`/`VNL-K8S-003` existent et s'affichent selon `Exposes`
 
 Scenario: rendu_inverse_des_champs_de_duplicate_name
   Given @VnyError::DuplicateName("agent", "dup")

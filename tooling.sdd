@@ -81,6 +81,9 @@ Must:
   Garder les `mod tests` propres : aucun `#![allow(clippy::unwrap_used,
   clippy::expect_used)]` redondant avec la ligne canonique de la racine — les allows de
   `mod tests` ne survivent que là où la racine ne couvre pas (justification d'une ligne).
+  Un module dédié aux tests (fichier entièrement `#![cfg(test)]`, ex. `app/src/db/test_support.rs`,
+  `app/src/auth/mod.rs`) peut porter l'exemption `#![allow(clippy::unwrap_used,
+  clippy::expect_used)]` à son niveau : il n'existe que sous `cfg(test)`.
   Tenir à **zéro warning imputable au nouveau code** sur tout fichier touché par une tâche
   (`cargo clippy --workspace --all-targets`), la dette préexistante étant tracée en `Tasks`
   ci-dessous et ne devant jamais grossir.

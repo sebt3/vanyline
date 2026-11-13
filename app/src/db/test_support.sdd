@@ -65,6 +65,17 @@ Must:
     joignable ni variable d'environnement de base de données.
   - Retourner une base vide de toute ligne : le seed (users, providers, profils FK…) est à
     la charge de chaque test (ex: `seed_model_profile` dans `../db/entities/agents.rs`).
+  - Épingler la base `sqlite::memory:` sur une seule connexion de pool : chaque connexion SQLite
+    en mémoire a sa propre base privée, le schéma migré ne doit pas disparaître selon la
+    connexion tirée.
+  - Faire de la compatibilité des migrations avec les DEUX moteurs un contrat liant : toute
+    migration de l'app passe sur Postgres (production) ET sur SQLite (ce harnais) ; SQLite n'est
+    pas un simple proxy toléré.
+  - Porter l'exemption `#![allow(clippy::unwrap_used, clippy::expect_used)]` au niveau du
+    module : le fichier entier est `#![cfg(test)]`, ce motif « module de test dédié » est
+    conforme (`../../../tooling.sdd`).
+  - Laisser le Scenario « échec de migration » (paniques de `Raises`) à la revue : aucune
+    injection de migration cassée n'existe et n'est exigée.
   - Rester le seul harnais qui valide les migrations de l'app contre un vrai moteur SQL —
     les tests `MockDatabase` ne détectent pas le SQL invalide.
 
@@ -136,22 +147,6 @@ Scenario: échec de migration = panique à message identifiable
     côté cassé), jamais une `Err` silencieuse
 
 Tasks:
-  [?] `sqlite::memory:` et le pool de connexions sea-orm : selon le comportement du pool,
-    chaque connexion SQLite en mémoire peut avoir sa propre base privée et le schéma
-    migré « disparaître » selon quelle connexion est tirée. Les tests sont verts aujourd'hui
-    mais cette dépendance (taille de pool, URL partagée `mode=memory&cache=shared`) n'est
-    pas fixée par contrat. Trancher avec Sébastien : épingler explicitement (URL shared-cache
-    ou pool à 1 connexion) ou assumer le comportement par défaut des dépendances ?
-  [?] `#![allow(clippy::unwrap_used, clippy::expect_used)]` au niveau module sans
-    `cfg_attr(test, ...)` (le fichier entier est déjà `#![cfg(test)]`) : `tooling.sdd` ne
-    documente l'exemption de la famille panic/unwrap que via `cfg_attr(test, allow(...))`
-    porté par la racine de crate. Ce motif « module de test dédié » est-il conforme, et
-    `tooling.sdd` doit-il le formaliser (il existe aussi dans `../auth/mod.rs`) ?
-  [?] Double compatibilité des migrations Postgres (production) / SQLite (tests) : la
-    fixture fait de SQLite le seul valideur des migrations en CI. La compatibilité des
-    deux dialectes est-elle un contrat liant (toute migration doit passer sur les deux,
-    cf. commentaire de `../migration/mod.rs` « confirmé contre Postgres ET SQLite ») ou
-    SQLite n'est-il qu'un proxy toléré, Postgres étant validé hors CI ?
-  [?] Aucun test ne couvre les paniques de `Raises` (aucune injection de migration
-    cassée n'existe) : le Scenario « échec de migration » est-il à couvrir par un test
-    d'intégration dédié ou reste-t-il un contrat tenu par revue ?
+  [ ] `test_support.rs` : épingler le pool de la base `sqlite::memory:` à UNE connexion (le
+    schéma migré ne doit pas dépendre de la connexion tirée) ; test qui échoue avec un pool
+    plus large.

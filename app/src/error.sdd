@@ -19,9 +19,9 @@ Purpose:
   @VnyError (`VNL-LLM-001`/`VNL-LLM-002`/`VNL-AGT-001` l'étaient aussi ; leurs variantes
   AppError sont retirées en C3 du chantier lymaille) ; en revanche les marqueurs `VNL-CFG-001` à
   `VNL-CFG-008` sont émis EN DUR hors de ce fichier (./config.rs, ./main.rs) pour des erreurs
-  de variables d'environnement sans rapport avec @CfgStoreError — collision de namespace
-  déjà `[?]` dans ../../cfgstore/src/error.sdd, reprise en `[!]` ici (cohérence obligatoire,
-  voir `Tasks`). Un seul fichier, un seul contrat : pas de regroupement.
+  de variables d'environnement sans rapport avec @CfgStoreError — règle de `../../vanyline.sdd` :
+  un espace `VNL-<X>-*` par crate, `app` garde `VNL-CFG-*` (la collision disparaît avec le
+  retrait du crate cfgstore). Un seul fichier, un seul contrat : pas de regroupement.
 
 Owns:
   ./error.rs
@@ -156,14 +156,13 @@ Exposes:
     conversion emballe le @Display COMPLET du @VnyError (`e.to_string()`) dans le payload de
     la variante cible (donc double marqueur systématique, voir `Handles`) :
       @VnyError::K8sConfigError(_) → @AppError::K8sConfigError (statut 502)
-      @VnyError::K8sApiError(s) avec `s.contains("404") || s.contains("NotFound") ||
-        s.contains("not found")` → @AppError::K8sNotFound (404) — heuristic de sous-chaînes
-        sensible à la casse, évaluée sur le SEUL payload `s`, pas sur le @Display complet
-      @VnyError::K8sApiError(_) (sans ces sous-chaînes) → @AppError::K8sApiError (500)
+      @VnyError::K8sNotFound(_) → @AppError::K8sNotFound (404) — variante typée de
+        `vanyline-lib` (feature `k8s`) : aucune détection par sous-chaîne
+      @VnyError::K8sApiError(_) → @AppError::K8sApiError (500), quel que soit son payload
       toute autre variante (`_`) → @AppError::InternalError (500) — y compris
         @VnyError::LlmError, @VnyError::LlmProviderNotFound, @VnyError::UnknownReference :
         la sémantique fine (502/404/422 qu'une variante AppError homonyme eût rendue) est
-        perdue par cette conversion — voir `Tasks`. Depuis C3 du chantier lymaille, cette
+        perdue par cette conversion : fallback inconditionnel voulu. Depuis C3 du chantier lymaille, cette
         conversion ne peut plus rien produire d'autre que ses 4 bras : la variante
         @AppError::UnprocessableReference (seul 422 manuel du crate, posé par le retiré
         ./api/conversations.rs) n'existe plus.
@@ -224,10 +223,9 @@ Accepts:
     n'interpole que le niveau 0 via `{0}`, pas la chaîne des causes.
   @From<@sea_orm::DbErr> accepte toute la famille @sea_orm::DbErr (connexion, requête,
     transaction…) sans distinction : un seul seau `VNL-DB-006`.
-  @From<@vanyline_lib::VnyError> accepte toute variante, y compris les variantes k8s ;
-    l'heuristic `404`/`NotFound`/`not found` est une recherche de sous-chaînes sensible à la
-    casse sur le payload — `"4041"`, un URL de port ou un nom de ressource contenant `404`
-    déclenche le même bras `K8sNotFound` qu'un vrai 404.
+  @From<@vanyline_lib::VnyError> accepte toute variante, y compris les variantes k8s ; le
+    statut 404 ne vient que de la variante typée @VnyError::K8sNotFound, jamais du texte d'un
+    payload.
   @IntoResponse accepte `self` par valeur quel que soit l'état du payload — aucune branche
     d'erreur interne, la fonction ne peut pas échouer.
 
@@ -255,8 +253,8 @@ Handles:
     @From<@sea_orm::DbErr> → `VNL-INT-001: Internal error: VNL-DB-006: {DbErr}`
     @VnyError::K8sConfigError("boom") → `VNL-K8S-001: Kubernetes config error: VNL-K8S-001:
       Cannot reach Kubernetes cluster: boom` — le même marqueur deux fois, corps différents
-    @VnyError::K8sApiError("… 404 …") → `VNL-K8S-003: Kubernetes resource not found:
-      VNL-K8S-002: Kubernetes API error: {payload}`
+    @VnyError::K8sNotFound("x") → `VNL-K8S-003: Kubernetes resource not found: VNL-K8S-003:
+      Kubernetes resource not found: x` — même double titularité que `VNL-K8S-001`
     @VnyError::K8sApiError("boom") → `VNL-K8S-002: Kubernetes API error: VNL-K8S-002:
       Kubernetes API error: boom`
     @VnyError::LlmError("x") → `VNL-INT-001: Internal error: VNL-LLM-001: LLM provider
@@ -295,12 +293,11 @@ Handles:
     (./api/sandboxes.rs::ws_ticket — COLLISION : le marqueur `VNL-SBX-002` désigne aussi
     @AppError::SandboxBranchEmpty, `VNL-SBX-002: branch must not be empty` — voir `Tasks`).
   Marqueurs émis hors @AppError dans le crate (jamais rendus en HTTP par ce fichier) :
-    @AppError::Forbidden partage `VNL-AUTH-004` avec un simple log de ./main.rs (« cannot
-    build miryad-core OIDC client ») ; ./config.rs émet `VNL-CFG-001`…`VNL-CFG-006` et
-    ./main.rs `VNL-CFG-005`/`VNL-CFG-008` + `VNL-DB-003`/`VNL-DB-004`/`VNL-DB-005` +
+    @AppError::Forbidden est seule à porter `VNL-AUTH-004` (le log du client OIDC de ./main.rs
+    est `VNL-AUTH-005`) ; ./config.rs émet `VNL-CFG-001`…`VNL-CFG-006` et
+    ./main.rs `VNL-CFG-007`/`VNL-CFG-008`/`VNL-CFG-009` + `VNL-DB-003`/`VNL-DB-004`/`VNL-DB-005` +
     `VNL-NET-001`/`VNL-NET-002` comme chaînes `Result<_, @String>` ou messages @tracing —
-    hors du type @AppError, mais dans le même espace de marques que lui (voir `[!]` de
-    `Tasks` pour la collision avec ../../cfgstore/src/error.sdd).
+    hors du type @AppError, mais dans le même espace de marques que lui.
   Chemin WebSocket — ./ws/sandbox_state.rs (`ensure_watch_loop`, `run_socket`) propage
     @AppError dans un `Result<_, @AppError>`, et le wrapper non-async
     de chaque socket (`handle_socket`) consomme l'erreur par `if let Err(e) = run_socket(…)
@@ -332,9 +329,13 @@ Must:
     préfixe `VNL-INT-001: Internal error: ` devant.
   Ne plus rien convertir depuis @vanyline_cfgstore::CfgStoreError (retrait C3 acté ; la
     mention de ce @From dans ../../cfgstore/src/error.sdd est caduque — à annoter là-bas).
-  Conserver au @From<@VnyError> ses 4 branches dans l'ordre (K8sConfig → K8sNotFound si
-    sous-chaînes `404`/`NotFound`/`not found` sur le payload → K8sApi → InternalError) et
-    l'emballage de `e.to_string()` complet dans le payload.
+  Conserver au @From<@VnyError> ses 4 branches dans l'ordre (K8sConfig → K8sNotFound → K8sApi
+    → InternalError, par variante typée, jamais par sous-chaîne) et l'emballage de
+    `e.to_string()` complet dans le payload (double marqueur systématique : politique assumée,
+    alignée sur `lib`).
+  Partager les marqueurs `VNL-K8S-001`, `VNL-K8S-002` et `VNL-K8S-003` entre @VnyError et
+    @AppError avec des corps de message différents : double titularité assumée, les deux
+    rendus sont verrouillés par Scenario.
   Conserver le `#[from]` de @AppError::RequestError (source @std::error::Error +
     @From<@reqwest::Error> générés).
   Rester dans les derives `Debug` + @thiserror::Error uniquement et n'émettre aucun
@@ -364,14 +365,6 @@ Must not:
     propagation WS est log-only (./ws/sandbox_state.rs ; ./ws/chat.rs retiré C2).
 
 Tasks:
-  [!] Collision de namespace `VNL-CFG-*` avec ../../cfgstore/src/error.sdd : ./config.rs et
-    ./main.rs émettent EN DUR `VNL-CFG-001`…`VNL-CFG-008` pour des erreurs d'environnement,
-    mêmes marqueurs que @CfgStoreError pour des sémantiques sans rapport — le `[?]` de
-    ../../cfgstore/src/error.sdd couvre déjà le fond ; cette spec en reprend la conclusion
-    à trancher ENSEMBLE (règle « un espace `VNL-CFG-*` par crate » ou renommage des
-    marqueurs de l'app). Noter la sur-collision interne à l'app : `VNL-CFG-005` porte deux
-    messages différents selon ./config.rs (`COOKIE_SECRET is required`) et ./main.rs
-    (`COOKIE_SECRET must be at least 64 bytes`).
   [?] Collision interne `VNL-SBX-002` : @AppError::SandboxBranchEmpty
     (`branch must not be empty`) ET ./api/sandboxes.rs::ws_ticket
     (`sandbox ticket response missing 'ticket'` dans @AppError::InternalError) émettent le
@@ -379,32 +372,15 @@ Tasks:
     FAIT DIVERS 2026-10-14 : `VNL-SBX-004` N'EST PAS libre — plage `004..016` des erreurs
     git de la sandbox (`../../sandbox/src/git.sdd`) ; toute résolution prendra `017+`
     (`017` déjà pris par @AppError::SandboxRelayUnavailable de l'app).
-  [?] Heuristic du @From<@VnyError> : sous-chaînes `404`/`NotFound`/`not found` sensibles à
-    la casse, évaluées sur le payload seul — faux positifs (`"4041"`, tout nom contenant
-    `404`), faux négatifs (`"Not Found"`, `"NOT_FOUND"`). Le lib pourrait typer un
-    @VnyError::K8sNotFound dédié (avec la feature `k8s`) plutôt que deviner par chaîne.
-    À trancher avec ../../lib/src/error.sdd.
-  [?] Perte de sémantique du `_ => InternalError` du @From<@VnyError> : @VnyError::LlmError,
-    @VnyError::LlmProviderNotFound et @VnyError::UnknownReference → 500 (au lieu des
-    502/404/422 que rendaient les variantes AppError homonymes, toutes retirées en C3 du
-    chantier lymaille — la question ne porte plus que sur le déclin 422 de UnknownReference).
-    Fallback inconditionnel voulu (et alors le
-    documenter comme tel) ou mapping à enrichir variante par variante ?
-  [?] Double marqueur systématique des conversions (`VNL-INT-001: … VNL-DB-006: …`,
-    `VNL-K8S-001: … VNL-K8S-001: …`) : politique assumée (alignée cfgstore/lib) ou dette à
-    purger (payload nu + variante porteuse) ?
-  [?] `VNL-K8S-001`/`VNL-K8S-002` portés par deux enums différents avec des corps de message
-    différents : même convention de double titularité que `VNL-CFG-001` (déjà `[?]` entre
-    ../../lib/src/error.sdd et ../../cfgstore/src/error.sdd) ou collision propre aux K8S ?
+  [ ] `error.rs` : mapper @VnyError::K8sNotFound vers @AppError::K8sNotFound et retirer
+    l'heuristique de sous-chaînes ; tests des deux Scenarios ci-dessus (dépend de la variante
+    typée de `../../lib/src/error.sdd`).
   [x] @AppError::UnprocessableReference sans marqueur propre — SOLDÉ en C3 du chantier
     lymaille (2026-11-12) : la variante est retirée (plus aucun constructeur depuis C2),
     la question du marqueur `VNL-REF-001` devient sans objet.
   [x] `VNL-DB-007: context not found` / `VNL-DB-008: created conversation not found` —
     SANS OBJET depuis C2 du chantier lymaille : émis uniquement par ./api/conversations.rs et
     ./ws/chat.rs, retirés avec eux (grep : plus aucune occurrence dans le dépôt).
-  [?] @From<@reqwest::Error> généré par `#[from]` : aucun call-site ne l'utilise par `?`
-    (les appelants `.map_err(AppError::RequestError)` explicitement) — le `#[from]` reste
-    pour @std::error::Error::source() ou est-il de la dette ?
   [ ] Combler les tests du module : les 4 tests existants ne couvrent que 4 des 25 statuts ;
     ajouter un test par Scenario taggé par son titre (21 statuts manquants dont les 14 WFA,
     corps JSON +
@@ -417,10 +393,6 @@ Tasks:
     (2026-11-12) : RETRAIT des deux variantes (avec `#[allow(dead_code)]`), de leurs lignes
     `Exposes`/barème et des gabarits `VNL-AGT-001`/`"{0}"` ; numéros `VNL-AGT-001`,
     `VNL-LLM-001`, `VNL-LLM-002` non réutilisables (politique de la section Must not).
-  [?] Retrait C3 : la dépendance `vanyline-cfgstore` quitte ../Cargo.toml de l'app mais le
-    crate ../../cfgstore/ reste dans le workspace (consommé par ./cli). Les mentions du
-    @From retiré dans ../../cfgstore/src/error.sdd sont à annoter là-bas — fait ici
-    (Depends) côté app ; l'annotation miroir reste à faire côté cfgstore.
 
 Done when:
   Chaque Scenario a son test dédié taggé par son titre et passe.
@@ -429,8 +401,6 @@ Done when:
   Les rendus finaux des 2 @From manuels (doubles marqueurs inclus, caractère par caractère)
     sont assertés (la cohérence croisée avec ../../cfgstore/src/error.sdd est sans objet
     depuis le retrait C3 de @From<@CfgStoreError>).
-  Sébastien a tranché tous les `[?]` et le `[!]` de `Tasks` — la collision `VNL-CFG-*` est
-    résolue en coordination avec ../../cfgstore/src/error.sdd.
 
 Scenario: display_exhaustif_des_variantes_apperror
   # Titre dé-figé 2026-10-11 (was « seize » puis « vingt-trois ») : l'énumération est
@@ -493,28 +463,19 @@ Scenario: conversion_vnyerror_k8s_config_double_marqueur_et_502
     VNL-K8S-001: Cannot reach Kubernetes cluster: boom` (même marqueur deux fois, corps
     différents)
 
-Scenario: conversion_vnyerror_k8s_api_avec_signature_not_found_vers_404
-  Given trois @VnyError::K8sApiError dont le payload contient respectivement `"404"`,
-    `"NotFound"` et `"not found"`, chacune convertie par @From<@vanyline_lib::VnyError>
-  When chacune est rendue par @IntoResponse
-  Then chacune devient un @AppError::K8sNotFound de statut 404, au @Display `VNL-K8S-003:
-    Kubernetes resource not found: VNL-K8S-002: Kubernetes API error: {payload}`
+Scenario: conversion_vnyerror_k8s_not_found_vers_404
+  Given @VnyError::K8sNotFound("x") converti par @From<@vanyline_lib::VnyError>
+  When il est rendu par @IntoResponse
+  Then le statut est 404 (@AppError::K8sNotFound) et le message est `VNL-K8S-003: Kubernetes
+    resource not found: VNL-K8S-003: Kubernetes resource not found: x`
 
-Scenario: conversion_vnyerror_k8s_api_sans_signature_vers_500
-  Given @VnyError::K8sApiError("boom") (payload sans aucune des trois sous-chaînes)
-    converti par @From<@vanyline_lib::VnyError> puis rendu par @IntoResponse
-  When on observe la réponse
-  Then le statut est 500 (@AppError::K8sApiError, pas @AppError::K8sNotFound) et le message
-    est `VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error: boom`
-
-Scenario: heuristic_not_found_insensible_a_la_casse_et_a_faux_positifs
-  Given @VnyError::K8sApiError("Not Found") (casse différente), @VnyError::K8sApiError("port
-    4041 ouvert") (sous-chaîne `404` fortuite), toutes deux converties par
-    @From<@vanyline_lib::VnyError>
-  When chacune est rendue par @IntoResponse
-  Then la première rend 500 (`Not Found` ne matche pas `"not found"` sensible à la casse) et
-    la seconde rend 404 (faux positif `404` dans `4041`) — l'heuristic est documentée comme
-    fragile, son comportement actuel est verrouillé tel quel tant que `Tasks` n'a pas tranché
+Scenario: conversion_vnyerror_k8s_api_vers_500_quel_que_soit_le_payload
+  Given @VnyError::K8sApiError("boom") et @VnyError::K8sApiError("port 4041, not found")
+    convertis par @From<@vanyline_lib::VnyError> puis rendus par @IntoResponse
+  When on observe les réponses
+  Then les deux statuts sont 500 (@AppError::K8sApiError, jamais @AppError::K8sNotFound) et le
+    premier message est `VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error:
+    boom`
 
 Scenario: conversion_vnyerror_autres_variantes_degradees_en_500
   Given @VnyError::LlmError("x") et @VnyError::UnknownReference("agent", "ghost"), chacune

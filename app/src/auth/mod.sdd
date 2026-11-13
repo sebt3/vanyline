@@ -68,7 +68,7 @@ Raises:
   Aucune erreur propagée par les constructeurs eux-mêmes.
   @exchange_code (mock, signature miryad-core 0.3.1 : `code`, `expected_nonce`,
   @PkceCodeVerifier) — retourne toujours une @Err(@AuthError::Oidc) de message
-  `"MRD-TEST-001: mock not used"`, quels que soient les arguments reçus (les trois
+  `"VNL-TEST-001: mock not used"`, quels que soient les arguments reçus (les trois
   arguments sont ignorés) : le mock n'est jamais censé servir un échange réel.
   @verify_bearer (mock, ajouté au trait par miryad-core 0.2.0, inchangé en 0.3.1 : `jwt`) — retourne toujours
   une @Err(@AuthError::Oidc) de message `"MRD-TEST-002: mock not used"`, quel que soit le
@@ -83,7 +83,14 @@ Handles:
 
 Must:
   - En build de production (hors `cfg(test)`), ./mod.rs ne doit contribuer à aucune
-    ligne de code : le module `auth` de l'`app` y est vide.
+    ligne de code : le module `auth` de l'`app` y est vide, ce qui est voulu — le nom `auth`
+    est réservé aux fixtures de test, le comportement d'authentification réel est celui de
+    miryad-core (`../../../vanyline.sdd` : on spécifie notre usage, pas le crate).
+  - Préfixer les messages d'erreur des mocks de test par `VNL-TEST-nnn` : ce préfixe est la
+    convention locale aux tests de l'`app` (`MRD-` appartient à miryad-core).
+  - Utiliser le backend `Sqlite` pour le `MockDatabase` : choix délibéré, les réponses
+    pré-programmées du mock de sea-orm ne dépendent pas du backend, alors que la production
+    est Postgres.
   - @test_auth_state doit être équivalent à appeler @test_auth_state_with_db avec
     `sea_orm::MockDatabase::new(@sea_orm::DatabaseBackend::Sqlite).into_connection()`.
   - L'état construit porte exactement les valeurs figées de `Returns` (clé de cookie
@@ -91,7 +98,7 @@ Must:
     `token_pepper: @TEST_TOKEN_PEPPER`).
   - @authorization_url doit être déterministe : mêmes valeurs à chaque appel.
   - @exchange_code ne doit jamais retourner de succès ; l'identifiant d'erreur
-    `MRD-TEST-001` préfixe le message.
+    `VNL-TEST-001` préfixe le message.
   - @verify_bearer ne doit jamais retourner de succès ; l'identifiant d'erreur
     `MRD-TEST-002` préfixe le message.
   - Les exemptions harnais `#![allow(clippy::unwrap_used, clippy::expect_used)]` restent
@@ -131,7 +138,7 @@ Scenario: Échange de code toujours refusé
   Given un client de test construisant un état via @test_auth_state
   When @exchange_code est appelée avec n'importe quel code et n'importe quel @Nonce
   Then le résultat est `@Err`
-    And le message porte l'identifiant `MRD-TEST-001`
+    And le message porte l'identifiant `VNL-TEST-001`
 
 Scenario: Validation de Bearer toujours refusée
   Given un client de test construisant un état via @test_auth_state
@@ -153,23 +160,6 @@ Tasks:
     déterministe » — faits 2026-10-05 dans le module `scenario_tests` de ./mod.rs
     (variante du libellé « module tests », validée par le validator), un test par
     Scenario taggé par son titre, batterie validator verte.
-  [?] `MRD-TEST-001` : préfixe d'identifiant d'erreur unique (format type `MRD-TEST-nnn`)
-    — AGENTS.md demande un format contractualisé dans la spec concernée. Ce mock est le
-    seul endroit du crate à en porter un ; trancher avec Sébastien : convention locale
-    aux tests de l'`app` ou miroir d'une convention de `miryad-core` (dont la source
-    n'est pas dans ce dépôt).
-  [?] MockDatabase avec backend `Sqlite` alors que la production est Postgres/CNPG :
-    choix délibéré (les réponses pré-programmées de sea-orm mock sont indépendantes du
-    backend) ou héritage à corriger en `Postgres` pour lever une ambiguïté de lecture ?
-  [!] `miryad-core` (v0.3.1, dépendance de registre hors workspace, source absente du
-    dépôt) porte tout le comportement auth réel (@MiryadAuthState, @OidcClientTrait,
-    @AuthError, `auth_router()`). Aucune spec `.sdd` ne couvre ce périmètre dans vanyline :
-    décider avec Sébastien si un contrat miroir (ou une spec amont chez l'éditeur du crate)
-    est requis, sinon cette surface reste non specée alors qu'AGENTS.md l'exige pour tout
-    le code du projet.
-  [?] `mod auth;` dans `../main.rs` produit un module strictement vide en production :
-    confirmer que la structure est voulue (le nom `auth` réservé à du test-only) plutôt
-    que déplacer `test_support` à côté des consommateurs (ex: `../api/test_support.rs`).
 
 Depends on:
   ../main.rs — déclaration `mod auth;` et construction du @MiryadAuthState réel
@@ -177,7 +167,7 @@ Depends on:
   ../db/test_support.rs — partenaire `real_db` pour @test_auth_state_with_db.
   Crate externe `miryad-core` (`miryad_core::auth`) — fournit @MiryadAuthState,
     @OidcClientTrait, @AuthError, @OidcLoginResult ; types et contrats subis, non specés
-    ici (cf. Tasks).
+    ici.
   ../../../tooling.sdd — harnais : exemptions `unwrap_used`/`expect_used` tolérées
     uniquement sous `cfg(test)`.
   ../../../vanyline.sdd — règle une spec `.sdd` par fichier `*.rs`.

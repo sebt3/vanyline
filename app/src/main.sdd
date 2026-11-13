@@ -105,9 +105,6 @@ Exposes:
   @AppState — struct `pub` + @Clone (visibilité limitée au crate : binaire, aucun
     consommateur externe) :
   - `config: @Config` — @./config.rs::@Config (clone propre par champ).
-  - `cookie_key: @cookie::Key` — dérivé de `COOKIE_SECRET` selon le contrat de Returns
-    (64 premiers octets) ; en production, seul consommateur observé : le clone injecté
-    dans @MiryadAuthState au démarrage (cf. Tasks `[?]`).
   - `busy` : RETIRÉ en C2 du chantier lymaille (2026-11-12) — verrou de tour de chat par
     `conversation_id` dont ./ws/chat.rs était le seul consommateur.
   - `workflow: @Option<@workflow::@WorkflowRuntime>` — @None au moteur non configuré,
@@ -145,7 +142,8 @@ Accepts:
     `LISTEN_ADDR` (défaut `"0.0.0.0:8080"`), `STATIC_DIR` (défaut `"./static"`),
     `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`, `VNL_DEFAULT_*` (4).
   - `RUST_LOG` : filtre @tracing_subscriber::EnvFilter ; en l'absence de la variable,
-    filtre par défaut `"vanyline_app=debug,tower_http=debug"` + layer @fmt (sortie
+    filtre par défaut `"vanyline_app=debug"` (aucune couche `TraceLayer` n'est posée : pas de
+    directive `tower_http`) + layer @fmt (sortie
     stdout).
   - `COOKIE_SECRET` : d'abord interprété comme base64 STANDARD ; si le décodage échoue,
     les OCTETS BRUTS de la chaîne servent de matière de clé (les deux formats sont
@@ -173,7 +171,9 @@ Returns:
     (IPv4 et IPv6 ; port `0` autorisé = port éphémère).
   5. Dérivation de la clé de cookie : base64 STANDARD de `COOKIE_SECRET`, repli sur les
     octets bruts au cas où le décodage base64 échoue ; si la matière obtenue fait moins de 64 octets :
-    log `"VNL-CFG-005: COOKIE_SECRET must be at least 64 bytes"` + exit(1) ; sinon
+    log `"VNL-CFG-007: COOKIE_SECRET must be at least 64 bytes"` + exit(1) — y compris pour un
+    base64 valide qui décode en moins de 64 octets : on ne replie jamais sur une entropie
+    réduite, la dissymétrie avec une chaîne non-base64 (acceptée brute) est voulue ; sinon
     @cookie::Key::from des 64 PREMIERS octets (au-delà de 64 octets : tronqué sans
     avertissement).
   6. Connexion DB @sea_orm::Database::connect(`database_url`) — échec : log
@@ -184,9 +184,9 @@ Returns:
     `"VNL-DB-005: app migrations failed: {e}"` + exit(1). L'ordre 7→8 est imposé par
     les FK des dix migrations app vers `miryad_users` (./migration/mod.sdd).
   9. @OidcClient::new(&config.oidc_config()) (await — miryad-core peut contacter
-    l'issuer, comportement interne non lisible, cf. Tasks `[!]`) — échec : log
-    `"VNL-AUTH-004: cannot build miryad-core OIDC client: {e}"` + exit(1).
-  10. Construction @MiryadAuthState { oidc_client: @Arc::new(client), cookie_key: clone,
+    l'issuer, comportement interne de miryad-core non spécifié ici) — échec : log
+    `"VNL-AUTH-005: cannot build miryad-core OIDC client: {e}"` + exit(1).
+  10. Construction @MiryadAuthState { oidc_client: @Arc::new(client), cookie_key (la clé dérivée à l'étape 5, qui ne vit que dans cet état d'auth),
     post_login_redirect: `"/#/"`, post_logout_redirect: `"/#/"` (valeurs FIGÉES en dur
     ici — SEULE source de vérité depuis miryad-core 0.1.5, @OidcConfig ne les porte
     plus), db, secure_cookies: `true` en dur (arbitrage Sébastien 2026-10-05 : l'app
@@ -216,13 +216,13 @@ Returns:
   11. Assemblage du router racine (table ci-dessous, sans I/O).
   12. @tokio::net::TcpListener::bind(listen_addr) — échec : log
     `"VNL-NET-001: failed to bind {addr}: {e}"` + exit(1).
-  13. Log @tracing::info! `"listening on {addr}"` puis @axum::serve(listener, app).
-  En service : @axum::serve boucle tant que le listener vit ; `main` ne retourne jamais
-  de son vivant. Si @serve retournait @Ok (boucle terminée normalement — cas jamais
-  observé, aucun shutdown gracieux n'est branché), le processus s'arrêterait avec le
-  code de sortie 0. En service normal (pod K8s), le processus meurt par signal
-  (SIGTERM/SIGKILL) : aucun @with_graceful_shutdown, aucun handler de signal — cf.
-  Handles et Tasks.
+  13. Log @tracing::info! `"listening on {addr}"` puis @axum::serve(listener, app) avec
+    @with_graceful_shutdown : sur SIGTERM (ou Ctrl-C) l'app cesse d'accepter des connexions,
+    laisse finir les requêtes en vol et ferme proprement les WebSocket (trame de fermeture) dans
+    un délai borné de 25 s, inférieur au `terminationGracePeriod` du déploiement ; passé ce
+    délai, la sortie est forcée. Une sortie par signal, drain terminé, rend le code `0`.
+  En service : @axum::serve boucle tant que le listener vit ; `main` ne retourne qu'après le
+  signal d'arrêt et le drain.
   Table de montage du router racine (ordre d'écriture dans le code ; pour
   `merge`/`nest`/`route`, c'est la spécificité matchit qui résout à l'exécution,
   l'ordre d'écriture n'affectant que la lecture et les messages de panic) :
@@ -230,7 +230,7 @@ Returns:
     extrait ni auth.
   - @merge(@miryad_core::auth::auth_router()) — routes OIDC de miryad-core (chemins
     hors dépôt, non contractés ici — la documentation architecture mentionne le callback
-    `/auth/callback` ; frontière, cf. Tasks `[!]`).
+    `/auth/callback` ; seul notre usage est contracté, pas le crate).
   - 12 @merge(@resource_router::<@Entity, @AppState>()) — CRUD monté en CHEMINS
     COMPLETS `/api/v1/{resource_name}` et `/api/v1/{resource_name}/{id}` (chemins
     attestés par le test de @openapi_spec) : les dix définitions lymaille de
@@ -256,7 +256,7 @@ Returns:
   - @merge des routes lymaille (@crate::sessions de ./sessions/mod.sdd, routeur de
     conversation miryad-core) — chemins COMPLETS sous `/api/v1/lymaille`, mergés à la racine
     comme les @resource_router et déclarés AVANT le @nest `/api` (jurisprudence matchit
-    des segments littéraux sur le wildcard du nest, cf. ./api/mod.sdd Tasks `[?]`) ; aucune
+    des segments littéraux sur le wildcard du nest, vérifiée par le test de ./api/mod.sdd) ; aucune
     route de conversation n'est servie hors de ce préfixe. Depuis C3, il n'existe plus de
     @nest `/api/v1` concurrent — seul le merge en chemins complets monte ce préfixe.
   - @nest(`"/api"`, @api::api_router()) — le préfixe externe est écrit ICI, jamais dans
@@ -264,8 +264,8 @@ Returns:
     est retiré en C3 du chantier lymaille avec @api_v1_router lui-même.
   - @route(`"/api/ws/sandbox-state"`, @get(@ws::sandbox_state::ws_sandbox_state_handler))
     — à la RACINE, déclarée APRÈS les nest (priorité matchit des segments littéraux sur
-    le wildcard interne du nest — mécanisme jamais asserté par un test, cf.
-    ./api/mod.sdd Tasks `[?]`) ; GET uniquement (le handshake WebSocket passe par GET).
+    le wildcard interne du nest — mécanisme asserté par le test « GET `/api/ws/sandbox-state`
+    n'est pas un 404 » de cette spec) ; GET uniquement (le handshake WebSocket passe par GET).
     La route `/api/ws/chat/{conversation_id}` est retirée en C2 du chantier lymaille
     (2026-11-12) : le chat est servi par miryad-core sous `/api/v1/lymaille`
     (./sessions/mod.sdd).
@@ -299,17 +299,17 @@ Raises:
   fatalités sont converties en une ligne @tracing::error! + @std::process::exit(1).
   Identifiants émis par CE fichier, dans l'ordre d'exécution : `VNL-CFG-008`
   (LISTEN_ADDR invalide — la numérotation des variables vient de ./config.rs),
-  `VNL-CFG-005` (COOKIE_SECRET < 64 octets après décodage — même identifiant que le
-  « COOKIE_SECRET is required » de ./config.rs, cf. Tasks `[?]`), `VNL-DB-003` (pool DB),
-  `VNL-DB-004` (migrations miryad-core), `VNL-DB-005` (migrations app), `VNL-WF-001` (moteur de workflow incapable de demarrer, cause `VNL-WF-002..006` ou `MRD-*` imbriquee — W3 2026-10-10, ./workflow/runtime.sdd), `VNL-AUTH-004`
-  (client OIDC — même identifiant que la variante @AppError::Forbidden de ./error.rs,
-  cf. Tasks `[?]`), `VNL-NET-001` (bind), `VNL-NET-002` (`axum::serve` en erreur —
+  `VNL-CFG-007` (COOKIE_SECRET < 64 octets après décodage ; `VNL-CFG-005` reste « COOKIE_SECRET
+  is required » de ./config.rs), `VNL-DB-003` (pool DB),
+  `VNL-DB-004` (migrations miryad-core), `VNL-DB-005` (migrations app), `VNL-WF-001` (moteur de workflow incapable de demarrer, cause `VNL-WF-002..006` ou `MRD-*` imbriquee — W3 2026-10-10, ./workflow/runtime.sdd), `VNL-AUTH-005`
+  (client OIDC — `VNL-AUTH-004` reste la variante @AppError::Forbidden de ./error.rs : un
+  identifiant par erreur), `VNL-NET-001` (bind), `VNL-NET-002` (`axum::serve` en erreur —
   log `"VNL-NET-002: server error: {e}"` + exit(1)).
   Panique possible (exit 101, sans log `VNL-*`) : collision de patterns matchit à
   l'assemblage (deux @merge/@nest/@route produisant le même pattern complet avec la même
   méthode, ex. une route `/api/…` de @api_router qui dupliquerait un chemin complet du
-  @resource_router) — panique AU DÉMARRAGE, jamais une 404 silencieuse ; aucun test ne
-  couvre cette collision (cf. ./api/mod.sdd Tasks `[?]`).
+  @resource_router) — panique AU DÉMARRAGE, jamais une 404 silencieuse ; le test de
+  table de routage de ./api/mod.sdd couvre cette collision.
   Aucun @unwrap/@expect/@panic! dans le chemin de production (harnais
   ../../tooling.sdd — exemptions confinées à la ligne 1 sous `cfg(test)`).
   En dehors de @openapi_spec (total, testé) et de @health (sans effet), rien de ce que
@@ -337,19 +337,20 @@ Handles:
     l'affaire de l'Ingress de l'Application (../../docs/architecture.md). CORS : aucune
     couche CORS n'est posée (même origine via Ingress ; la feature `cors` de tower-http
     est compilée sans usage visible dans ce fichier).
-  Fallback SPA : chemin inconnu (hors routes montées) → fichier sous `STATIC_DIR`, à
-    défaut `index.html` avec le statut servi par @ServeFile. Conséquence du @nest et du
-    fallthrough axum : un chemin inconnu SOUS `/api` ou `/api/v1` (raté interne au
-    router niché) tombe AUSSI dans ce fallback et reçoit le shell SPA (200 HTML), pas un
-    404 JSON — à contracter ou à corriger ? (Tasks `[?]`). Une méthode non enregistrée sur un
-    CHEMIN connu (`PUT /health` p. ex.) répond en revanche 405 (le @MethodRouter répond
+  Fallback SPA : un chemin inconnu hors `/api` → fichier sous `STATIC_DIR`, à défaut
+    `index.html` avec le statut servi par @ServeFile. Un chemin inconnu SOUS `/api` ou `/api/v1`
+    ne retombe JAMAIS dans ce fallback : il rend un 404 JSON `{"error": "VNL-APP-API-001: not
+    found"}` (un appel d'API mal écrit ne doit pas recevoir du HTML). Une méthode non
+    enregistrée sur un CHEMIN connu (`PUT /health` p. ex.) répond 405 (le @MethodRouter répond
     avant tout fallback).
-  Pas de shutdown gracieux : ni @with_graceful_shutdown, ni @tokio::signal — SIGTERM
-    termine le processus par l'action par défaut (requêtes en vol abandonnées, pas de
-    drain pour les mises à jour rolling) ; à contracter ou corriger (Tasks `[?]`).
-  `STATIC_DIR` inexistant au démarrage : aucune vérification anticipée, le démarrage
-    réussit et la première requête ne trouve ni fichier ni `index.html` (404 du
-    fallback) — la configuration cassée n'est visible qu'en service (Tasks `[?]`).
+  `STATIC_DIR` absent ou illisible au démarrage : le démarrage réussit et journalise un
+    @tracing::warn! (identifiant `VNL-CFG-009`) ; ce n'est pas fatal — l'image embarque
+    `/app/static`, et `/health` doit rester servi.
+  CRUD générique de miryad-core : un id inexistant rend 404 et la ligne d'un autre owner 403
+    (ressources `OwnerOnly` : `lymaille_agents`, `lymaille_toolsets`, `lymaille_contexts`,
+    `dashboards`, outil MCP générique) ; un utilisateur peut donc sonder l'existence d'identifiants
+    d'autrui. Assumé : identifiants entiers séquentiels, aucune donnée lisible ; l'uniformisation
+    en 404 relève de miryad-core et n'est pas réécrite ici.
   Consommateurs externes de la table de montage : probes liveness/readiness du
     déploiement K8s sur `GET /health` (`../../deploy/web/deployment.yaml`, port de
     `LISTEN_ADDR` du configmap `0.0.0.0:8080`) ; le frontend (mêmes chemins que
@@ -366,7 +367,7 @@ Must:
     l'identifiant contractuel listé en Raises, puis @std::process::exit(1) — jamais de
     panic, jamais de loop-retry au démarrage.
   Dériver la clé de cookie des 64 premiers octets de la matière (base64 décodé, ou
-    octets bruts si le décodage échoue), et refuser moins de 64 octets par `VNL-CFG-005`.
+    octets bruts si le décodage échoue), et refuser moins de 64 octets par `VNL-CFG-007`.
   Écrire `GET` uniquement sur les deux routes WS racine (le handshake WS est un GET).
   Écrire le préfixe externe `/api` UNIQUEMENT dans le @nest d'ici
     (contrat croisé de ./api/mod.sdd) ; `/api/v1` n'existe que dans les chemins COMPLETS
@@ -390,10 +391,15 @@ Must:
   Garder l'exemption harnais confinée à la ligne 1 `#![cfg_attr(test, allow(...))]`
     (../../tooling.sdd) ; en production : aucun @unwrap/@expect/@panic/@println/@eprintln,
     erreurs loggées via @tracing.
+  Rendre un 404 JSON (`VNL-APP-API-001`) pour tout chemin inconnu sous `/api`, fallback explicite
+    posé avant le @fallback_service SPA.
   Initialiser `k8s` à `None` au démarrage (le consommateur ./k8s.rs possède son
     comportement).
 
 Must not:
+  Spécifier le contenu du crate miryad-core (routes d'`auth_router`, enveloppes de
+    `resource_router`, modes d'échec de `OidcClient::new`, routes du Swagger) : on contracte
+    NOTRE usage, vérifié par nos tests (règle de `../../vanyline.sdd`).
   Implémenter ici de logique métier : aucune route d'API, aucun extracteur, aucun SQL,
     aucune ligne de migration — ./main.rs ne fait qu'appeler @MigratorTrait::up (step
     `None`) et assembler.
@@ -440,7 +446,7 @@ Depends on:
   Crate externe `miryad-core` v0.3.1 (hors workspace, source absente du dépôt) —
     @MiryadAuthState, @OidcClient, @auth_router, @resource_router, @resource_openapi,
     @swagger_ui_router, @miryad_core::migration::Migrator : surface subie, non specée
-    (même lacune que le `[!]` de ./auth/mod.sdd — cf. Tasks).
+    (règle de `../../vanyline.sdd` : on spécifie notre usage de ce crate, pas le crate).
   ../Cargo.toml — nom du binaire `vanyline-app`, features structurantes : de
     miryad-core `swagger-ui`, `workflow`, `mcp`, `lymaille`, `matrix` (version `0.3.1`,
     `default-features = false`) ; feature `k8s` de vanyline-lib, `rustls`/`ring`,
@@ -460,14 +466,8 @@ Scenario: purge_au_demarrage_puis_quotidienne
   Then une première purge est exécutée IMMÉDIATEMENT, puis une par période de 24 h ; un échec est journalisé en `warn` avec `VNL-WF-007` sans arrêter la tâche, un succès en `info` avec `VNL-WF-008`
 
 Tasks:
-  [?] Oracle d'existence résiduel du CRUD générique (validation 2026-10-18) : le `resource_router` de miryad-core (observé 0.1.5, non revu sous 0.3.1)
-    (`rest/core.rs` get/update/delete) rend 404 pour un id inexistant mais 403 pour la ligne d'un autre owner (lecture
-    `OwnerOnly`) — depuis C3 la question ne porte plus que sur les ressources `OwnerOnly` montées :
-    `/api/v1/lymaille_agents|lymaille_toolsets|lymaille_contexts/{id}` et via l'outil MCP générique `/mcp` ; un utilisateur
-    peut sonder l'existence d'identifiants d'autrui. Cet écart est amont, hors de nos lots.
-    Recommandation (Claude, 2026-10-18) : assumer pour l'instant (identifiants entiers séquentiels : l'information divulguée est faible, aucune donnée
-    n'est lisible) et ouvrir un ticket amont chez miryad-core pour un 404 uniforme ; ne PAS réécrire le CRUD générique ici.
-    Réponse du développeur : (à remplir — « défaut » pour suivre la recommandation)
+  [ ] Ticket amont miryad-core : 404 uniforme pour une ligne `OwnerOnly` d'un autre owner (et
+    409 pour un doublon de contrainte unique, cf. `./db/entities/dashboards.sdd`).
   [x] DÉCIDÉ 2026-10-18 (recommandation validée : première purge AU DÉMARRAGE puis toutes les 24 h ; logs de purge porteurs d'un identifiant `VNL-WF-007` (échec) et `VNL-WF-008` (information : lignes supprimées) ; Scenario `purge_au_demarrage_puis_quotidienne`) — Première purge des runs (revue 2026-10-18) : `demarrer_purge_quotidienne` attend 24 h avant le premier — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
     passage ; un pod redémarré plus souvent que toutes les 24 h ne purge jamais.
     Recommandation (Claude, 2026-10-18) : purger une première fois au démarrage (puis toutes les 24 h), les logs de purge portant un identifiant `VNL-*`.
@@ -512,52 +512,11 @@ Tasks:
     un utilisateur du groupe `admin` reçoit `groups` contenant `"admin"`, un utilisateur ordinaire un
     tableau sans `"admin"`, une requête sans session reçoit 401. Aucune collision avec `GET /api/me`
     (route propre à l'app, `api/me.sdd`) ni avec les chemins `/api/v1/…` mergés.
-  [!] Frontière miryad-core : routes réelles d'@auth_router (hors le callback
-    `/auth/callback` mentionné par la doc), chemins/enveloppes exacts de @resource_router,
-    modes d'échec de @OidcClient::new (contact issuer au démarrage ?), routes et payload
-    de @swagger_ui_router (`/api/swagger-ui`, `/api/openapi.json` affirmés par le seul
-    commentaire de code) : crate hors dépôt, AUCUN de ces contenus n'est vérifié ici.
-    Même lacune que le `[!]` de ./auth/mod.sdd — trancher avec Sébastien (contrat miroir
-    ou spec amont).
-  [?] Identifiant `VNL-AUTH-004` émis deux fois pour deux choses distinctes : échec de
-    construction du client OIDC au démarrage (ici) et @AppError::Forbidden → HTTP 403
-    (./error.rs). Dédupliquer — AGENTS.md exige un identifiant unique par erreur ?
-  [?] `VNL-CFG-005` sert à deux diagnostics (« COOKIE_SECRET is required » de
-    ./config.rs et « must be at least 64 bytes » d'ici) et le numéro `VNL-CFG-007`
-    n'est émis nulle part (saut 006→008). Renuméroter avec une table d'IDs pour le crate,
-    ou accepter la réutilisation ?
-  [?] Le filtre par défaut mentionne `tower_http=debug` alors qu'AUCUNE @TraceLayer
-    n'est posée nulle part dans l'app : aucun span tower_http n'existera jamais — les
-    logs de requêtes HTTP n'existent pas en pratique. Ajouter @TraceLayer::new_for_http
-    (et alors loggera quoi, sur quelles routes ?) ou retirer `tower_http=debug` du défaut ?
-  [?] Aucun shutdown gracieux (ni @with_graceful_shutdown ni @tokio::signal) : SIGTERM
-    tue le processus sans drain (sessions WS sandbox-state coupées nettes à
-    chaque rollout). Contracter « arrêt brutal, drain à la charge de K8s
-    (terminationGracePeriod) » ou brancher un shutdown propre (et alors : délai,
-    fermeture des WS) ?
-  [?] @AppState::cookie_key n'est consommé en production que par le clone injecté dans
-    @MiryadAuthState au démarrage (grep : aucun autre lecteur) — champ à supprimer (la
-    clé ne vivrait que dans l'état d'auth) ou intention documentée (usage futur de
-    chiffrement maison) ?
-  [?] Redirects `"/#/"` écrits en DUR à DEUX endroits (./config.rs::oidc_config ET la
-    construction de @MiryadAuthState d'ici) : deux sources de vérité pour la même valeur.
-    Dériver l'état d'auth des valeurs de @config.oidc_config(), ou assumer le doublon
-    (le champ du @OidcConfig et celui de @MiryadAuthState sont-ils tous deux lus par
-    miryad-core ? hors dépôt, inconnu) ? — RÉSOLU 2026-10-05 par miryad-core 0.1.5 :
-    @OidcConfig ne porte plus les redirects, @MiryadAuthState (construite ici) en est la
-    seule source de vérité ; le doublon a disparu avec la dépendance.
-  [?] Fallthrough du @nest vers le @fallback_service racine : `GET /api/inconnu` (et
-    `/api/v1/inconnu`) répond le shell SPA 200 HTML, pas un 404 JSON — un typo d'appel
-    API côté frontend reçoit du HTML. Est-ce le contrat voulu (le scenario de
-    ./api/mod.sdd « 404 » n'est vrai qu'en montage isolé) ? Si non : limiter le fallback
-    aux chemins hors `/api` (fallback explicite renvoyant un 404 JSON sous `/api`).
-  [?] `COOKIE_SECRET` asymétrique : 64 caractères de base64 valide décodant en 48 octets
-    → rejeté (`VNL-CFG-005`), alors que 64 caractères de non-base64 → acceptés bruts.
-    Contracté tel quel, ou repli sur les octets bruts quand le décodage base64 donne
-    < 64 octets (au lieu de rejeter) ?
-  [?] Pas de garde-fou sur `STATIC_DIR` absent/non-lisible au démarrage : la misconfig
-    n'apparaît qu'en 404 au premier GET. Pré-test au démarrage (exit fatal) ou assumé
-    (le déploiement embarque `/app/static` dans l'image) ?
+  [ ] `main.rs` : retirer `cookie_key` de @AppState (la clé ne vit que dans @MiryadAuthState) et
+    ajuster les fixtures ; `VNL-CFG-007` pour le secret trop court, `VNL-AUTH-005` pour le client
+    OIDC ; retirer `tower_http=debug` du filtre par défaut ; fallback 404 JSON sous `/api`
+    (`VNL-APP-API-001`) ; shutdown gracieux (SIGTERM, délai 25 s) ; warn `VNL-CFG-009` pour
+    `STATIC_DIR` absent ; test « GET `/api/ws/sandbox-state` n'est pas un 404 ».
   [x] Ordres de merge différents (router : skills/toolsets avant model_profiles ;
     openapi_spec : model_profiles avant toolsets/skills) — SOLDÉ en C3 du chantier lymaille
     (2026-11-12) : les deux listes sont désormais IDENTIQUES (liste unique d'Exposes).
@@ -620,12 +579,12 @@ Scenario: LISTEN_ADDR invalide avorte le démarrage avec VNL-CFG-008
   Then le code de sortie est `1`
     And la sortie de logging porte `"VNL-CFG-008: invalid LISTEN_ADDR: pas_une_adresse"`
 
-Scenario: COOKIE_SECRET base64 décodant en moins de 64 octets avorte avec VNL-CFG-005
+Scenario: COOKIE_SECRET base64 décodant en moins de 64 octets avorte avec VNL-CFG-007
   Given le binaire lancé avec `COOKIE_SECRET` égal au base64 STANDARD de 48 octets
     (64 caractères asci, mais matière décodée insuffisante)
   When le processus s'arrête
   Then le code de sortie est `1`
-    And la sortie de logging porte `"VNL-CFG-005"`
+    And la sortie de logging porte `"VNL-CFG-007"`
     And la sortie ne porte PAS `"VNL-DB-003"` (l'échec survient avant la connexion DB)
 
 Scenario: COOKIE_SECRET brut non-base64 de 64 caractères ou plus est accepté
@@ -635,7 +594,7 @@ Scenario: COOKIE_SECRET brut non-base64 de 64 caractères ou plus est accepté
   When le processus s'arrête
   Then la sortie de logging porte `"VNL-DB-003"` (le démarrage a franchi la dérivation
     de clé par repli sur les octets bruts)
-    And la sortie ne porte PAS `"VNL-CFG-005"`
+    And la sortie ne porte PAS `"VNL-CFG-007"`
 
 Scenario: Postgres injoignable avorte le démarrage avec VNL-DB-003
   Given le binaire lancé avec un environnement valide et `DATABASE_URL` pointant vers un
@@ -706,15 +665,30 @@ Scenario: Chemin frontend inconnu reçoit le shell SPA
   Then la réponse est 200 avec le contenu marqueur de `index.html` — le routage SPA
     fonctionne sans configuration serveur supplémentaire
 
-Scenario: Chemin API inconnu sous le préfixe monté est servi par le shell SPA
-  Given @Router::new().@nest("/api", un router minimal de test avec un chemin connu)
-    .@with_state(état_de_test) puis le @fallback_service sur un `STATIC_DIR` temporaire
-    contenant `index.html` — reproduction du mécanisme de fallthrough du @nest (le vrai
-    @api_router n'est pas requis)
-  When une requête `GET /api/inconnu` est adressée via @oneshot
-  Then la réponse N'EST PAS un 404 JSON : le raté interne du router niché retombe sur le
-    fallback racine et sert `index.html` (comportement ACTUEL à confirmer ou corriger —
-    cf. Tasks `[?]`)
+Scenario: Chemin API inconnu rend un 404 JSON, jamais le shell SPA
+  Given le router assemblé comme en production (nest `/api`, fallback explicite sous `/api`,
+    @fallback_service SPA sur un `STATIC_DIR` temporaire contenant `index.html`)
+  When des requêtes `GET /api/inconnu` et `GET /api/v1/inconnu` sont adressées via @oneshot
+  Then les deux réponses sont 404 avec le corps `{"error": "VNL-APP-API-001: …"}` et
+    `Content-Type: application/json` ; `GET /route/spa/inconnue` rend toujours `index.html`
+
+Scenario: La route WebSocket racine n'est pas masquée par le nest
+  Given le router assemblé comme en production
+  When `GET /api/ws/sandbox-state` est adressé sans upgrade WebSocket
+  Then la réponse n'est pas un 404 (la route littérale racine l'emporte sur le wildcard du nest)
+
+Scenario: STATIC_DIR absent journalise un avertissement sans empêcher le démarrage
+  Given un environnement valide dont `STATIC_DIR` désigne un dossier inexistant
+  When l'app démarre
+  Then un @tracing::warn! `VNL-CFG-009` est journalisé, `GET /health` répond 200 et le
+    processus ne sort pas
+
+Scenario: SIGTERM draine puis sort proprement
+  Given (harnais d'intégration) l'app en service avec une requête lente en vol et une WebSocket
+    ouverte
+  When le processus reçoit SIGTERM
+  Then plus aucune connexion n'est acceptée, la requête en vol se termine, la WebSocket reçoit
+    une trame de fermeture, et le processus sort avec le code `0` avant 25 s
 
 Scenario: Démarrage sur base vide applique les migrations miryad-core avant celles de l'app
   Given (intégration Postgres, harnais à arbitrer) une base PostgreSQL vide, un IdP de

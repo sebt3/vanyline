@@ -87,9 +87,8 @@ Structure:
   pas la forme axum 0.7 `:id` / `*path`.
   Les handlers branchés reçoivent tous l'identité par l'extracteur @AuthUser de
     miryad-core (vérifié par grep `user: AuthUser` sur les 4 enfants branchés) :
-    l'authentification vit dans les handlers, JAMAIS dans une couche posée ici. Les
-    commentaires `// Projects (OIDC)` / `// Sandboxes (OIDC)` du fichier
-    sont des annotations informatives sans effet d'exécution (cf. Tasks `[?]`).
+    l'authentification vit dans les handlers, JAMAIS dans une couche posée ici ; aucun
+    commentaire du fichier n'annonce une garde par famille de routes.
 
 Accepts:
   - @api_router() : aucun argument — constructeur pur, appelable plusieurs fois, sans
@@ -161,6 +160,10 @@ Must:
     propriété exclusive des @nest de `../main.rs` ; l'ajouter ici produirait
     `/api/api/…`.
   - Conserver la syntaxe axum 0.8 `{id}` / `{name}` / `{*path}` (et non `:id` / `*path`).
+  - Laisser `OPTIONS` et `HEAD` atteindre @git_proxy avec les autres méthodes : l'app est servie
+    en même origine derrière l'Ingress et n'a aucune couche CORS (`../main.sdd`).
+  - Garder `./owners.rs` dans `api/` bien qu'il ne monte aucun handler : boîte à outils interne
+    du crate et de `../ws/`, au plus près de ses appelants.
   - Garder `/sandboxes/{name}/git/{*path}` branchée avec @any : le frontend émet GET,
     POST et DELETE sur cette famille de chemins (gitClient.ts) et @git_proxy relaie la
     méthode d'origine à la sandbox.
@@ -300,33 +303,11 @@ Tasks:
     workflows` déclaré, les DIX routes de ./workflows.sdd montées dans @api_router
     (table ci-dessus). Le MCP de domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est
     monté par ../main.rs à côté du MCP générique de miryad-core, pas ici.
-  [!] ./mod.rs ne contient AUCUN test (pas de `@mod tests`) et aucun test du dépôt ne
-      passe par @api_router() (grep : la fonction n'est appelée que par `../main.rs`) —
-      la table de routage n'est vérifiée aujourd'hui
-      que par les appels littéraux du frontend. Les 8 Scenarios ci-dessus sont des tests
-      À ÉCRIRE (précédent de construction d'@AppState : @mod tests des fichiers enfants,
-      ex. @test_state de ./mcp_servers.rs, retiré C3 — prendre ./projects.rs). À faire
-      dériver en TTD avant toute
-      prochaine modification de la table.
+  [ ] Écrire en tests les 8 Scenarios ci-dessus avant toute modification de la table de routage :
+    `./mod.rs` n'a aucun test et aucun test du dépôt ne passe par @api_router() (la table
+    n'est vérifiée que par les appels littéraux du frontend) ; construction d'@AppState sur
+    le précédent de `./projects.rs`.
+  [ ] `mod.rs` : retirer les commentaires `// Projects (OIDC)` / `// Sandboxes (OIDC)`.
   [x] Double mécanisme de montage sous `/api/v1` — SOLDÉ en C3 (2026-11-12) :
       @api_v1_router retiré, il ne reste que le @merge de chemins complets dans
       `../main.rs` ; le risque d'éclipse n'a plus de second mécanisme.
-  [?] Ordre de déclaration des routes WS dans `../main.rs` (`/api/ws/sandbox-state`
-      APRÈS @nest("/api", …)) : le fonctionnement repose sur la
-      priorité matchit des segments littéraux sur le wildcard interne du nest — jamais
-      asserté par un test. Contractualiser (test « GET /api/ws/sandbox-state → pas 404 »
-      dans la spec de `../main.rs`), déplacer cette route dans @api_router, ou assumer ?
-      — réduit en C2 (2026-11-12) : `/api/ws/chat/…` retiré, il ne reste qu'une route WS.
-  [?] Annotations `// … (OIDC)` uniquement sur Projects/Sandboxes alors que
-      /me exige aussi @AuthUser : commentaire purement
-      informatif (à uniformiser ou supprimer) ou trace d'un projet de garde différenciée
-      par couche ? À trancher.
-  [?] @any sur `/sandboxes/{name}/git/{*path}` expose aussi `OPTIONS` et `HEAD` à
-      @git_proxy, et aucune couche CORS n'existe dans l'app : hypothèse « même origine
-      via Ingress » à confirmer comme contrat, ou restriction des méthodes à
-      GET/POST/DELETE explicites ?
-  [?] ./owners.rs déclaré `pub` sans handler monté ici (boîte à outils interne du crate
-      et de `../ws/`) : rester dans `api/` au nom de la proximité avec ses appelants, ou
-      sortir vers un module non-`api` (ex. `../owners.rs` ou `../k8s/`) pour que tout
-      module déclaré ici corresponde à exactement une famille de routes ? Question de
-      structure, à trancher avec Sébastien.
