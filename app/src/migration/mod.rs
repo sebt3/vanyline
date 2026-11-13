@@ -1,13 +1,6 @@
-mod m20260825_000001_create_vanyline_skills;
-mod m20260825_000002_create_vanyline_toolsets;
-mod m20260825_000003_create_vanyline_llm_providers;
-mod m20260825_000004_create_vanyline_mcp_servers;
-mod m20260825_000005_create_vanyline_model_profiles;
-mod m20260825_000006_create_vanyline_agents;
 mod m20260825_000010_create_vanyline_owner_links;
 mod m20261005_000001_create_vanyline_project_workflows;
 mod m20261005_000002_create_vanyline_workflow_runs;
-mod m20261005_000003_alter_vanyline_agents_system;
 mod m20261005_000004_create_vanyline_app_settings;
 mod m20261023_000001_create_vanyline_projects;
 mod m20261023_000002_create_vanyline_sandboxes;
@@ -20,16 +13,9 @@ pub struct Migrator;
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
-            Box::new(m20260825_000001_create_vanyline_skills::Migration),
-            Box::new(m20260825_000002_create_vanyline_toolsets::Migration),
-            Box::new(m20260825_000003_create_vanyline_llm_providers::Migration),
-            Box::new(m20260825_000004_create_vanyline_mcp_servers::Migration),
-            Box::new(m20260825_000005_create_vanyline_model_profiles::Migration),
-            Box::new(m20260825_000006_create_vanyline_agents::Migration),
             Box::new(m20260825_000010_create_vanyline_owner_links::Migration),
             Box::new(m20261005_000001_create_vanyline_project_workflows::Migration),
             Box::new(m20261005_000002_create_vanyline_workflow_runs::Migration),
-            Box::new(m20261005_000003_alter_vanyline_agents_system::Migration),
             Box::new(m20261005_000004_create_vanyline_app_settings::Migration),
             Box::new(m20261023_000001_create_vanyline_projects::Migration),
             Box::new(m20261023_000002_create_vanyline_sandboxes::Migration),
@@ -60,20 +46,23 @@ mod migrations_apply_cleanly {
         // `real_db()` applique déjà les deux migrateurs ; un échec y aurait paniqué avant
         // d'atteindre cette ligne. Une requête réelle contre une table créée confirme un schéma
         // effectivement utilisable, pas seulement "la migration n'a pas paniqué".
-        let count = crate::db::entities::skills::Entity::find()
+        // (C3 du chantier lymaille : `app_settings` remplace `skills`, parti avec sa table.)
+        let count = crate::db::entities::app_settings::Entity::find()
             .all(&db)
             .await
             .expect("querying a freshly migrated table succeeds");
         assert!(count.is_empty());
     }
 
-    /// Scenario: `les treize migrations s'appliquent dans l'ordre exact enregistré`
-    /// (`./mod.sdd`, resserré à treize en C2 du chantier lymaille : `m20260825_000007/
-    /// 000008/000009` retirées — tables propres, aucune migration drop). L'ordre est lu par
-    /// `rowid` : la table de suivi est une table SQLite à clé `version` TEXT, le `rowid`
-    /// implicite suit l'ordre d'insertion = ordre d'application.
+    /// Scenario: `les six migrations s'appliquent dans l'ordre exact enregistré`
+    /// (`./mod.sdd`, resserré à six en C3 du chantier lymaille : `m20260825_000001` à
+    /// `000006` et `m20261005_000003` retirées — configuration LLM portée par les tables
+    /// `miryad_*` du migrateur miryad-core, tables propres, aucune migration drop ;
+    /// `000007` à `000009` l'avaient été en C2). L'ordre est lu par `rowid` : la table de
+    /// suivi est une table SQLite à clé `version` TEXT, le `rowid` implicite suit l'ordre
+    /// d'insertion = ordre d'application.
     #[tokio::test]
-    async fn les_treize_migrations_sappliquent_dans_lordre_exact_enregistre() {
+    async fn les_six_migrations_sappliquent_dans_lordre_exact_enregistre() {
         use sea_orm::{ConnectionTrait, Statement};
         use sea_orm_migration::MigratorTrait;
 
@@ -102,26 +91,26 @@ mod migrations_apply_cleanly {
         assert_eq!(
             versions,
             [
-                "m20260825_000001_create_vanyline_skills",
-                "m20260825_000002_create_vanyline_toolsets",
-                "m20260825_000003_create_vanyline_llm_providers",
-                "m20260825_000004_create_vanyline_mcp_servers",
-                "m20260825_000005_create_vanyline_model_profiles",
-                "m20260825_000006_create_vanyline_agents",
                 "m20260825_000010_create_vanyline_owner_links",
                 "m20261005_000001_create_vanyline_project_workflows",
                 "m20261005_000002_create_vanyline_workflow_runs",
-                "m20261005_000003_alter_vanyline_agents_system",
                 "m20261005_000004_create_vanyline_app_settings",
                 "m20261023_000001_create_vanyline_projects",
                 "m20261023_000002_create_vanyline_sandboxes",
             ],
-            "la table de suivi doit porter exactement treize lignes dans l'ordre de `Must`"
+            "la table de suivi doit porter exactement six lignes dans l'ordre de `Must`"
         );
         for withdrawn in [
+            "m20260825_000001_create_vanyline_skills",
+            "m20260825_000002_create_vanyline_toolsets",
+            "m20260825_000003_create_vanyline_llm_providers",
+            "m20260825_000004_create_vanyline_mcp_servers",
+            "m20260825_000005_create_vanyline_model_profiles",
+            "m20260825_000006_create_vanyline_agents",
             "m20260825_000007_create_vanyline_chat_contexts",
             "m20260825_000008_create_vanyline_conversations",
             "m20260825_000009_create_vanyline_messages",
+            "m20261005_000003_alter_vanyline_agents_system",
         ] {
             assert!(
                 !versions.iter().any(|v| v == withdrawn),
@@ -129,8 +118,15 @@ mod migrations_apply_cleanly {
             );
         }
 
-        // Les trois tables du chat maison ne doivent plus jamais être créées.
+        // Les neuf tables du chat maison (C2) et de la config LLM (C3) ne doivent plus jamais
+        // être créées.
         for table in [
+            "vanyline_skills",
+            "vanyline_toolsets",
+            "vanyline_llm_providers",
+            "vanyline_mcp_servers",
+            "vanyline_model_profiles",
+            "vanyline_agents",
             "vanyline_chat_contexts",
             "vanyline_conversations",
             "vanyline_messages",
@@ -148,6 +144,57 @@ mod migrations_apply_cleanly {
                 .try_get_by_index::<i64>(0)
                 .expect("count decodes");
             assert_eq!(present, 0, "la table {table} ne doit pas exister");
+        }
+    }
+
+    /// Scenario: `un step partiel n'applique que le préfixe` (`./mod.sdd`) — `up` avec
+    /// step `Some(3)` : les trois premières migrations de `Must` sont appliquées et
+    /// enregistrées, les trois suivantes absentes.
+    #[tokio::test]
+    async fn un_step_partiel_n_applique_que_le_prefixe() {
+        use sea_orm::{ConnectionTrait, Statement};
+        use sea_orm_migration::MigratorTrait;
+
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite connects");
+        miryad_core::migration::Migrator::up(&db, None)
+            .await
+            .expect("miryad-core migrations apply first");
+        crate::migration::Migrator::up(&db, Some(3))
+            .await
+            .expect("three-step up succeeds");
+
+        let stmt = Statement::from_string(
+            db.get_database_backend(),
+            "SELECT version FROM seaql_migrations_app ORDER BY rowid",
+        );
+        let rows = db
+            .query_all_raw(stmt)
+            .await
+            .expect("tracking table is queryable");
+        let versions: Vec<String> = rows
+            .iter()
+            .map(|row| row.try_get_by_index::<String>(0).expect("version decodes"))
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                "m20260825_000010_create_vanyline_owner_links",
+                "m20261005_000001_create_vanyline_project_workflows",
+                "m20261005_000002_create_vanyline_workflow_runs",
+            ],
+            "le préfixe de trois migrations est seul appliqué"
+        );
+        for absent in [
+            "m20261005_000004_create_vanyline_app_settings",
+            "m20261023_000001_create_vanyline_projects",
+            "m20261023_000002_create_vanyline_sandboxes",
+        ] {
+            assert!(
+                !versions.iter().any(|v| v == absent),
+                "{absent} ne doit pas figurer après un step partiel"
+            );
         }
     }
 }
@@ -540,19 +587,19 @@ mod workflow_migrations {
     }
 
     /// Scenario: `down_supprime_la_table` (les deux specs) — `Migrator::down` annule la fin de
-    /// chaîne : depuis la chaîne à SEIZE migrations, cinq pas (000016 et 000015 identité,
-    /// 000004 `app_settings`, 000003 `agents_system`, puis 000002) annulent
+    /// chaîne : depuis la chaîne à SIX migrations (C3 du chantier lymaille), quatre pas (000016
+    /// et 000015 identité, 000004 `app_settings`, puis 000002) annulent
     /// `vanyline_workflow_runs` (disparaît, `vanyline_project_workflows` reste) ; un pas de plus
-    /// annule la première. Les deux migrations du bout sont exercées par `mod system_migrations`
-    /// ci-dessous.
+    /// annule la première. La migration `m20261005_000003` (`agents_system`) et le bout de
+    /// chaîne retiré en C3 ne sont plus exercés ici.
     #[tokio::test]
     async fn down_supprime_les_tables() {
         let db = real_db().await;
         assert!(table_sql(&db, "vanyline_workflow_runs").await.is_some());
 
-        crate::migration::Migrator::down(&db, Some(5))
+        crate::migration::Migrator::down(&db, Some(4))
             .await
-            .expect("five-step down succeeds (000016, 000015, 000004, 000003, then 000002)");
+            .expect("four-step down succeeds (000016, 000015, 000004, then 000002)");
         assert!(
             table_sql(&db, "vanyline_workflow_runs").await.is_none(),
             "vanyline_workflow_runs must be dropped by its down()"
@@ -572,11 +619,13 @@ mod workflow_migrations {
     }
 }
 
-/// Tests des migrations `m20261005_000003_alter_vanyline_agents_system` et
-/// `m20261005_000004_create_vanyline_app_settings`, dérivés des Scenario de leurs specs,
-/// dans le harnais `real_db()` (chaîne complète miryad-core + app sur sqlite en mémoire).
-/// Tout passe par SQL brut (`Statement`) : ces tests verrouillent le DDL POSÉ PAR LA
+/// Tests des migrations `m20261005_000004_create_vanyline_app_settings`, dérivés des Scenario
+/// de ses specs, dans le harnais `real_db()` (chaîne complète miryad-core + app sur sqlite en
+/// mémoire). Tout passe par SQL brut (`Statement`) : ces tests verrouillent le DDL POSÉ PAR LA
 /// MIGRATION, indépendamment des entités `SeaORM` qui n'existent pas encore à ce stade.
+/// La migration `m20261005_000003_alter_vanyline_agents_system` et ses Scenario
+/// (`agents_existants_intacts`, `unicite_de_la_cle_systeme`, `plusieurs_agents_ordinaires`,
+/// `down_restaure_le_schema`) sont retirés en C3 du chantier lymaille avec la table des agents.
 #[cfg(test)]
 mod system_migrations {
 
@@ -602,184 +651,6 @@ mod system_migrations {
             .await
             .expect("sqlite_master is queryable")
             .and_then(|res| cell_text(&res, 0))
-    }
-
-    /// Noms des index d'une table (`PRAGMA index_list`).
-    async fn index_names(db: &impl ConnectionTrait, table: &str) -> Vec<String> {
-        let stmt = Statement::from_sql_and_values(
-            db.get_database_backend(),
-            format!("PRAGMA index_list({table})"),
-            [],
-        );
-        db.query_all_raw(stmt)
-            .await
-            .expect("index_list is queryable")
-            .iter()
-            // Colonne 0 = `seq`, colonne 1 = `name`.
-            .filter_map(|res| cell_text(res, 1))
-            .collect()
-    }
-
-    /// Noms des colonnes d'une table (`PRAGMA table_info`).
-    async fn column_names(db: &impl ConnectionTrait, table: &str) -> Vec<String> {
-        let stmt = Statement::from_sql_and_values(
-            db.get_database_backend(),
-            format!("PRAGMA table_info({table})"),
-            [],
-        );
-        db.query_all_raw(stmt)
-            .await
-            .expect("table_info is queryable")
-            .iter()
-            // Colonne 1 = `name`.
-            .filter_map(|res| cell_text(res, 1))
-            .collect()
-    }
-
-    /// Seed : une utilisatrice (chemin officiel miryad-core) — retourne son id.
-    async fn seed_user(db: &impl ConnectionTrait, subject: &str) -> i32 {
-        miryad_core::users::resolve_user(db, subject, None)
-            .await
-            .expect("user resolves")
-            .id
-    }
-
-    /// Seed : provider + profil de modèle valides pour `owner` — retourne l'id du profil
-    /// (`vanyline_agents.model_profile_id` est NOT NULL avec FK RESTRICT).
-    async fn seed_profile(db: &impl ConnectionTrait, owner: i32) -> i32 {
-        let backend = db.get_database_backend();
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            "INSERT INTO vanyline_llm_providers (name, provider_type, endpoint, available_models, is_default) \
-             VALUES (?, 'ollama', 'http://x', '[]', 1)",
-            [format!("p-{owner}").into()],
-        ))
-        .await
-        .expect("provider seeds");
-        let provider_id = {
-            let res = db
-                .query_one_raw(Statement::from_sql_and_values(
-                    backend,
-                    "SELECT id FROM vanyline_llm_providers WHERE name = ?",
-                    [format!("p-{owner}").into()],
-                ))
-                .await
-                .expect("provider selectable")
-                .expect("provider exists");
-            res.try_get_by_index::<i32>(0).expect("id decodes")
-        };
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            "INSERT INTO vanyline_model_profiles (owner_id, name, provider_id, model, options) \
-             VALUES (?, 'prof', ?, 'm', '{}')",
-            [owner.into(), provider_id.into()],
-        ))
-        .await
-        .expect("profile seeds");
-        let res = db
-            .query_one_raw(Statement::from_sql_and_values(
-                backend,
-                "SELECT id FROM vanyline_model_profiles WHERE owner_id = ? AND name = 'prof'",
-                [owner.into()],
-            ))
-            .await
-            .expect("profile selectable")
-            .expect("profile exists");
-        res.try_get_by_index::<i32>(0).expect("id decodes")
-    }
-
-    /// Insertion brute d'un agent — `system_key` `None` = colonne à NULL (les colonnes JSON
-    /// sont posées littéralement pour rester indépendante de la forme attendue par l'entité).
-    async fn insert_agent(
-        db: &impl ConnectionTrait,
-        owner: i32,
-        name: &str,
-        profile_id: i32,
-        system_key: Option<&str>,
-    ) -> Result<(), sea_orm::DbErr> {
-        let stmt = Statement::from_sql_and_values(
-            db.get_database_backend(),
-            "INSERT INTO vanyline_agents \
-             (owner_id, name, mode, model_profile_id, toolsets, skills, system_prompt, system_key) \
-             VALUES (?, ?, 'primary', ?, '[]', '\"auto\"', '', ?)",
-            [
-                owner.into(),
-                name.into(),
-                profile_id.into(),
-                system_key.into(),
-            ],
-        );
-        db.execute_raw(stmt).await.map(|_| ())
-    }
-
-    /// Scenario: `agents_existants_intacts` (`m20261005_000003`) — une ligne d'agent ordinaire
-    /// (créée sans valeur pour les nouvelles colonnes, le cas de toute ligne antérieure à la
-    /// migration) ressort avec `system_key` ET `system_version` à NULL.
-    #[tokio::test]
-    async fn agents_existants_intacts() {
-        let db = real_db().await;
-        let alice = seed_user(&db, "alice").await;
-        let profile = seed_profile(&db, alice).await;
-        insert_agent(&db, alice, "coder", profile, None)
-            .await
-            .expect("ordinary agent inserts");
-
-        let res = db
-            .query_one_raw(Statement::from_sql_and_values(
-                db.get_database_backend(),
-                "SELECT system_key, system_version FROM vanyline_agents WHERE name = 'coder'",
-                [],
-            ))
-            .await
-            .expect("select succeeds")
-            .expect("row exists");
-        let key: Option<String> = res
-            .try_get_by_index_nullable(0)
-            .expect("system_key decodes");
-        let version: Option<i32> = res
-            .try_get_by_index_nullable(1)
-            .expect("system_version decodes");
-        assert_eq!(key, None, "system_key must default to NULL");
-        assert_eq!(version, None, "system_version must default to NULL");
-    }
-
-    /// Scenario: `unicite_de_la_cle_systeme` (`m20261005_000003`) — second agent `config`
-    /// chez la MÊME utilisatrice : violation ; chez une autre : succès.
-    #[tokio::test]
-    async fn unicite_de_la_cle_systeme() {
-        let db = real_db().await;
-        let alice = seed_user(&db, "alice").await;
-        let bob = seed_user(&db, "bob").await;
-        let alice_profile = seed_profile(&db, alice).await;
-        let bob_profile = seed_profile(&db, bob).await;
-        insert_agent(&db, alice, "config", alice_profile, Some("config"))
-            .await
-            .expect("first system agent inserts");
-
-        let dup = insert_agent(&db, alice, "config-2", alice_profile, Some("config")).await;
-        assert!(
-            dup.is_err(),
-            "second (owner_id, system_key) = (alice, config) must violate UNIQUE"
-        );
-
-        insert_agent(&db, bob, "config", bob_profile, Some("config"))
-            .await
-            .expect("same key for another owner must pass");
-    }
-
-    /// Scenario: `plusieurs_agents_ordinaires` (`m20261005_000003`) — plusieurs lignes à
-    /// `system_key = NULL` chez la même utilisatrice : aucun conflit.
-    #[tokio::test]
-    async fn plusieurs_agents_ordinaires() {
-        let db = real_db().await;
-        let alice = seed_user(&db, "alice").await;
-        let profile = seed_profile(&db, alice).await;
-        insert_agent(&db, alice, "a1", profile, None)
-            .await
-            .expect("first ordinary agent inserts");
-        insert_agent(&db, alice, "a2", profile, None)
-            .await
-            .expect("NULL system keys must never collide");
     }
 
     /// Scenario: `ddl_applique_sur_une_vraie_base` (`m20261005_000004`) — la table
@@ -843,42 +714,6 @@ mod system_migrations {
         assert!(
             table_sql(&db, "vanyline_workflow_runs").await.is_some(),
             "the previous migration must remain applied"
-        );
-    }
-
-    /// Scenario: `down_restaure_le_schema` (`m20261005_000003`) — QUATRE pas de `down`
-    /// (000016, 000015 identité, puis 000004 et 000003) : les colonnes `system_key`/
-    /// `system_version` et leur index unique n'existent plus, la table des agents et la chaîne
-    /// workflow restent intactes.
-    #[tokio::test]
-    async fn down_restaure_le_schema() {
-        let db = real_db().await;
-        assert!(
-            column_names(&db, "vanyline_agents")
-                .await
-                .contains(&"system_key".to_string())
-        );
-
-        crate::migration::Migrator::down(&db, Some(4))
-            .await
-            .expect("four-step down succeeds (000016, 000015, 000004, then 000003)");
-
-        let columns = column_names(&db, "vanyline_agents").await;
-        assert!(
-            !columns.contains(&"system_key".to_string())
-                && !columns.contains(&"system_version".to_string()),
-            "system columns must be dropped by down(), got: {columns:?}"
-        );
-        let indexes = index_names(&db, "vanyline_agents").await;
-        assert!(
-            !indexes
-                .iter()
-                .any(|name| name == "uq_vanyline_agents_owner_system_key"),
-            "the unique index must be dropped by down(), got: {indexes:?}"
-        );
-        assert!(
-            table_sql(&db, "vanyline_agents").await.is_some(),
-            "the agents table itself must survive"
         );
     }
 }

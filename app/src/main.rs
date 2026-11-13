@@ -14,7 +14,6 @@
 mod api;
 mod auth;
 mod config;
-mod config_store;
 mod db;
 mod error;
 mod k8s;
@@ -250,7 +249,6 @@ fn build_router(state: AppState, static_dir: &str) -> Result<Router, AppError> {
         // les segments littéraux priment sur le wildcard du nest (jurisprudence matchit,
         // `main.sdd`, `sessions/mod.sdd`) — hors de ce préfixe, AUCUNE route de conversation.
         .merge(lymaille)
-        .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
         .route(
             "/api/ws/sandbox-state",
@@ -263,39 +261,53 @@ fn build_router(state: AppState, static_dir: &str) -> Result<Router, AppError> {
 }
 
 /// Les ressources CRUD `resource_router` de miryad-core, montées en chemins complets
-/// `/api/v1/{resource}` (`main.sdd`, Exposes : ordre de merge).
+/// `/api/v1/{resource}` (`main.sdd`, Exposes : ordre de merge — les dix définitions lymaille
+/// de miryad-core puis `app-settings`, depuis le retrait C3 des six entités de config maison).
 fn resources_router() -> Router<AppState> {
+    use miryad_core::lymaille::definitions;
     Router::new()
+        .merge(resource_router::<definitions::agent::Entity, AppState>())
+        .merge(resource_router::<definitions::toolset::Entity, AppState>())
+        .merge(resource_router::<definitions::profile::Entity, AppState>())
+        .merge(resource_router::<definitions::provider::Entity, AppState>())
         .merge(resource_router::<
-            db::entities::llm_providers::Entity,
+            definitions::private_agent::Entity,
             AppState,
         >())
-        .merge(resource_router::<db::entities::mcp_servers::Entity, AppState>())
-        .merge(resource_router::<db::entities::skills::Entity, AppState>())
-        .merge(resource_router::<db::entities::toolsets::Entity, AppState>())
         .merge(resource_router::<
-            db::entities::model_profiles::Entity,
+            definitions::private_toolset::Entity,
             AppState,
         >())
-        .merge(resource_router::<db::entities::agents::Entity, AppState>())
+        .merge(resource_router::<definitions::context_type::Entity, AppState>())
+        .merge(resource_router::<
+            definitions::catalog_context::Entity,
+            AppState,
+        >())
+        .merge(resource_router::<definitions::user_context::Entity, AppState>())
+        .merge(resource_router::<definitions::mcp_server::Entity, AppState>())
         .merge(resource_router::<
             db::entities::app_settings::Entity,
             AppState,
         >())
 }
 
-/// `POST /mcp` : CRUD de la configuration (les sept ressources du `resource_router`) par le
+/// `POST /mcp` : CRUD de la configuration (les onze entités du `resource_router`) par le
 /// serveur MCP générique de miryad-core, avec l'identité de l'appelant (`main.sdd`).
 pub(crate) fn mcp_config_router() -> Router<AppState> {
+    use miryad_core::lymaille::definitions;
     use miryad_core::mcp::{McpToolRegistry, OutputFormat, mcp_router};
     let mut registry = McpToolRegistry::new(OutputFormat::Json);
     registry
-        .register::<db::entities::llm_providers::Entity>()
-        .register::<db::entities::mcp_servers::Entity>()
-        .register::<db::entities::skills::Entity>()
-        .register::<db::entities::toolsets::Entity>()
-        .register::<db::entities::model_profiles::Entity>()
-        .register::<db::entities::agents::Entity>()
+        .register::<definitions::agent::Entity>()
+        .register::<definitions::toolset::Entity>()
+        .register::<definitions::profile::Entity>()
+        .register::<definitions::provider::Entity>()
+        .register::<definitions::private_agent::Entity>()
+        .register::<definitions::private_toolset::Entity>()
+        .register::<definitions::context_type::Entity>()
+        .register::<definitions::catalog_context::Entity>()
+        .register::<definitions::user_context::Entity>()
+        .register::<definitions::mcp_server::Entity>()
         .register::<db::entities::app_settings::Entity>();
     mcp_router(registry)
 }
@@ -304,17 +316,102 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Document `OpenAPI` combiné des 6 ressources `resource_router` — un fragment par entité
-/// (`resource_openapi`), fusionnés (`OpenApi::merge`, dédoublonne le schéma Bearer commun),
-/// `info` renseigné une fois sur le document final (les fragments ne le fixent pas). Sert
-/// `GET /api/swagger-ui` (feature Cargo `swagger-ui` de miryad-core) et `/api/openapi.json`.
+/// Document `OpenAPI` combiné des 11 ressources `resource_router` — fusion par
+/// `OpenApi::merge` de ONZE fragments dans l'ordre d'Exposes (dix lymaille puis
+/// `app-settings`), `info` renseigné une seule fois sur le document final (les fragments n'en
+/// portent pas). Sert `GET /api/swagger-ui` (feature Cargo `swagger-ui` de miryad-core) et
+/// `/api/openapi.json`.
+///
+/// Le fragment `app-settings` vient de `resource_openapi` (schéma du modèle + `SecurityScheme`
+/// Bearer). Les dix fragments lymaille sont construits ICI en interne (arbitrage Sébastien
+/// 2026-11-13) : `resource_openapi` exige `Model: utoipa::ToSchema`, que miryad-core 0.3.1 ne
+/// dérive pas pour `lymaille::definitions`, et la règle orpheline interdit à l'app de
+/// l'implémenter. Ils portent les mêmes méthodes (collection `GET`+`POST`, item
+/// `GET`+`PUT`+`DELETE`, `{id}` en paramètre de chemin) et l'exigence `bearer_auth` par simple
+/// référence de nom — sans redéclarer le `SecurityScheme` ni poser de schéma de modèle. Les
+/// noms de chemins viennent du trait `MiryadResource::resource_name`, source unique des
+/// montages router/MCP/openapi. Basculer ces fragments sur `resource_openapi` quand
+/// miryad-core dérive enfin `ToSchema` (cf. `main.sdd` Tasks).
 fn openapi_spec() -> utoipa::openapi::OpenApi {
-    let mut spec = resource_openapi::<db::entities::llm_providers::Entity>();
-    spec.merge(resource_openapi::<db::entities::mcp_servers::Entity>());
-    spec.merge(resource_openapi::<db::entities::model_profiles::Entity>());
-    spec.merge(resource_openapi::<db::entities::toolsets::Entity>());
-    spec.merge(resource_openapi::<db::entities::skills::Entity>());
-    spec.merge(resource_openapi::<db::entities::agents::Entity>());
+    use miryad_core::lymaille::definitions;
+    use miryad_core::resource::MiryadResource;
+    use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn};
+    use utoipa::openapi::response::ResponseBuilder;
+    use utoipa::openapi::security::SecurityRequirement;
+    use utoipa::openapi::{Object, OpenApiBuilder, Paths, RefOr, Required, Schema, Type};
+
+    // Les dix définitions lymaille dans l'ordre d'Exposes, noms verbatims du trait.
+    let lymaille_resources: [&str; 10] = [
+        definitions::agent::Entity::resource_name(),
+        definitions::toolset::Entity::resource_name(),
+        definitions::profile::Entity::resource_name(),
+        definitions::provider::Entity::resource_name(),
+        definitions::private_agent::Entity::resource_name(),
+        definitions::private_toolset::Entity::resource_name(),
+        definitions::context_type::Entity::resource_name(),
+        definitions::catalog_context::Entity::resource_name(),
+        definitions::user_context::Entity::resource_name(),
+        definitions::mcp_server::Entity::resource_name(),
+    ];
+
+    let id_param = ParameterBuilder::new()
+        .name("id")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .schema(Some(RefOr::T(Schema::Object(Object::with_type(
+            Type::Integer,
+        )))))
+        .build();
+
+    let mut paths = Paths::new();
+    for resource in lymaille_resources {
+        let collection = format!("/api/v1/{resource}");
+        let item = format!("/api/v1/{resource}/{{id}}");
+        // Chaque opération : exigence `bearer_auth` par référence de nom (le composant
+        // `SecurityScheme` est porté par le fragment `app-settings`, `merge` dédoublonne).
+        let op = |builder: OperationBuilder, status: &str| {
+            builder
+                .security(SecurityRequirement::new(
+                    "bearer_auth",
+                    Vec::<String>::new(),
+                ))
+                .response(
+                    status,
+                    ResponseBuilder::new()
+                        .description("Réponse du CRUD générique miryad-core")
+                        .build(),
+                )
+                .build()
+        };
+        let with_id = |builder: OperationBuilder| builder.parameter(id_param.clone());
+        paths.add_path_operation(
+            collection.clone(),
+            vec![HttpMethod::Get],
+            op(OperationBuilder::new(), "200"),
+        );
+        paths.add_path_operation(
+            collection,
+            vec![HttpMethod::Post],
+            op(OperationBuilder::new(), "201"),
+        );
+        paths.add_path_operation(
+            item.clone(),
+            vec![HttpMethod::Get],
+            op(with_id(OperationBuilder::new()), "200"),
+        );
+        paths.add_path_operation(
+            item.clone(),
+            vec![HttpMethod::Put],
+            op(with_id(OperationBuilder::new()), "200"),
+        );
+        paths.add_path_operation(
+            item,
+            vec![HttpMethod::Delete],
+            op(with_id(OperationBuilder::new()), "204"),
+        );
+    }
+
+    let mut spec = OpenApiBuilder::new().paths(paths).build();
     spec.merge(resource_openapi::<db::entities::app_settings::Entity>());
     spec.info = utoipa::openapi::Info::new("vanyline", env!("CARGO_PKG_VERSION"));
     spec
@@ -324,17 +421,24 @@ fn openapi_spec() -> utoipa::openapi::OpenApi {
 mod tests {
     use super::*;
 
+    /// Scenario: `openapi_spec fusionne onze ressources avec un seul schéma de sécurité`
+    /// (`main.sdd`, onze ressources depuis le retrait C3 du chantier lymaille : les dix
+    /// définitions lymaille de miryad-core + `app-settings`, aucun chemin de la config maison).
     #[test]
-    fn openapi_spec_exposes_all_seven_resources_without_duplicate_security_scheme() {
+    fn openapi_spec_exposes_all_eleven_resources_without_duplicate_security_scheme() {
         let spec = openapi_spec();
 
         for resource in [
-            "llm-providers",
-            "mcp-servers",
-            "model-profiles",
-            "toolsets",
-            "skills",
-            "agents",
+            "lymaille_catalog_agents",
+            "lymaille_catalog_toolsets",
+            "lymaille_profiles",
+            "lymaille_providers",
+            "lymaille_agents",
+            "lymaille_toolsets",
+            "lymaille_catalog_context_types",
+            "lymaille_catalog_contexts",
+            "lymaille_contexts",
+            "lymaille_mcp_servers",
             "app-settings",
         ] {
             assert!(
@@ -351,10 +455,52 @@ mod tests {
             );
         }
 
+        // Retrait C3 du chantier lymaille : aucun chemin nu de la config maison ne subsiste.
+        for withdrawn in [
+            "llm-providers",
+            "mcp-servers",
+            "model-profiles",
+            "toolsets",
+            "skills",
+            "agents",
+        ] {
+            assert!(
+                spec.paths
+                    .get_path_item(format!("/api/v1/{withdrawn}"))
+                    .is_none(),
+                "le chemin {withdrawn} retiré en C3 ne doit plus apparaître"
+            );
+            assert!(
+                spec.paths
+                    .get_path_item(format!("/api/v1/{withdrawn}/{{id}}"))
+                    .is_none(),
+                "le chemin item {withdrawn}/{{id}} retiré en C3 ne doit plus apparaître"
+            );
+        }
+
         assert_eq!(spec.info.title, "vanyline");
         assert_eq!(spec.info.version, env!("CARGO_PKG_VERSION"));
 
-        // OpenApi::merge dédoublonne security_schemes/security par nom/égalité — les 6
+        // And du Scenario (arbitrage Sébastien 2026-11-13) : les dix fragments lymaille sont
+        // manuels et ne déclarent AUCUN schéma de modèle — les `schemas` du document final
+        // sont exactement ceux du fragment `app-settings`, rien de plus.
+        let fragment = resource_openapi::<db::entities::app_settings::Entity>();
+        let doc_schemas: Vec<&String> = spec
+            .components
+            .iter()
+            .flat_map(|components| components.schemas.keys())
+            .collect();
+        let expected_schemas: Vec<&String> = fragment
+            .components
+            .iter()
+            .flat_map(|components| components.schemas.keys())
+            .collect();
+        assert_eq!(
+            doc_schemas, expected_schemas,
+            "aucun schéma de modèle lymaille ne doit figurer dans le document : {doc_schemas:?}"
+        );
+
+        // OpenApi::merge dédoublonne security_schemes/security par nom/égalité — les 11
         // fragments déclarent le même schéma Bearer, il ne doit apparaître qu'une fois.
         let components = spec.components.expect("components present");
         assert_eq!(
@@ -366,7 +512,7 @@ mod tests {
         assert_eq!(spec.security.expect("global security present").len(), 1);
     }
 
-    /// `AppState` de test sur la base sqlite mémoire (même forme que `api/llm_providers.rs`).
+    /// `AppState` de test sur la base sqlite mémoire (même forme que `api/projects.rs`).
     async fn test_state() -> AppState {
         let db = crate::db::test_support::real_db().await;
         AppState {

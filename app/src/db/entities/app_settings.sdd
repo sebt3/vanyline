@@ -51,6 +51,16 @@ Must not:
     dans leurs entités (profils, agents).
 
 Tasks:
+  [?] Sort du réglage `default_model` après C3 du chantier lymaille (2026-11-12) : son
+    `provider_id` référençait `vanyline_llm_providers` et sa destination de sémantique
+    était l'amorçage des profils maison — les deux retirés. La table et la route CRUD
+    `app-settings` sont CONSERVÉES (décision C3 : seule ressource de réglages globaux
+    restante), mais la FORME `{ provider_id, model }` ne correspond à rien dans le modèle
+    lymaille (`lymaille_providers`/`lymaille_profiles` sont des ressources admin séparées,
+    sans notion de défaut). Garder la forme actuelle comme simple couple de chaînes sans
+    vérification de référence, ou redéfinir le réglage (ex: un nom de profil lymaille) —
+    avec le semis du profil `"default"` proposé par `../../sessions/catalog.sdd` Tasks
+    `[?]` ? Décision à poser avant la vague E (écran paramètres).
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTÉS — `VNL-SET-001` (clé inconnue), `VNL-SET-002` (valeur invalide). (Question d'origine : Codes des HookError (S8, 2026-10-13) : non contractés par la spec ; retenus
     `VNL-SET-001` (clé inconnue) et `VNL-SET-002` (valeur invalide), sur le motif « code
     applicatif libre du hook » déjà posé par `VNL-WFA-001` (`./project_workflows.sdd`).

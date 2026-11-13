@@ -70,7 +70,8 @@ Accepts:
   - Identité par @AuthUser de miryad-core : flow primaire session cookie signée
     (navigateur, `cookie_key`) ; flow header `Authorization` porteur d'un bearer
     émis par @miryad_core::auth::issue_token utilisé en test (précédent
-    `../db/entities/agents.rs`) — la mécanique d'extraction et ses critères de
+    `../db/entities/app_settings.rs` — l'ancien précédent `../db/entities/agents.rs`
+    est retiré en C3 du chantier lymaille) — la mécanique d'extraction et ses critères de
     validité sont le contrat de miryad-core, pas de CE fichier.
   - État : @state.auth.db (@MiryadAuthState extrait de @AppState par le
     @FromRef de `../main.rs`) — une seule connexion SeaORM partagée, utilisée
@@ -165,7 +166,7 @@ Depends on:
     @miryad_core::auth::@AuthUser (extraction, refus 401),
     @miryad_core::users::@resolve_user (sémantique upsert/email à confirmer,
     cf. Tasks), @miryad_core::auth::issue_token (précédent d'émission de token
-    de test, `../db/entities/agents.rs`).
+    de test, `../db/entities/app_settings.rs` depuis le retrait C3 d'`agents.rs`).
   ./owners.rs @resolve_owner_name (spec `./owners.sdd` à venir) — lecture
     `vanyline_owner_links.k8s_owner_name`, y compris la ligne à nom NULL.
   ./mod.rs — montage unique `.route("/me", @get(me::handler_me))` de la table
@@ -209,8 +210,9 @@ Tasks:
     de sérialisation ; @200 avec/sans lien, lien à nom NULL, email absent et
     l'erreur DB @500 `VNL-DB-006` via la route ne sont couverts par AUCUN test
     (grep : @handler_me n'est appelé que par `./mod.rs` et ces deux tests).
-    Précédent complet pour authentifier en test : `../db/entities/agents.rs`
-    (@real_db + @resolve_user + @issue_token + header `Authorization: Bearer`).
+    Précédent complet pour authentifier en test : `../db/entities/app_settings.rs`
+    (@real_db + @resolve_user + @issue_token + header `Authorization: Bearer` ;
+    l'ancien précédent `../db/entities/agents.rs` est retiré en C3 du chantier lymaille).
     Les quatre Scenarios authentifiés et le Scenario d'erreur DB sont à dériver
     en TTD.
   [?] Corps de la réponse 401 émise par @AuthUser (forme `{"error": …}` de

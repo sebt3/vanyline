@@ -1,7 +1,8 @@
 //! Kind `rhai` — contrat : `rhai.sdd`. Le `RhaiStep` de miryad-core (issue #27 : `with_setup`,
 //! livré en 0.1.5) enrichi par exécution des trois fonctions globales `mcp_servers()`,
 //! `mcp_list_tools(server)`, `mcp_call_tool(server, tool, arguments)`, branchées sur les
-//! serveurs MCP de l'utilisateur du run (+ `sandbox` en portée sandbox seulement).
+//! serveurs MCP lymaille que l'utilisateur du run a le droit d'utiliser (+ `sandbox` en portée
+//! sandbox seulement).
 //!
 //! Client MCP : JSON-RPC 2.0 « HTTP streamable » POST-only sans état — la forme réelle du
 //! serveur de la sandbox (`sandbox/src/mcp.rs`) et celle contractée par le scenario
@@ -12,14 +13,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use miryad_core::lymaille::definitions::mcp_server;
+use miryad_core::lymaille::error::LymailleError;
+use miryad_core::lymaille::mcp_access::{build_auth, server_for};
+use miryad_core::lymaille::{CallerPrincipal, EnvSecretResolver, SecretResolver};
 use miryad_core::workflow::RhaiStep;
 use serde_json::Value;
 
 use super::RunInfo;
 use super::SandboxLocator;
 use super::StepEnv;
-use crate::config_store::PgConfigStore;
-use vanyline_cfgstore::store::ConfigStore;
 
 /// Le nom de kind — celui, fixe, de `RhaiStep` (`rhai_step.rs` de miryad-core, `kind() ==
 /// "rhai"`). Verrouillé par exécution dans les tests.
@@ -36,6 +39,124 @@ pub(crate) struct BridgeServer {
     pub name: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// Serveur de la table lymaille `miryad_lymaille_mcp_servers` : droit et authentification
+    /// relus à l'appel (`rhai.sdd` `Must` — relecture en base sans cache). `false` = serveur
+    /// fixe du plan (le serveur `sandbox`).
+    pub lymaille: bool,
+}
+
+/// Accès lymaille d'un run : la connexion de l'app et la clé primaire du compte du
+/// déclencheur, source du `CallerPrincipal` reconstruit à chaque énumération et à chaque
+/// appel (`rhai.sdd` `Handles`, aucun cache — `is_admin` lu à cet instant).
+#[derive(Clone)]
+pub(crate) struct LymailleAccess {
+    pub db: sea_orm::DatabaseConnection,
+    pub user_id: i32,
+}
+
+/// Principal lymaille du run : `subject` et `is_admin` relus en base à cet instant
+/// (`rhai.sdd` `Handles` — `users::user::Entity::find_by_id` pour le `subject`,
+/// `users::group::is_admin` pour le droit admin, aucun cache). Erreurs fermées, sans texte
+/// de base dans le message rendu au script.
+async fn caller_principal(
+    db: &sea_orm::DatabaseConnection,
+    user_id: i32,
+) -> Result<CallerPrincipal, String> {
+    use sea_orm::EntityTrait;
+    let account = miryad_core::users::user::Entity::find_by_id(user_id)
+        .one(db)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "step rhai : compte du run illisible");
+            "compte du run indisponible".to_string()
+        })?
+        .ok_or_else(|| "compte du run introuvable".to_string())?;
+    let is_admin = miryad_core::users::is_admin(db, user_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "step rhai : droit admin illisible");
+            "droit admin indisponible".to_string()
+        })?;
+    Ok(CallerPrincipal {
+        user_id,
+        subject: account.subject,
+        is_admin,
+    })
+}
+
+impl LymailleAccess {
+    /// Relecture du serveur lymaille À L'APPEL (`rhai.sdd` `Must`) : droit tranché par
+    /// `mcp_access::server_for` relu en base (`Forbidden` rendu par le texte contractuel du
+    /// serveur inconnu, sans oracle d'existence), URL fraîche de la ligne, en-têtes résolus à
+    /// l'appel (`build_auth` tranche le mode : `none` sans en-tête, `forward` refusé ici faute
+    /// de session interactive, `static` résolu par le `SecretResolver` à cet instant — jamais
+    /// figé au montage, et la référence comme la valeur ne sortent dans aucune erreur).
+    pub(crate) async fn authorize(&self, name: &str) -> Result<BridgeServer, String> {
+        let caller = caller_principal(&self.db, self.user_id).await?;
+        let model = match server_for(&self.db, &caller, name).await {
+            Ok(model) => model,
+            Err(LymailleError::Forbidden(_)) => {
+                return Err(format!("serveur MCP inconnu : « {name} »"));
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let resolver = std::sync::Arc::new(EnvSecretResolver);
+        let headers = match build_auth(&model, resolver.clone(), None) {
+            Ok(None) => Vec::new(),
+            // `Some` sans jeton interactif : le mode `forward` a été refusé par `build_auth`
+            // ci-dessous, reste `static` — la valeur est résolue par le même
+            // `SecretResolver` à cet instant (`McpHeaders` de `lymaille` n'exposant pas ses
+            // valeurs, le pont compose l'en-tête lui-même ; écart consigné au rapport).
+            Ok(Some(_auth)) => {
+                let reference = model
+                    .auth_ref
+                    .ok_or("mcp auth reference unresolved")
+                    .map_err(|e: &str| e.to_string())?;
+                let secret = resolver
+                    .resolve(&reference)
+                    .map_err(|_| "mcp auth reference unresolved".to_string())?;
+                vec![("Authorization".to_string(), format!("Bearer {}", *secret))]
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(BridgeServer {
+            name: model.name,
+            url: model.url,
+            headers,
+            lymaille: true,
+        })
+    }
+}
+
+/// Énumération des serveurs lymaille visibles par l'utilisateur du run : toutes les lignes de
+/// `miryad_core::lymaille::definitions::mcp_server`, filtrées par `mcp_access::server_for`
+/// (`rhai.sdd` `Must` — un serveur interdit est absent, jamais distingué d'un absent ; les
+/// serveurs `forward` restent énumérés, l'erreur tombe à l'appel — Tasks `[?]` de `rhai.sdd`).
+pub(crate) async fn enumerate_lymaille_servers(
+    db: &sea_orm::DatabaseConnection,
+    user_id: i32,
+) -> Result<Vec<BridgeServer>, String> {
+    use sea_orm::EntityTrait;
+    let caller = caller_principal(db, user_id).await?;
+    let rows = mcp_server::Entity::find().all(db).await.map_err(|e| {
+        tracing::warn!(error = %e, "step rhai : énumération des serveurs MCP indisponible");
+        "énumération des serveurs MCP indisponible".to_string()
+    })?;
+    let mut servers = Vec::new();
+    for row in rows {
+        match server_for(db, &caller, &row.name).await {
+            Ok(model) => servers.push(BridgeServer {
+                name: model.name,
+                url: model.url,
+                headers: Vec::new(),
+                lymaille: true,
+            }),
+            // Interdit comme absent : absent de la liste, sans distinction.
+            Err(LymailleError::Forbidden(_)) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(servers)
 }
 
 /// Contexte partagé des fonctions Rhai d'une exécution.
@@ -43,10 +164,15 @@ pub(crate) struct BridgeServer {
 pub(crate) struct McpBridge {
     pub http: reqwest::Client,
     pub handle: tokio::runtime::Handle,
-    /// Serveurs visibles par le script (utilisateur + sandbox si portée sandbox) — résolus une
-    /// fois par exécution à l'usage (`Must` : aucun état partagé entre exécutions).
+    /// Serveurs visibles par le script (lymaille autorisés + `sandbox` si portée sandbox) —
+    /// résolus une fois par exécution à l'usage (`Must` : aucun état partagé entre
+    /// exécutions).
     pub servers: Arc<std::sync::OnceLock<Result<Vec<BridgeServer>, String>>>,
     list: Arc<dyn Fn() -> Result<Vec<BridgeServer>, String> + Send + Sync>,
+    /// Accès lymaille du run : droit et authentification relus à chaque appel sur les
+    /// serveurs lymaille (`rhai.sdd` `Must`). `None` = plan sans relecture (serveurs `sandbox`
+    /// seuls, ou harnais de test).
+    pub access: Option<LymailleAccess>,
     pub calls: Arc<AtomicUsize>,
 }
 
@@ -90,6 +216,19 @@ impl McpBridge {
             .into_iter()
             .find(|s| s.name == name)
             .ok_or_else(|| format!("serveur MCP inconnu : « {name} »"))
+    }
+
+    /// Cible d'un appel : un serveur fixe du plan est rendu tel quel ; un serveur lymaille est
+    /// relu et ré-autorisé À L'APPEL (`rhai.sdd` `Must` : `server_for` sans cache, secret
+    /// résolu à l'appel).
+    fn resolve_target(&self, name: &str) -> Result<BridgeServer, String> {
+        let srv = self.find(name)?;
+        if srv.lymaille
+            && let Some(access) = &self.access
+        {
+            return self.handle.block_on(access.authorize(name));
+        }
+        Ok(srv)
     }
 
     /// Un appel JSON-RPC 2.0 (POST unique, sans état — la forme réelle de `sandbox/src/mcp.rs`).
@@ -194,7 +333,7 @@ impl McpBridge {
 
     /// `tools/list` sur le serveur nommé, en array de maps `{name, description, input_schema}`.
     fn list_tools(&self, server: &str) -> Result<rhai::Array, String> {
-        let srv = self.find(server)?;
+        let srv = self.resolve_target(server)?;
         self.take_call()?;
         let result = self
             .handle
@@ -233,7 +372,7 @@ impl McpBridge {
         tool: &str,
         args: rhai::Map,
     ) -> Result<rhai::Dynamic, String> {
-        let srv = self.find(server)?;
+        let srv = self.resolve_target(server)?;
         self.take_call()?;
         let arguments = dynamic_to_json(&rhai::Dynamic::from(args));
         let result = self.handle.block_on(self.rpc(
@@ -270,8 +409,9 @@ impl McpBridge {
     }
 }
 /// Le `RhaiStep` de miryad-core enrichi (`rhai.sdd` `Exposes`) : les serveurs MCP visibles sont
-/// ceux de l'utilisateur du run (`PgConfigStore` borné), plus `sandbox` en portée sandbox —
-/// résolus une fois par exécution au premier usage des fonctions MCP.
+/// les serveurs lymaille que l'utilisateur du run a le droit d'utiliser (relecture en base sans
+/// cache), plus `sandbox` en portée sandbox — résolus une fois par exécution au premier usage
+/// des fonctions MCP, mais ré-autorisés à chaque appel sur les serveurs lymaille.
 pub fn rhai_step(env: StepEnv) -> RhaiStep {
     RhaiStep::default().with_setup(move |script, config, _inputs| {
         let Ok(run) = RunInfo::from_config(config) else {
@@ -280,51 +420,51 @@ pub fn rhai_step(env: StepEnv) -> RhaiStep {
         };
         let handle = tokio::runtime::Handle::current();
         let http = env.http.clone();
-        let db = env.db.clone();
+        let access = LymailleAccess {
+            db: env.db.clone(),
+            user_id: run.user_id,
+        };
         let locator = Arc::new(super::K8sLocator::new(env.k8s.clone()));
         let owner = run.owner.clone();
         let sandbox = run.sandbox.clone();
-        let user_id = run.user_id;
-        let list = move || {
-            let http_store = PgConfigStore::new(db.clone(), user_id);
-            let locator = locator.clone();
-            let owner = owner.clone();
-            let sandbox = sandbox.clone();
-            handle.block_on(async move {
-                let user = http_store
-                    .list_mcp_servers()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|s| BridgeServer {
-                        name: s.name,
-                        url: s.url,
-                        headers: s.headers.into_iter().collect(),
-                    })
-                    .collect();
-                let sbx = match &sandbox {
-                    Some(name) => {
-                        let token = locator.token(&owner).await.map_err(|e| e.message)?;
-                        let base = locator
-                            .base_url(&owner, name)
-                            .await
-                            .map_err(|e| e.message)?;
-                        Some(BridgeServer {
-                            name: "sandbox".to_string(),
-                            url: format!("{base}/mcp"),
-                            headers: vec![("Authorization".to_string(), format!("Bearer {token}"))],
-                        })
-                    }
-                    None => None,
-                };
-                Ok(plan_servers(user, sbx))
-            })
+        let list = {
+            let access = access.clone();
+            move || {
+                let access = access.clone();
+                let locator = locator.clone();
+                let owner = owner.clone();
+                let sandbox = sandbox.clone();
+                handle.block_on(async move {
+                    let user = enumerate_lymaille_servers(&access.db, access.user_id).await?;
+                    let sbx = match &sandbox {
+                        Some(name) => {
+                            let token = locator.token(&owner).await.map_err(|e| e.message)?;
+                            let base = locator
+                                .base_url(&owner, name)
+                                .await
+                                .map_err(|e| e.message)?;
+                            Some(BridgeServer {
+                                name: "sandbox".to_string(),
+                                url: format!("{base}/mcp"),
+                                headers: vec![(
+                                    "Authorization".to_string(),
+                                    format!("Bearer {token}"),
+                                )],
+                                lymaille: false,
+                            })
+                        }
+                        None => None,
+                    };
+                    Ok(plan_servers(user, sbx))
+                })
+            }
         };
         let bridge = McpBridge {
             http,
             handle: tokio::runtime::Handle::current(),
             servers: Arc::new(std::sync::OnceLock::new()),
             list: Arc::new(list),
+            access: Some(access),
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         register_mcp_fns(&mut script.engine, &bridge);
@@ -479,18 +619,60 @@ mod tests {
                 } else {
                     vec![]
                 },
+                lymaille: false,
             })
             .collect();
-        let http = reqwest::Client::new();
-        let handle = tokio::runtime::Handle::current();
+        bridge_with(servers, None)
+    }
+
+    /// Pont sur un plan de serveurs déjà résolus, avec ou sans accès lymaille (relecture à
+    /// l'appel quand les serveurs portent `lymaille = true`).
+    fn bridge_with(servers: Vec<BridgeServer>, access: Option<LymailleAccess>) -> McpBridge {
         let list = move || Ok(servers.clone());
         McpBridge {
-            http,
-            handle,
+            http: reqwest::Client::new(),
+            handle: tokio::runtime::Handle::current(),
             servers: Arc::new(std::sync::OnceLock::new()),
             list: Arc::new(list),
+            access,
             calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Seed : un serveur global de `miryad_lymaille_mcp_servers` (`miryad-core#DEC-14`), posé
+    /// par le migrateur miryad-core dans `real_db()`. Insertion directe par l'entité : les
+    /// hooks `MiryadResource` ne gardent que la voie CRUD, `ActiveModelBehavior` est vide.
+    async fn seed_mcp_server(
+        db: &impl sea_orm::ConnectionTrait,
+        name: &str,
+        url: &str,
+        allowed: Value,
+    ) {
+        use sea_orm::EntityTrait;
+        miryad_core::lymaille::definitions::mcp_server::Entity::insert(
+            miryad_core::lymaille::definitions::mcp_server::ActiveModel {
+                id: sea_orm::ActiveValue::NotSet,
+                name: sea_orm::Set(name.to_string()),
+                url: sea_orm::Set(url.to_string()),
+                request_timeout_secs: sea_orm::Set(30),
+                connect_timeout_secs: sea_orm::Set(10),
+                auth_mode: sea_orm::Set("none".to_string()),
+                auth_ref: sea_orm::Set(None),
+                allowed_groups: sea_orm::Set(allowed),
+                created_at: sea_orm::Set(chrono::Utc::now()),
+            },
+        )
+        .exec(db)
+        .await
+        .expect("serveur lymaille semé");
+    }
+
+    /// Seed : l'utilisatrice `alice` (chemin miryad-core) — retourne sa clé primaire.
+    async fn seed_user(db: &impl sea_orm::ConnectionTrait, subject: &str) -> i32 {
+        miryad_core::users::resolve_user(db, subject, None)
+            .await
+            .expect(" utilisatrice résolue")
+            .id
     }
 
     fn engine(step_id: &str) -> EngineRunInfo {
@@ -513,21 +695,108 @@ mod tests {
     }
 
     // ── Scenario: lister_les_serveurs ───────────────────────────────────────
-    // Deux serveurs configurés ⇒ l'array de leurs noms (+ `sandbox` en portée sandbox —
-    // l'assertion différentielle projet/sandbox est le Scenario nommé
-    // `pas_de_sandbox_en_portee_projet`).
+    // (amendé C3 du chantier lymaille) Deux serveurs globaux dont `allowed_groups` autorise
+    // le déclencheur, semés dans `miryad_lymaille_mcp_servers` : l'array de leurs noms.
+    // L'apport `sandbox` en portée sandbox est le Scenario `pas_de_sandbox_en_portee_projet`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lister_les_serveurs() {
         let auth = Arc::new(Mutex::new(Vec::new()));
         let url = spawn_mcp_fake(auth).await;
-        let bridge = bridge_for(
-            vec![("test", &url), ("autre", &url)],
-            Some(("sandbox", &url)),
-        );
+        let db = crate::db::test_support::real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        seed_mcp_server(&db, "alpha", &url, json!(["all"])).await;
+        seed_mcp_server(&db, "beta", &url, json!(["all"])).await;
+
+        let servers = enumerate_lymaille_servers(&db, alice)
+            .await
+            .expect("énumération lymaille");
+        let bridge = bridge_with(servers, None);
         let out = run_script(bridge, "#{ names: mcp_servers() }")
             .await
             .expect("mcp_servers() répond");
-        assert_eq!(out["names"], json!(["test", "autre", "sandbox"]));
+        let mut names = out["names"]
+            .as_array()
+            .expect("un array")
+            .iter()
+            .map(|n| n.as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["alpha", "beta"], "les deux serveurs autorisés");
+    }
+
+    // ── Scenario: un serveur interdit n'est pas énuméré ─────────────────────
+    // Contrat C3 du chantier lymaille : le droit vient d'`allowed_groups` tranché par
+    // `mcp_access::server_for`, relu à l'énumération COMME à l'appel. Un serveur
+    // `allowed_groups = ["ops"]` hors du groupe est absent de `mcp_servers()` et son appel
+    // lève le même texte que pour un serveur absent (pas d'oracle d'existence).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn un_serveur_interdit_nest_pas_enumer() {
+        let auth = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_mcp_fake(auth).await;
+        let db = crate::db::test_support::real_db().await;
+        let alice = seed_user(&db, "alice").await;
+        seed_mcp_server(&db, "alpha", &url, json!(["all"])).await;
+        seed_mcp_server(&db, "secret", &url, json!(["ops"])).await;
+
+        // (a) À l'énumération : `alpha` visible, `secret` absent — comme s'il n'existait pas.
+        let servers = enumerate_lymaille_servers(&db, alice)
+            .await
+            .expect("énumération lymaille");
+        let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"alpha"), "le serveur autorisé est listé");
+        assert!(
+            !names.contains(&"secret"),
+            "le serveur interdit ne doit pas être énuméré : {names:?}"
+        );
+
+        // (b) À l'appel sur le plan fraîchement énuméré : texte identique à un serveur jamais
+        // vu — aucune distinction « interdit » / « inexistant ».
+        let err_forbidden = run_script(
+            bridge_with(servers.clone(), None),
+            "#{ x: mcp_call_tool(\"secret\", \"echo\", #{ text: \"hi\" }) }",
+        )
+        .await
+        .expect_err("le serveur interdit n'est pas appelable");
+        let err_absent = run_script(
+            bridge_with(servers, None),
+            "#{ x: mcp_call_tool(\"fantome\", \"echo\", #{ text: \"hi\" }) }",
+        )
+        .await
+        .expect_err("le serveur jamais vu est refusé pareillement");
+        assert!(
+            err_forbidden.contains("serveur MCP inconnu"),
+            "message contractuel : {err_forbidden}"
+        );
+        assert!(
+            err_absent.contains("serveur MCP inconnu"),
+            "message contractuel : {err_absent}"
+        );
+
+        // (c) Relecture à l'appel (`Must`, sans cache) : un plan périmé qui mentionne encore
+        // `secret` est refusé au premier appel, du même texte — le droit est tranché par
+        // `server_for` sur l'état de la base, pas sur le plan.
+        let stale = vec![BridgeServer {
+            name: "secret".to_string(),
+            url: url.clone(),
+            headers: vec![],
+            lymaille: true,
+        }];
+        let err_stale = run_script(
+            bridge_with(
+                stale,
+                Some(LymailleAccess {
+                    db: db.clone(),
+                    user_id: alice,
+                }),
+            ),
+            "#{ x: mcp_call_tool(\"secret\", \"echo\", #{ text: \"hi\" }) }",
+        )
+        .await
+        .expect_err("la relecture à l'appel refuse le serveur interdit");
+        assert!(
+            err_stale.contains("serveur MCP inconnu"),
+            "relecture à l'appel, même texte sans oracle : {err_stale}"
+        );
     }
 
     // ── Scenario: pas_de_sandbox_en_portee_projet ───────────────────────────
@@ -572,6 +841,7 @@ mod tests {
                 name: "test".to_string(),
                 url: url.clone(),
                 headers: vec![],
+                lymaille: false,
             }],
             None,
         );
@@ -780,11 +1050,13 @@ mod tests {
             name: "u".to_string(),
             url: "http://u".to_string(),
             headers: vec![],
+            lymaille: false,
         }];
         let sbx = BridgeServer {
             name: "sandbox".to_string(),
             url: "http://s/mcp".to_string(),
             headers: vec![("Authorization".to_string(), "Bearer t".to_string())],
+            lymaille: false,
         };
         let both = plan_servers(user.clone(), Some(sbx.clone()));
         assert_eq!(

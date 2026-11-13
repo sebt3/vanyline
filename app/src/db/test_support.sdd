@@ -26,9 +26,9 @@ Can read:
 Exposes:
   `@pub(crate) async fn real_db() -> @sea_orm::DatabaseConnection` — unique item public du
     fichier, visible du crate uniquement et sous `cfg(test)` seulement. Consommateurs
-    actuels : `../migration/mod.rs` (test `full_migration_set_applies_against_a_real_schema`),
-    `../db/entities/agents.rs`, `../api/llm_providers.rs` (via son `test_state()`)
-    (`../api/conversations.rs` retiré en C2 du chantier lymaille, 2026-11-12).
+    actuels : `../migration/mod.rs` (test `full_migration_set_applies_against_a_real_schema`)
+    (`../db/entities/agents.rs` et `../api/llm_providers.rs` retirés en C3 du chantier
+    lymaille, 2026-11-12 ; `../api/conversations.rs` l'avait été en C2).
 
 Accepts:
   Aucun paramètre. Appelable uniquement depuis du code compilé sous `cfg(test)` du crate
@@ -117,7 +117,7 @@ Scenario: schéma migré et vide à chaque appel
 Scenario: aller-retour DB réel sans Postgres externe
   Given un environnement sans Postgres joignable et sans `DATABASE_URL` définie
   When `cargo test -p vanyline-app` s'exécute
-  Then les tests branchés sur `real_db()` (migration, `agents`, `llm_providers`)
+  Then les tests branchés sur `real_db()` (migration, `../api/*`)
     passent, prouvant que la fixture ne requiert aucun service
 
 Scenario: insert visible avec vraies contraintes d'intégrité

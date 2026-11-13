@@ -17,7 +17,10 @@ Can read:
   ./mod.sdd
   ../run_context.sdd
   /lib/src/prefixed_mcp.sdd
-  /app/src/db/entities/mcp_servers.sdd
+  miryad-core (crate externe) : `src/lymaille/mcp_access.sdd` (résolution et droits des
+    serveurs), `src/lymaille/definitions/mcp_server.sdd` (entité de la table
+    `miryad_lymaille_mcp_servers`) — la table et l'entité vanyline `mcp_servers` sont
+    retirées en C3 du chantier lymaille.
 
 Exposes:
   @rhai_step(env: StepEnv) -> RhaiStep — le `RhaiStep` de miryad-core (kind `rhai`, `config.script`)
@@ -30,8 +33,19 @@ Exposes:
       erreur Rhai (le script peut l'attraper).
 
 Handles:
-  Serveurs disponibles : les `McpServer` configurés (ressources globales de l'app) que
-  l'utilisateur déclencheur peut utiliser, plus, pour un run de portée SANDBOX seulement, le
+  Serveurs disponibles (résource changée en C3 du chantier lymaille, 2026-11-12 : la
+  table `vanyline_mcp_servers` et `PgConfigStore` n'existent plus) : les lignes de
+  `miryad_core::lymaille::definitions::mcp_server` (table `miryad_lymaille_mcp_servers`,
+  ressources GLOBALES administrées par l'admin) que l'utilisateur déclencheur peut
+  utiliser — le droit est tranché par `mcp_access::server_for` sur `allowed_groups`
+  (`all`, `admin`, appartenance à un groupe), avec un `CallerPrincipal` reconstruit depuis
+  le compte du run (`users::user::Entity::find_by_id(user_id)` pour le `subject`,
+  `users::group::is_admin`) ; jamais de décision d'accès propre à vanyline.
+  L'authentification est celle du modèle lymaille (`build_auth` avec le
+  @miryad_core::lymaille::EnvSecretResolver de `../sessions/mod.sdd`) : `none` sans
+  en-tête, `static` en porteur résolu à l'appel (jamais figé au montage), `forward` sans
+  session interactive donc inutilisable en batch (cf. Tasks `[?]`).
+  Plus, pour un run de portée SANDBOX seulement, le
   serveur `sandbox` (URL interne de la sandbox du run, jeton de l'Owner). Un workflow de projet
   n'a jamais le serveur `sandbox` : il n'a pas de sandbox (aucune règle supplémentaire
   nécessaire ; un script de sandbox qui lance du shell via ce serveur est équivalent à un
@@ -44,7 +58,9 @@ Handles:
   distinguer « n'existe pas » de « interdit ».
 
 Must:
-  Ne donner accès qu'aux serveurs MCP de l'utilisateur du run.
+  Ne donner accès qu'aux serveurs MCP que l'utilisateur du run a le droit d'utiliser
+    (`allowed_groups` vérifié par `mcp_access::server_for` à l'énumération comme à
+    l'appel, relecture en base sans cache — contrat de miryad-core).
   Borner chaque appel MCP (60 s) et leur nombre (200 par exécution).
   Ne jamais exposer le jeton de l'Owner ni les en-têtes MCP au script.
   Créer un client MCP par exécution (aucun état partagé entre exécutions de scripts).
@@ -58,15 +74,29 @@ Tasks:
     `with_setup` est livré en miryad-core 0.1.5 (source du registre vérifiée, tests
     inclus ; validation W2 2026-10-10) — kind implémenté et testé
     (`kind_rhai_via_le_rhaistep_de_miryad`).
+  [?] Serveurs `forward` en batch : `build_auth` refuse le mode `forward` sans jeton
+      interactif (`Forbidden`) — les écarter de `mcp_servers()` ou les énumérer et lever
+      l'erreur à l'appel ? Écarter silencieusement est le défaut proposé (cohérent avec
+      « serveur inutilisable ») ; à ratifier avec la politique `Denied`/`HostError` de
+      `../../sessions/host.sdd`.
   [!] Pont MCP POST-only SANS ÉTAT : les serveurs externes à session (`Mcp-Session-Id`,
     handshake `initialize`) sont hors de portée du pont rhai — seul le profil du serveur
     MCP de la sandbox (strictement sans état, ../../sandbox/src/mcp.sdd) est atteint
     (borné W2 2026-10-10 ; séam `prefixed_mcp` privé).
 
 Scenario: lister_les_serveurs
-  Given deux serveurs MCP configurés pour l'utilisateur
+  Given deux serveurs MCP globaux dont `allowed_groups` autorise l'utilisateur
+    déclencheur (semés dans `miryad_lymaille_mcp_servers`, `miryad-core#DEC-14)
   When un script appelle `mcp_servers()`
   Then un array de ces deux noms (et `sandbox` seulement en portée sandbox)
+
+Scenario: un serveur interdit n'est pas énuméré
+  # Contrat C3 du chantier lymaille : le droit vient de `allowed_groups` tranché par
+  # `mcp_access::server_for`, plus de liste par utilisateur.
+  Given un serveur global `allowed_groups = ["ops"]` et un déclencheur NON membre de `ops`
+  When un script appelle `mcp_servers()` puis `mcp_call_tool` sur ce serveur
+  Then le serveur n'apparaît pas dans l'array et l'appel lève l'erreur « serveur MCP
+    inconnu » — même texte que pour un serveur absent (pas d'oracle d'existence)
 
 Scenario: lister_les_outils
   Given un serveur de test exposant `ping`

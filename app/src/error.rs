@@ -10,20 +10,11 @@ use thiserror::Error;
 pub enum AppError {
     #[error("VNL-AUTH-004: Forbidden")]
     Forbidden,
-    #[error("VNL-LLM-001: LLM provider error: {0}")]
-    LlmError(String),
-    #[error("VNL-LLM-002: LLM provider not found")]
-    LlmProviderNotFound,
+    // Les variantes de la config LLM maison (`LlmError`, `LlmProviderNotFound`,
+    // `AgentNotFound`, `UnprocessableReference`) sont retirées C3 : la config vit désormais
+    // dans les ressources lymaille de miryad-core — `./error.sdd`.
     #[error("VNL-MCP-001: MCP server error: {0}")]
     McpError(String),
-    #[error("VNL-AGT-001: Agent not found")]
-    // Réservée, plus émise depuis C2 (seul constructeur : ./ws/chat.rs, retiré) — `error.sdd` Tasks `[?]`.
-    #[allow(dead_code)]
-    AgentNotFound,
-    #[error("{0}")]
-    // Réservée, plus émise depuis C2 (seul constructeur manuel : ./api/conversations.rs, retiré) — `error.sdd` Tasks `[?]`.
-    #[allow(dead_code)]
-    UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-REQ-001: Request error: {0}")]
     RequestError(#[from] reqwest::Error),
     #[error("VNL-INT-001: Internal error: {0}")]
@@ -123,30 +114,19 @@ impl From<vanyline_lib::VnyError> for AppError {
     }
 }
 
-impl From<vanyline_cfgstore::CfgStoreError> for AppError {
-    fn from(e: vanyline_cfgstore::CfgStoreError) -> Self {
-        Self::InternalError(e.to_string())
-    }
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::LlmError(_)
-            | Self::McpError(_)
+            Self::McpError(_)
             | Self::RequestError(_)
             | Self::K8sConfigError(_)
             | Self::SandboxRelayUnavailable => (StatusCode::BAD_GATEWAY, self.to_string()),
-            Self::LlmProviderNotFound
-            | Self::AgentNotFound
-            | Self::K8sNotFound(_)
+            Self::K8sNotFound(_)
             | Self::WorkflowSandboxNotFound
             | Self::WorkflowRunNotFound
             | Self::WorkflowNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::UnprocessableReference(_)
-            | Self::SandboxBranchEmpty
-            | Self::WorkflowKindForbidden(_) => {
+            Self::SandboxBranchEmpty | Self::WorkflowKindForbidden(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
             }
             Self::InternalError(_) | Self::K8sApiError(_) => {
@@ -177,13 +157,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unprocessable_reference_maps_to_422() {
-        let err = vanyline_lib::VnyError::UnknownReference("provider", "ghost".to_string());
-        let resp = AppError::UnprocessableReference(err).into_response();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[test]
     fn k8s_config_error_maps_to_502() {
         let resp = AppError::K8sConfigError("x".into()).into_response();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
@@ -199,6 +172,42 @@ mod tests {
     fn k8s_not_found_maps_to_404() {
         let resp = AppError::K8sNotFound("x".into()).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Scenario: `les traces de la config LLM maison ont disparu de ce fichier` — remplacement
+    /// de `conversion_cfgstore_toutes_variantes_vers_500_display_complet` et
+    /// `unprocessable_reference_rend_le_marqueur_du_vny_interne` (retraits C3 du chantier
+    /// lymaille). La partie production du fichier (avant `#[cfg(test)]`) ne doit porter aucune
+    /// de ces lignes hors commentaires : la détermination vient du retrait sur `//` de chaque
+    /// ligne, les commentaires (dont doc) restant permis comme trace historique. Le
+    /// `Cargo.toml` de l'app ne dépend plus de `vanyline-cfgstore`.
+    #[test]
+    fn les_traces_de_la_config_llm_maison_ont_disparu_de_ce_fichier() {
+        let source = include_str!("error.rs");
+        let cargo = include_str!("../Cargo.toml");
+        let prod = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production part precedes tests");
+        for withdrawn in [
+            "CfgStoreError",
+            "UnprocessableReference",
+            "LlmError",
+            "LlmProviderNotFound",
+            "AgentNotFound",
+        ] {
+            for line in prod.lines() {
+                let code = line.split("//").next().unwrap_or(line);
+                assert!(
+                    !code.contains(withdrawn),
+                    "trace de la config LLM maison hors commentaire : {line}"
+                );
+            }
+        }
+        assert!(
+            !cargo.contains("vanyline-cfgstore"),
+            "l'app ne doit plus dépendre de vanyline-cfgstore"
+        );
     }
 
     #[test]
@@ -234,32 +243,9 @@ mod tests {
                 StatusCode::FORBIDDEN,
             ),
             (
-                AppError::LlmError("boom".into()),
-                "VNL-LLM-001: LLM provider error: boom".into(),
-                StatusCode::BAD_GATEWAY,
-            ),
-            (
-                AppError::LlmProviderNotFound,
-                "VNL-LLM-002: LLM provider not found".into(),
-                StatusCode::NOT_FOUND,
-            ),
-            (
                 AppError::McpError("boom".into()),
                 "VNL-MCP-001: MCP server error: boom".into(),
                 StatusCode::BAD_GATEWAY,
-            ),
-            (
-                AppError::AgentNotFound,
-                "VNL-AGT-001: Agent not found".into(),
-                StatusCode::NOT_FOUND,
-            ),
-            (
-                AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
-                    "agent",
-                    "ghost".into(),
-                )),
-                "VNL-CFG-003: Unknown agent reference: 'ghost'".into(),
-                StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (
                 AppError::RequestError(req),
@@ -418,24 +404,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn unprocessable_reference_rend_le_marqueur_du_vny_interne() {
-        let resp = AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
-            "agent",
-            "ghost".into(),
-        ))
-        .into_response();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .expect("body reads");
-        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("body is JSON");
-        assert_eq!(
-            json,
-            serde_json::json!({"error": "VNL-CFG-003: Unknown agent reference: 'ghost'"})
-        );
-    }
-
     #[test]
     fn conversion_dberr_vers_internal_error_prefixe_vnl_db_006() {
         // Le Display réel de `DbErr::Custom` ajoute « Custom Error: » (écart avec le
@@ -531,33 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn conversion_cfgstore_toutes_variantes_vers_500_display_complet() {
-        let ro = AppError::from(vanyline_cfgstore::CfgStoreError::ReadOnly);
-        assert_eq!(
-            ro.to_string(),
-            "VNL-INT-001: Internal error: VNL-CFG-009: Config store is read-only"
-        );
-        assert_eq!(
-            ro.into_response().status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-
-        let nf = AppError::from(vanyline_cfgstore::CfgStoreError::NotFound {
-            kind: "provider",
-            name: "p".into(),
-            layer: vanyline_cfgstore::store::Layer::Workspace,
-        });
-        assert_eq!(
-            nf.to_string(),
-            "VNL-INT-001: Internal error: VNL-CFG-006: provider 'p' not found in Workspace layer"
-        );
-        assert_eq!(
-            nf.into_response().status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    #[test]
     fn conversion_reqwest_generee_source_std_error_et_502() {
         let err = AppError::RequestError(reqwest_error());
         assert!(err.to_string().starts_with("VNL-REQ-001: Request error: "));
@@ -581,12 +522,9 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production part precedes tests");
-        let expected: [(&str, usize); 29] = [
+        let expected: [(&str, usize); 26] = [
             ("VNL-AUTH-004", 1),
-            ("VNL-LLM-001", 1),
-            ("VNL-LLM-002", 1),
             ("VNL-MCP-001", 1),
-            ("VNL-AGT-001", 1),
             ("VNL-REQ-001", 1),
             ("VNL-INT-001", 1),
             ("VNL-K8S-001", 1),

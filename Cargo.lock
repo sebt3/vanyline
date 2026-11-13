@@ -9023,11 +9023,9 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
- "vanyline-cfgstore",
  "vanyline-crds",
  "vanyline-health",
  "vanyline-lib",
- "vanyline-tools",
  "zeroize",
 ]
 

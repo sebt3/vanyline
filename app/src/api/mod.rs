@@ -1,5 +1,3 @@
-pub mod llm_providers;
-pub mod mcp_servers;
 pub mod me;
 pub mod owners;
 pub mod projects;
@@ -8,28 +6,10 @@ pub mod workflows;
 
 use axum::{
     Router,
-    routing::{any, get, post, put},
+    routing::{any, get, post},
 };
 
 use crate::AppState;
-
-/// Endpoints métier non-CRUD des ressources `resource_router` (`llm-providers`, `mcp-servers`) —
-/// montés à part sous `/api/v1`, au même préfixe que le CRUD généré de ces mêmes ressources
-/// (décision Phase 1 : "conservés en handlers axum custom, à côté de `resource_router`). Vivaient
-/// auparavant sous `/api` non versionné, en désaccord avec cette décision (trouvé en revue
-/// Phase 3, cf. `docs/features/miryad-core-integration.md`).
-pub fn api_v1_router() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/llm-providers/{id}/test",
-            post(llm_providers::test_provider),
-        )
-        .route(
-            "/llm-providers/{id}/default",
-            put(llm_providers::set_default_provider),
-        )
-        .route("/mcp-servers/{id}/test", post(mcp_servers::test_server))
-}
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
@@ -101,7 +81,7 @@ mod tests {
 
     /// `AppState` sans I/O : les Scenarios n'exercent que la table de routage, l'extracteur
     /// `AuthUser` refusant avant tout accès DB (précédent : `test_state` de
-    /// `./llm_providers.rs`, ici avec `test_auth_state` mocké de `../auth/mod.rs`).
+    /// `./projects.rs`, ici avec `test_auth_state` mocké de `../auth/mod.rs`).
     fn test_state() -> AppState {
         AppState {
             config: crate::config::Config {
@@ -183,5 +163,24 @@ mod tests {
             StatusCode::NOT_FOUND,
             "GET /api/me doit être monté"
         );
+    }
+
+    /// Scenario: `les routes custom de la config LLM maison ne sont plus montées` — retrait C3
+    /// du chantier lymaille : `./llm_providers.rs`, `./mcp_servers.rs` et `api_v1_router` sont
+    /// retirés, CE router ne sert plus ces chemins (ils vivaient sous le `nest` `/api/v1` de
+    /// `../main.rs`, plus les chemins relatifs de CE router).
+    #[tokio::test]
+    async fn routes_config_llm_maison_plus_montees() {
+        for (method, uri) in [
+            ("POST", "/api/llm-providers/7/test"),
+            ("PUT", "/api/llm-providers/7/default"),
+            ("POST", "/api/mcp-servers/7/test"),
+        ] {
+            assert_eq!(
+                ask(method, uri).await,
+                StatusCode::NOT_FOUND,
+                "{method} {uri} : aucune route de la config LLM maison retirée en C3 ne doit être montée"
+            );
+        }
     }
 }

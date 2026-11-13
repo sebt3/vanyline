@@ -21,11 +21,11 @@ Structure:
     est vide, l'`app` n'utilise que `miryad_core::auth` directement.
   ../db/test_support.sdd — (spec à écrire) `real_db` : connexion sqlite en mémoire avec
     migrations, documentée comme partenaire de @test_auth_state_with_db.
-  Consommateurs connus (tests uniquement) : `../api/me.rs`, `../api/llm_providers.rs`,
-    `../api/mcp_servers.rs`, `../api/sandboxes.rs`,
-    `../api/projects.rs`, `../db/entities/agents.rs` (les consommateurs
+  Consommateurs connus (tests uniquement) : `../api/me.rs`, `../api/sandboxes.rs`,
+    `../api/projects.rs` (les consommateurs
     `api/conversations.rs` et `api/local_tools.rs` ont été retirés en C2 du chantier
-    lymaille, 2026-11-12).
+    lymaille, 2026-11-12 ; `api/llm_providers.rs`, `api/mcp_servers.rs` et
+    `db/entities/agents.rs` en C3 du même jour).
 
 Exposes:
   @crate::auth::test_support — module `pub(crate)` réservé aux tests (`#[cfg(test)]`),

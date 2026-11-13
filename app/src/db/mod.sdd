@@ -14,12 +14,14 @@ Owns:
 Structure:
   ./mod.rs — déclarations `pub mod entities;` et
     `#[cfg(test)] pub(crate) mod test_support;`, rien d'autre.
-  ./entities/ — douze modules d'entités SeaORM déclarés dans
-    ./entities/mod.rs dans l'ordre alphabétique : `agents`, `app_settings`,
-    `llm_providers`, `mcp_servers`, `model_profiles`,
-    `owner_links`, `project_workflows`, `projects`, `sandboxes`, `skills`, `toolsets`,
+  ./entities/ — six modules d'entités SeaORM déclarés dans
+    ./entities/mod.rs dans l'ordre alphabétique : `app_settings`,
+    `owner_links`, `project_workflows`, `projects`, `sandboxes`,
     `workflow_runs` (les entités du chat maison — `chat_contexts`, `conversations`,
-    `messages` — retirées en C2 du chantier lymaille, 2026-11-12). Chaque fichier
+    `messages` — retirées en C2 du chantier lymaille, les six entités de configuration
+    LLM — `agents`, `llm_providers`, `mcp_servers`, `model_profiles`, `skills`,
+    `toolsets` — retirées en C3 du même chantier, 2026-11-12 ; la configuration est
+    portée par `miryad_core::lymaille::definitions`). Chaque fichier
     ./entities/<nom>.rs a ou aura sa spec ./entities/<nom>.sdd ; c'est là que vit le
     contrat des modèles, colonnes et relations.
   ./test_support.rs — module `pub(crate)` réservé aux tests (`#[cfg(test)]`
@@ -29,7 +31,7 @@ Structure:
     appliquées intégralement — même paire de migrations que `main.rs` au
     démarrage, d'où son usage pour les tests d'aller-retour réel en base
     (cf. régression `id: Set(0)` documentée dans le fichier). Consommé par
-    les tests de `../config_store.rs`, `../api/*.rs`, `./entities/*.rs`
+    les tests de `../api/*.rs`, `./entities/*.rs`
     et `../migration/mod.rs`. Sa spec détaillée (éventuelle, en plus du
     commentaire du fichier) relève d'un fichier dédié si le module grossit.
 

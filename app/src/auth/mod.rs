@@ -76,7 +76,7 @@ mod scenario_tests {
     };
 
     use crate::auth::test_support::{TEST_TOKEN_PEPPER, test_auth_state, test_auth_state_with_db};
-    use crate::db::entities::llm_providers;
+    use crate::db::entities::owner_links;
     use crate::db::test_support::real_db;
 
     /// Scenario: `etat_de_test_avec_base_mock`
@@ -147,27 +147,29 @@ mod scenario_tests {
         assert_eq!(state.token_pepper, TEST_TOKEN_PEPPER);
 
         // Aller-retour DB réel impossible avec MockDatabase : insert puis relecture par
-        // l'état lui-même (désérialisation réelle, cf. pattern de db/entities/agents.rs).
-        let provider = llm_providers::ActiveModel {
+        // l'état lui-même (désérialisation réelle). L'entité de sonde est `owner_links` —
+        // l'ancien précédent agents.rs/llm_providers est retiré C3 (la config LLM maison
+        // n'existe plus) ; la FK vers `miryad_users` est active ici, le compte est semé
+        // d'abord par `resolve_user` de miryad-core.
+        let account = miryad_core::users::resolve_user(&state.db, "u-sonde-0001", None)
+            .await
+            .expect("compte de sonde semé");
+        let link = owner_links::ActiveModel {
             id: NotSet,
-            name: Set("roundtrip".to_string()),
-            provider_type: Set("ollama".to_string()),
-            endpoint: Set("http://localhost:11434".to_string()),
-            api_key: Set(None),
-            available_models: Set(serde_json::json!([])),
-            is_default: Set(false),
+            user_id: Set(account.id),
+            k8s_owner_name: Set(Some("sondeur".to_string())),
         };
-        let inserted = llm_providers::Entity::insert(provider)
+        let inserted = owner_links::Entity::insert(link)
             .exec(&state.db)
             .await
-            .expect("provider inserts");
-        let read_back = llm_providers::Entity::find_by_id(inserted.last_insert_id)
+            .expect("lien insere");
+        let read_back = owner_links::Entity::find_by_id(inserted.last_insert_id)
             .one(&state.db)
             .await
-            .expect("provider reads back")
+            .expect("lien relit")
             .expect("row exists");
-        assert_eq!(read_back.name, "roundtrip");
-        assert_eq!(read_back.provider_type, "ollama");
+        assert_eq!(read_back.user_id, account.id);
+        assert_eq!(read_back.k8s_owner_name.as_deref(), Some("sondeur"));
     }
 
     /// Scenario: `echange_de_code_toujours_refuse`
