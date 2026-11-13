@@ -1,0 +1,83 @@
+Spec: Cache — cache des résultats de widgets scriptés
+
+Platform: Rust/vanyline-app — mémoire du processus, tokio
+
+Purpose:
+  Le cache des résultats d'exécution (`dsd/app/widgets.md` `FR-6`, `DEC-3`) : par utilisateur,
+  tableau et widget, avec une durée de vie portée par la `config` du widget et le partage d'une
+  exécution déjà en cours. Mémoire du processus : l'application est mono-réplique pour les
+  sessions (`CON-4`), le résultat est perdu au redémarrage et recalculé.
+
+Owns:
+  ./cache.rs
+
+References:
+  /dsd/app/widgets.md — `FR-6`, `DEC-3`, `CON-4`
+  ./model.sdd — @WidgetOutput
+  ./run.sdd — seul appelant
+
+Exposes:
+  @WidgetCache — handle `Clone` (état partagé) : @get_or_compute(@key: @CacheKey, @ttl_secs: `u64`,
+    @refresh: `bool`, @compute) -> `Result<@Entry, E>` où @compute est une fonction asynchrone
+    qui rend une @Entry ou une erreur `E`.
+  @CacheKey — { @subject: `String`, @dashboard: `i32`, @widget: `String`, @script_hash: `u64` }.
+  @Entry — { @output: @WidgetOutput, @computed_at: horodatage, @duration_ms: `u64` } ; la
+    réponse en déduit `cached` (vrai quand l'entrée vient du cache).
+
+Must:
+  Ne jamais partager une entrée entre sujets : `subject` fait partie de la clé.
+  Servir l'entrée sans appeler @compute quand elle existe, que son âge est inférieur à
+    @ttl_secs et que @refresh est faux ; @ttl_secs `0` désactive le cache (toujours recalculer).
+  Invalider par la clé : un script modifié change `script_hash`, donc l'ancienne entrée n'est
+    plus servie.
+  Partager une exécution déjà en cours pour la même clé : deux appels concurrents n'appellent
+    @compute qu'une fois et reçoivent le même résultat (y compris avec @refresh vrai).
+  Ne mettre en cache que les succès : un échec n'est jamais conservé, la requête suivante
+    relance.
+  Laisser un demandeur abandonner son attente (interruption par l'utilisateur) sans effet sur les
+    autres : l'exécution partagée continue pour eux. Quand TOUS les demandeurs ont abandonné,
+    l'exécution qui s'achève ensuite ne laisse aucune entrée (`FR-10` : l'interruption ne laisse
+    ni résultat partiel ni entrée de cache).
+
+Must not:
+  Persister en base ou sur disque ; plafonner `ttl_secs` ou le nombre d'appels (le nombre
+    d'entrées est borné par utilisateurs × widgets scriptés).
+
+Scenario: le second appel dans la durée de vie ne recalcule pas
+  Given une entrée calculée il y a 10 s avec `ttl_secs` 3600
+  When @get_or_compute est appelé de nouveau avec la même clé
+  Then @compute n'est pas appelé et l'entrée est rendue
+
+Scenario: un autre utilisateur ne reçoit pas le résultat du premier
+  Given une entrée pour le sujet « ana »
+  When le sujet « ben » demande le même tableau et le même widget
+  Then @compute est appelé pour « ben »
+
+Scenario: modifier le script ou actualiser relance
+  Given une entrée valide
+  When la clé change de `script_hash`, puis un appel arrive avec @refresh vrai
+  Then @compute est appelé dans les deux cas
+
+Scenario: des demandes concurrentes partagent une exécution
+  Given dix appels simultanés sur la même clé sans entrée
+  When ils attendent tous
+  Then @compute est appelé une seule fois et les dix reçoivent le même résultat
+
+Scenario: l'abandon de tous les demandeurs ne laisse pas d'entrée
+  Given une exécution lente et son unique demandeur qui abandonne son attente
+  When l'exécution s'achève avec succès
+  Then aucune entrée n'est conservée et l'appel suivant recalcule
+
+Scenario: un échec n'est pas conservé
+  Given un @compute qui échoue
+  When l'appel est répété
+  Then @compute est appelé de nouveau
+
+Depends on:
+  tokio, ./model.rs.
+
+Tasks:
+  [ ] `cache.rs` : @WidgetCache et ses tests (horloge injectée pour les durées de vie).
+
+Done when:
+  Les six Scenarios ont leurs tests, sans attente réelle (horloge injectée).

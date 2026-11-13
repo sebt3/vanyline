@@ -130,6 +130,11 @@ Exposes:
         demandé à `./dashboards/resolve.sdd` : scope inconnu, paramètre d'écran absent ou
         vide, projet ou sandbox inconnu de l'appelant — erreur de la REQUÊTE, jamais du
         serveur ; message fixe, sans valeur de la requête)
+      @AppError::WidgetNotFound — `"VNL-APP-WDG-001: widget not found"` (exécution d'un widget
+        scripté, `./widgets/run.sdd` : tableau absent ou d'un autre utilisateur, widget absent
+        ou non scripté — aucune distinction)
+      @AppError::WidgetContextUnsupported — `"VNL-APP-WDG-002: widget context not supported"`
+        (écran projet ou sandbox, première version de `app/widgets`)
     Famille `VNL-WFA-*` complétée W4b 2026-10-11 (011..017, routes runs de
     ./api/workflows.sdd) ; `VNL-WFA-009` n'a jamais existé (la conversion W4a a réutilisé
     @InternalError).
@@ -199,6 +204,8 @@ Exposes:
       @AppError::WorkflowSandboxRequired → 409 `CONFLICT`
       @AppError::WorkflowSandboxNotAllowed → 400 `BAD_REQUEST`
       @AppError::DashboardScreenInvalid → 400 `BAD_REQUEST`
+      @AppError::WidgetNotFound → 404 `NOT_FOUND`
+      @AppError::WidgetContextUnsupported → 422 `UNPROCESSABLE_ENTITY`
       @AppError::WorkflowEngineUnavailable → 503 `SERVICE_UNAVAILABLE`
     Le match est exhaustif (compilateur) : toute nouvelle variante impose une ligne ici.
   @std::error::Error — implémenté par la derive : `source()` rend `Some` du @reqwest::Error
@@ -418,7 +425,8 @@ Scenario: display_exhaustif_des_variantes_apperror
     SandboxNotExposed, SandboxBranchEmpty,
     GitPathInvalid, WorkflowNotFound, WorkflowEngineNotConfigured, WorkflowScopeNotEditable,
     WorkflowSandboxNotFound, WorkflowRunNotFound, WorkflowSandboxRequired,
-    WorkflowSandboxNotAllowed, DashboardScreenInvalid)
+    WorkflowSandboxNotAllowed, DashboardScreenInvalid, WidgetNotFound,
+    WidgetContextUnsupported)
   When chacune est rendue par @Display
   Then chaque rendu est exactement le gabarit d'`Exposes`, chaque marqueur suivi de `": "`
     (plus aucune variante sans marqueur propre depuis le retrait C3 de
@@ -431,9 +439,9 @@ Scenario: bareme_exhaustif_statuts_http_des_variantes
   When chacune est passée à @IntoResponse::into_response
   Then les statuts sont exactement le barème d'`Exposes` : 403
     (Forbidden), 502 (McpError, RequestError, K8sConfigError), 404
-    (K8sNotFound,
+    (K8sNotFound, WidgetNotFound,
     WorkflowNotFound, WorkflowSandboxNotFound, WorkflowRunNotFound), 422
-    (SandboxBranchEmpty, WorkflowKindForbidden), 500
+    (SandboxBranchEmpty, WorkflowKindForbidden, WidgetContextUnsupported), 500
     (InternalError, K8sApiError), 409 (SandboxNotExposed, WorkflowNameTaken,
     WorkflowSandboxForeignProject, WorkflowSandboxNotRunning, WorkflowSandboxRequired),
     400 (GitPathInvalid, WorkflowDagInvalid, WorkflowUnknownScope,

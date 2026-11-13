@@ -118,8 +118,9 @@ Hors périmètre :
 - **FR-6 - MUST:** Les widgets standard sont au moins : `projects` (état de clonage, nombre de sandboxes, création),
   `sandboxes` (phase en direct, création, suspension, ouverture de l'IDE et de la vue d'ensemble), `workflows` (liste, portée,
   création, édition, suppression, lancement), `runs` (14 derniers jours, 50 au plus, statut), `code-health` (santé du code d'une
-  sandbox), `chat` (session du contexte, `app/sessions`), `dashboards` (liste des tableaux complémentaires), `markdown`,
-  `bar`, `pie`. Le type `scripted` est réservé au registre, implémenté par `app/widgets`.
+  sandbox), `chat` (session du contexte, `app/sessions`), `dashboards` (liste des tableaux complémentaires), `markdown`
+  (texte en paramètre), `mermaid` (diagramme en paramètre), `bar`, `pie`. Le type `scripted`, dont le script produit un graphique
+  (`bar` ou `pie`), est implémenté par `app/widgets`.
     - **Source:** `app#FR-3`, `app#FR-4`
     - **Verified by:** `AC-7`
 

@@ -168,6 +168,11 @@ Code, **séquentiel**, après A2 et la spec correspondante :
 - [ ] **G4b — Aligner code et tests sur les specs `dashboards` amendées** (à faire AVANT G3/G6). Source : les tâches `[ ]` de
   `app/src/dashboards/*.sdd`, `app/src/db/entities/dashboards.sdd`, `app/src/migration/m20261113_000001_*.sdd` et
   `app/src/error.sdd` ; les décisions vivent dans ces specs, pas ici.
+- [ ] **H1 — Widgets scriptés, côté app** (après G4b ; écran d'accueil seulement). Source : les tâches `[ ]` de
+  `app/src/widgets/*.sdd`, `app/src/dashboards/{registry,mod}.sdd`, `app/src/db/entities/dashboards.sdd`, `app/src/error.sdd`,
+  `app/src/config.sdd`, `app/src/api/mod.sdd`, `app/src/main.sdd` et `app/src/sessions/catalog.sdd` ; les décisions vivent dans ces
+  specs et dans `dsd/app/widgets.md`. Les écrans projet et sandbox attendent miryad-core#70 ; l'interruption réelle attend
+  miryad-core#71.
 - [ ] **G6 — Moteur de rendu et widgets standard** (après G5 et G4b) : un widget à la fois, chacun avec ses tests.
 - [ ] **G7 — Écrans par défaut** : accueil, projet et vue d'ensemble de sandbox en définitions par défaut ; retrait de
   `HomeDashboard.vue`, `ProjectDashboard.vue` et des specs et tests associés (`DEC-7`). `FR-9` (tableau éphémère) attend B8.

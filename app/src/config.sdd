@@ -142,6 +142,15 @@ Accepts:
       (30 à 45 min de compilation et de tests), un sous-agent de 40 min n'est donc jamais
       interrompu par le plafond (`AC-8`). Même contrat de parse et de repli que
       `OIDC_TIMEOUT_SECS` (jamais d'échec, défaut sur valeur invalide).
+    Plafonds de sécurité des widgets scriptés (`dsd/app/widgets.md#FR-5`, `OI-6` ; consommés par
+    `./widgets/runtime.sdd`), même contrat de parse et de repli (jamais d'échec, défaut sur valeur
+    absente, vide ou invalide) :
+      `VNL_WIDGET_MAX_DURATION_SECS` (défaut `300`, soit 5 min) → @Config::widget_max_duration
+        (@Duration) ;
+      `VNL_WIDGET_MAX_OPERATIONS` (défaut `0`, soit illimité) → @Config::widget_max_operations
+        (@u64) ;
+      `VNL_WIDGET_MAX_RESULT_BYTES` (défaut `1048576`, soit 1 Mio) →
+        @Config::widget_max_result_bytes (@usize).
   Valeur présente vide (`FOO=""`) ≡ absente, pour TOUTES les variables : une requise vide
     échoue avec le message (et le marqueur) de son absence ; une variable à défaut retombe
     sur son défaut ; une optionnelle vaut @None (jamais `Some("")`). Valeur non-Unicode : une
@@ -258,6 +267,8 @@ Depends on:
     retrait du crate cfgstore (règle de `../../vanyline.sdd` : un espace par crate).
 
 Tasks:
+  [ ] `config.rs` : les trois champs `widget_*` et leurs variables ; Scenario
+    `from_env_widgets_defauts_et_valeurs`.
   [x] Variables du moteur de workflow (2026-10-04) — FAIT 2026-10-10 (validation W0 :
     les 4 variables contractées ci-dessus — 3 en optionnelles, `VNL_WORKFLOW_LISTEN` en
     défaut `0.0.0.0:9080` vide conservé ; 3 tests `from_env_workflow_*` portant les
@@ -472,6 +483,14 @@ Scenario: moteur_workflow_vide_vaut_absente
   When @from_env lit
   Then les trois optionnels sont @None et @Config::workflow_listen est `"0.0.0.0:9080"` (le
     défaut), comme `LISTEN_ADDR` vide
+
+Scenario: from_env_widgets_defauts_et_valeurs
+  Given un environnement complet en requises, sans variable `VNL_WIDGET_*`, puis avec
+    `VNL_WIDGET_MAX_DURATION_SECS="60"`, `VNL_WIDGET_MAX_OPERATIONS="5000"`,
+    `VNL_WIDGET_MAX_RESULT_BYTES="2048"`, puis avec ces trois variables à `"abc"`
+  When @Config::from_env est appelé dans chaque cas
+  Then les défauts sont 300 s, 0 et 1048576 ; les valeurs fournies sont reprises ; les valeurs
+    non parseables retombent sur les défauts, sans erreur
 
 Scenario: from_env_timeouts_classees_a_defaut
   Given un environnement complet en requises et en variables à défaut, et les SEPT

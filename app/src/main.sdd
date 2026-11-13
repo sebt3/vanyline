@@ -107,6 +107,10 @@ Exposes:
   - `config: @Config` — @./config.rs::@Config (clone propre par champ).
   - `busy` : RETIRÉ en C2 du chantier lymaille (2026-11-12) — verrou de tour de chat par
     `conversation_id` dont ./ws/chat.rs était le seul consommateur.
+  - `widgets: @widgets::@WidgetService` — l'exécution des widgets scriptés (./widgets/runtime.sdd) :
+    exécuteur de production (`ScriptRunner` de miryad-core, plafonds de @Config) et cache ;
+    construit APRÈS l'hôte lymaille (qu'il partage, `SharedHost`) et avant l'assemblage ;
+    consommateur ./widgets/run.rs.
   - `workflow: @Option<@workflow::@WorkflowRuntime>` — @None au moteur non configuré,
     @Some après @start_runtime réussi (étape 10bis) ; @Clone — le handle porte l'URL
     d'admin, l'ingress et le client HTTP partagés (./workflow/runtime.sdd) ; consommateurs
@@ -127,7 +131,7 @@ Exposes:
   @health — fonction privée, montée uniquement sur `GET /health`.
   @openapi_spec — fonction privée, appelée une seule fois (argument de
     @swagger_ui_router) ; documentée par les tests du module.
-  Déclarations `mod` (13) — la visibilité de tout le crate part d'ici : tous privés
+  Déclarations `mod` (14, dont `widgets`) — la visibilité de tout le crate part d'ici : tous privés
     (aucun `pub mod`), conformes à un binaire.
 
 Accepts:
@@ -213,6 +217,8 @@ Returns:
     ne remonte jamais ici : réessayé en arrière-plan par ./workflow/runtime.sdd).
     L'étape est insérée APRÈS les migrations (les tables `miryad_workflow_definitions`
     doivent exister) et AVANT l'assemblage.
+  10ter. @widgets::@WidgetService::new(db, hôte lymaille, config) — sans I/O ; aucune
+    fatalité propre (le `ScriptRunner` ne se connecte à rien à sa construction).
   11. Assemblage du router racine (table ci-dessous, sans I/O).
   12. @tokio::net::TcpListener::bind(listen_addr) — échec : log
     `"VNL-NET-001: failed to bind {addr}: {e}"` + exit(1).

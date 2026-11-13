@@ -1,0 +1,62 @@
+Spec: Output — validation de la sortie d'un script de widget
+
+Platform: Rust/vanyline-app
+
+Purpose:
+  Contrôle ce que rend un script avant que l'application l'affiche ou le mette en cache
+  (`dsd/app/widgets.md` `FR-4`, `DEC-1`) : une map `{type, config}` dont le type est un widget
+  graphique que le registre marque scriptable et dont la `config` respecte la grammaire de ce
+  type. Toute autre sortie est refusée, jamais corrigée.
+
+Owns:
+  ./output.rs
+
+References:
+  /dsd/app/widgets.md — `FR-4`, `DEC-1`, `OI-7`
+  ../dashboards/registry.sdd — `known`, indicateur `scriptable`, schéma déclaratif
+  ./model.sdd — @WidgetOutput, marqueur `VNL-APP-WDG-007`
+
+Exposes:
+  @validate_output(@value: `serde_json::Value`) -> `Result<@WidgetOutput, @OutputError>` — @OutputError
+    est `pub struct` { @message: `&'static str` } (message fixe, jamais le contenu de la valeur).
+  Grammaire par type (validation Rust propre à chaque type, la forme déclarative du registre
+  restant la documentation du frontend) :
+    - `bar` et `pie` : `config` est un objet dont `data` est un tableau de `{label: chaîne,
+      value: nombre fini}` ; `title`, s'il est présent, est une chaîne. Les autres clés sont
+      refusées.
+
+Must:
+  Refuser avec @OutputError toute valeur qui n'est pas un objet `{type, config}` ; un `type`
+    inconnu du registre ; un type connu mais non scriptable (`markdown`, `mermaid`, `scripted`,
+    les widgets à source applicative) ; une `config` qui ne respecte pas la grammaire fermée du
+    type (clé inconnue, forme ou nombre non fini). Les chaînes (`title`, `label`) sont du texte
+    que le frontend rend sans l'interpréter : aucun HTML n'est exécuté ni filtré ici.
+  Rendre @WidgetOutput inchangé quand la valeur est conforme (aucune normalisation).
+  Lire le caractère scriptable dans le registre : ajouter un graphique scriptable est une entrée
+    de registre plus sa grammaire ici, jamais un changement de l'exécution.
+
+Must not:
+  Corriger, tronquer ou compléter une sortie ; interpréter du HTML, du markdown ou du code.
+
+Scenario: un diagramme en barres conforme passe
+  Given `{type: "bar", config: {title: "t", data: [{label: "ok", value: 0.93}]}}`
+  When @validate_output est appelée
+  Then `Ok`, la sortie est identique à l'entrée
+
+Scenario: les sorties hors contrat sont refusées
+  Given une chaîne, `{type: "markdown", config: {text: "x"}}`, `{type: "bar", config: {data: 3}}`,
+    `{type: "pie", config: {data: [{label: "a", value: "b"}]}}`, `{type: "inconnu", config: {}}`
+  When @validate_output est appelée sur chacune
+  Then chacune rend une @OutputError au message fixe
+
+Depends on:
+  ../dashboards/registry.rs, ./model.rs, @serde_json.
+
+Tasks:
+  [x] Décidé 2026-11-13 : validation Rust par type (pas de schéma JSON, `dsd/app/widgets.md#OI-7`) ;
+    la grammaire de `bar` et `pie` est `{title?, data}` seulement, la configuration d'affichage
+    (unité, orientation, couleurs…) s'ajoute quand un besoin apparaît.
+  [ ] `output.rs` : @validate_output et ses tests.
+
+Done when:
+  Les deux Scenarios ont leurs tests ; aucune dépendance de schéma JSON n'est ajoutée.

@@ -1,0 +1,110 @@
+Spec: Run — route d'exécution d'un widget scripté
+
+Platform: Rust/vanyline-app/bin — axum (handler monté par `../api/mod.rs`), SeaORM
+
+Purpose:
+  La route `POST /api/widgets/run` (`dsd/app/widgets.md` `FR-2`, `FR-3`, `FR-4`, `FR-6`, `FR-7`,
+  `FR-10`) : elle désigne un widget scripté par son tableau et son identifiant, relit son script
+  dans la définition de l'utilisateur authentifié, le fait exécuter dans le contexte de l'écran,
+  valide la sortie, passe par le cache et rend une réponse « prête » ou « en échec ». Le client
+  ne fournit jamais de script (`DEC-6`).
+
+Owns:
+  ./run.rs
+
+References:
+  /dsd/app/widgets.md — `FR-2` à `FR-7`, `FR-10`, `DEC-6`, `OI-1`
+  ./model.sdd — requête, réponse, marqueurs
+  ./runtime.sdd — @WidgetService, @ScriptExecutor
+  ./output.sdd — @validate_output ; ./cache.sdd — @WidgetCache
+  ../db/entities/dashboards.sdd — la ligne du tableau (lecture seule ici)
+  ../dashboards/model.sdd — @DashboardDef, @Scope
+  ../../api/mod.sdd — montage (`POST /widgets/run` sous le `@nest("/api", …)`)
+  ../auth/mod.sdd — @AuthUser
+
+Exposes:
+  @handler_run — `pub async fn(@AuthUser, @State<@AppState>, @Json<@RunRequest>) ->
+    Result<@Json<@RunResponse>, @AppError>`.
+
+Accepts:
+  @RunRequest { dashboard, widget, refresh? } (`./model.sdd`) ; tout autre champ, `script`
+    compris, est ignoré.
+
+Returns:
+  200 @RunResponse::Ready — la sortie validée, `computed_at`, `duration_ms`, `cached` ;
+  200 @RunResponse::Failed — un script en échec, des plafonds atteints, une sortie hors contrat,
+    des droits refusés, une panne interne (marqueurs `003`..`008`, `010`) ; jamais mis en cache.
+
+Raises:
+  @AppError::WidgetNotFound (404, `VNL-APP-WDG-001`) : tableau absent ou d'un autre utilisateur,
+    widget absent ou dont le type n'est pas `scripted` — aucune distinction.
+  @AppError::WidgetContextUnsupported (422, `VNL-APP-WDG-002`) : tableau d'écran `project` ou
+    `sandbox` (première version : seul l'accueil exécute des scripts, `OI-1`).
+  Erreur d'authentification par @AuthUser hors session (contrat `../auth`).
+
+Handles:
+  Identité de l'appelant relue par `miryad_core::users::resolve_user` (jamais un identifiant de
+    requête). Le tableau est relu avec `owner_id = appelant`.
+  Contexte : écran `home` → contexte `G_home` ; tout autre écran → `002`.
+  Clé de cache : (sujet authentifié, tableau, widget, empreinte du texte du script). `ttl_secs` de
+    la `config` du widget, `3600` par défaut.
+  Une définition stockée illisible ou dont la `config` du widget n'a pas de script →
+    `Failed` `010` journalisé ; jamais un défaut silencieux.
+  Abandon du client (connexion fermée, bouton d'interruption) : l'attente prend fin, aucun
+    résultat n'est rendu ; la gestion du cache est celle de `./cache.sdd`.
+
+Must:
+  Relire le script dans la définition de l'utilisateur authentifié, jamais dans la requête.
+  Exécuter par @WidgetService (donc par la couture @ScriptExecutor), valider la sortie par
+    @validate_output (`007` si refusée), mettre en cache par @WidgetCache.
+  Ne rendre aucun contenu de script, de jeton ni d'URL dans un message ni dans un log.
+
+Must not:
+  Écrire en base, modifier un tableau, ou exposer l'identifiant interne d'un autre utilisateur.
+  Accepter un script, un contexte ou un nom d'utilisateur de la requête.
+
+Scenario: un widget scripté d'un tableau d'accueil rend une sortie prête, puis le cache
+  Given une ligne `custom` d'accueil de l'appelant portant un widget `scripted` et un exécuteur
+    factice qui rend un `bar` valide
+  When la route est appelée deux fois
+  Then les deux réponses sont `ready` avec la même sortie, `cached` faux puis vrai, et l'exécuteur
+    n'est appelé qu'une fois
+
+Scenario: actualiser relance
+  Given le même état et `refresh: true` dans la seconde requête
+  When la route est appelée deux fois
+  Then l'exécuteur est appelé deux fois
+
+Scenario: le script de la requête est ignoré
+  Given une requête portant un champ `script` différent de celui de la définition
+  When la route est appelée
+  Then l'exécuteur reçoit le script de la définition
+
+Scenario: le tableau ou le widget d'autrui est introuvable
+  Given le tableau d'un autre utilisateur, un identifiant de widget absent, et un widget qui n'est
+    pas `scripted`
+  When la route est appelée pour chacun
+  Then les trois rendent 404 `VNL-APP-WDG-001`
+
+Scenario: un écran projet ou sandbox n'est pas pris en charge
+  Given un tableau de l'appelant d'écran `project`
+  When la route est appelée
+  Then 422 `VNL-APP-WDG-002`
+
+Scenario: un script en échec et une sortie hors contrat sont rendus en échec, sans cache
+  Given un exécuteur qui rend l'erreur `003`, puis un autre qui rend `{type: "markdown", config: {}}`
+  When la route est appelée dans chaque cas, puis de nouveau
+  Then les réponses sont `failed` avec `003` puis `007`, et l'exécuteur est rappelé à chaque fois
+
+Depends on:
+  @axum, @sea_orm, @AuthUser, ./model.rs, ./runtime.rs, ./output.rs, ./cache.rs,
+  ../db/entities/dashboards.rs, ../dashboards/model.rs, ../../error.sdd.
+
+Tasks:
+  [ ] `run.rs` : @handler_run et ses tests (exécuteur factice ; base réelle `real_db`).
+  [ ] Les écrans projet et sandbox s'ouvrent quand miryad-core fournit les `script_grants` d'un
+    contexte `H_…` (miryad-core#70) : le contexte de ces écrans est alors `H_project_<nom>` /
+    `H_sandbox_<owner>_<nom>`.
+
+Done when:
+  Les six Scenarios ont leurs tests ; la route ne lit jamais le script dans la requête (grep).

@@ -37,9 +37,10 @@ Exposes:
     dont AUCUN handler n'est branché sur une route de CE fichier — c'est une boîte à
     outils interne, pas un endpoint.
   - @fn api_router() -> @Router<@AppState> — Router d'état NON fixé construit par
-    18 enregistrements `.route` (table en Structure — inchangée par C3 : les retraits C2
+    19 enregistrements `.route` (table en Structure — inchangée par C3 : les retraits C2
     et C3 ne touchent que @api_v1_router et le CRUD, hors CE fichier ; la 18ᵉ,
-    `/dashboards/resolve`, est ajoutée par la vague G — `dsd/app/dashboards.md` `DEC-5`).
+    `/dashboards/resolve`, est ajoutée par la vague G — `dsd/app/dashboards.md` `DEC-5` —
+    et la 19ᵉ, `/widgets/run`, par `dsd/app/widgets.md` `FR-2`).
     Aucun état, aucune
     couche appliquée.
   - @fn api_v1_router : RETIRÉ en C3 du chantier lymaille (2026-11-12) — sa seule raison
@@ -74,6 +75,9 @@ Structure:
     effectif de l'écran (vague G, `dsd/app/dashboards.md` `DEC-5`) ; le handler vit hors
     du module `api` (module `dashboards` déclaré par `../main.rs`) — seule exception à
     « un module api par famille de routes », assumée pour garder la route sous `/api`.
+  - `POST` `/widgets/run` → `../widgets/run.rs` @handler_run — exécution d'un widget scripté
+    (`dsd/app/widgets.md` `FR-2`) ; même exception que la route de résolution : le handler vit
+    dans le module `widgets` déclaré par `../main.rs`.
   - `POST` `/sandboxes/{name}/suspend` → @set_sandbox_suspended
   - `POST` `/sandboxes/{name}/ws-ticket` → @ws_ticket
   - TOUTES méthodes (@any) `/sandboxes/{name}/git/{*path}` → @git_proxy — seul chemin
@@ -105,7 +109,7 @@ Accepts:
     sur le router racine de `../main.rs`, APRÈS @with_state).
 
 Returns:
-  - @api_router() : @Router<@AppState> portant exactement les 18 enregistrements de la
+  - @api_router() : @Router<@AppState> portant exactement les 19 enregistrements de la
     table (les méthodes additionnelles par chemin sont portées par les @MethodRouter
     combinés), rien d'autre (ni `/api/ws/…`, ni `/health`, ni `/api/v1`).
   - Le router est sans état, sans couche, sans fallback : toute la composition
@@ -234,6 +238,12 @@ Scenario: api_router expose la route de résolution des tableaux
     `GET` sur ce chemin cohabite sans conflit matchit avec les chemins `/sandboxes/...`
     du même router
 
+Scenario: api_router expose la route d'exécution des widgets
+  Given le même montage @nest("/api", @api_router()).@with_state(state)
+  When `POST /api/widgets/run` est adressé non authentifié via @oneshot
+  Then la réponse n'est pas @StatusCode::NOT_FOUND (route branchée ; le refus d'auth en
+    aval est le contrat de `../widgets/run.sdd` et de l'@AuthUser)
+
 Scenario: api_router expose les deux chemins de projects
   Given le même montage @nest("/api", @api_router()).@with_state(state)
   When quatre requêtes non authentifiées sont adressées via @oneshot : `GET` et `POST`
@@ -303,7 +313,7 @@ Tasks:
     workflows` déclaré, les DIX routes de ./workflows.sdd montées dans @api_router
     (table ci-dessus). Le MCP de domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est
     monté par ../main.rs à côté du MCP générique de miryad-core, pas ici.
-  [ ] Écrire en tests les 8 Scenarios ci-dessus avant toute modification de la table de routage :
+  [ ] Écrire en tests les 9 Scenarios ci-dessus avant toute modification de la table de routage :
     `./mod.rs` n'a aucun test et aucun test du dépôt ne passe par @api_router() (la table
     n'est vérifiée que par les appels littéraux du frontend) ; construction d'@AppState sur
     le précédent de `./projects.rs`.

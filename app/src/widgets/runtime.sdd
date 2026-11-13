@@ -1,0 +1,92 @@
+Spec: Runtime — exécution d'un script par le ScriptRunner de miryad-core
+
+Platform: Rust/vanyline-app — miryad-core (feature `lymaille`)
+
+Purpose:
+  L'enveloppe de l'app autour du `ScriptRunner` de miryad-core 0.3.1 (`dsd/app/widgets.md`
+  `FR-3`, `FR-5`, `FR-7`, `DEC-2`) : un exécuteur construit une fois au démarrage, des plafonds
+  issus de la configuration, et la traduction des erreurs typées de la crate en marqueurs
+  `VNL-APP-WDG-*`. Les droits (contexte, type du contexte, principal), le montage des toolsets et
+  des rôles MCP, la durée et la valeur JSON rendue sont ceux de la crate : l'app n'en réimplémente
+  rien.
+
+Owns:
+  ./runtime.rs
+
+References:
+  /dsd/app/widgets.md — `FR-3`, `FR-5`, `FR-7`, `CON-1`, `CON-3`, `CON-5`, `DEC-2`, `OI-1`, `OI-4`
+  ../sessions/mod.sdd — précédent de construction des dépendances lymaille (registre de
+    ressources vide, `EnvSecretResolver`, hôte fourni)
+  ../config.sdd — plafonds `VNL_WIDGET_*`
+  ./model.sdd — @RunError et marqueurs
+
+Exposes:
+  @ScriptExecutor — `pub trait` (`Send + Sync`, méthode asynchrone) : @execute(@context: `&str`,
+    @subject: `&str`, @source: `&str`) -> `Result<serde_json::Value, @RunError>`. La couture
+    d'exécution : l'implémentation de production est @CrateExecutor ci-dessous, les tests de
+    `./run.sdd` injectent un exécuteur factice.
+  @WidgetService — handle `Clone` (`Arc`) construit au démarrage : porte un @ScriptExecutor et le
+    @WidgetCache. @WidgetService::new(@db, @host: `Option<SharedHost>`, @config) construit
+    @CrateExecutor ; @WidgetService::with_executor(@executor, @cache) sert les tests.
+  @CrateExecutor — l'implémentation de production : `ScriptRunner` construit par
+    `ScriptDeps::new(db, ResourceRegistry vide, HostModules vide, EnvSecretResolver)` avec
+    `host`, et `ScriptLimits` de la configuration. Son @execute appelle `ScriptRunner::run(context, subject, source,
+    &limits, None)` — le jeton de l'utilisateur n'est pas transmis en première version (`OI-4`).
+  Traduction des erreurs de `LymailleError` (corps de message fixe, jamais le texte de la crate
+  hors `ScriptFailed`, qui est déjà sans source, sans ligne, sans jeton ni URL) :
+    `ScriptTimeout` → `VNL-APP-WDG-004` · `ScriptOperationLimit` → `005` ·
+    `ScriptResultTooLarge` → `006` · `ScriptFailed` → `003` (message de la crate, borné) ·
+    `Forbidden` et `UnknownSubject` → `008` · `Store`, `Config`, `InvalidDefinition` et toute
+    autre variante → `010` (message fixe ; la cause est journalisée en `tracing::error!`, jamais
+    rendue).
+
+Must:
+  Construire le `ScriptRunner` avec un registre de ressources VIDE et un registre de modules
+    d'hôte VIDE : en première version un script ne voit que les rôles MCP et les toolsets que
+    `script_grants` du type du contexte accorde (`OI-3`) ; l'app n'expose aucune de ses entités.
+  Poser des `ScriptLimits` issues de la configuration (`max_duration`, `max_operations`,
+    `max_result_bytes`) : aucune valeur n'est codée ici, aucun plafond n'est posé sur le nombre
+    d'appels MCP.
+  Journaliser en `tracing::error!` (identifiant `VNL-APP-WDG-010`) toute panne interne, sans le
+    script ni le jeton.
+  Ne jamais transmettre le texte d'un script, un jeton ou une URL dans un message rendu.
+
+Must not:
+  Monter `fs` ou `shell`, enregistrer un module d'hôte, un registre de ressources non vide ou
+    un second moteur Rhai : tout vient de la crate.
+  Interrompre un appel natif en cours : la limite de durée coupe entre deux opérations
+    (`CON-5`) ; le délai d'un appel MCP est celui de son connecteur.
+  Réimplémenter l'annulation par l'utilisateur : elle attend miryad-core#71 ; d'ici là,
+    l'abandon est côté appelant (./run.sdd).
+
+Scenario: les erreurs typées de la crate deviennent des marqueurs
+  Given des `LymailleError` `ScriptTimeout`, `ScriptOperationLimit`, `ScriptResultTooLarge`,
+    `ScriptFailed("x")`, `Forbidden("script grants unavailable")`
+  When elles sont traduites
+  Then les marqueurs sont `004`, `005`, `006`, `003` (message « x »), `008`
+
+Scenario: une panne interne ne fuit pas sa cause
+  Given une `LymailleError::Store` dont le texte contient une URL de base
+  When elle est traduite
+  Then le @RunError est `010` avec un message fixe sans cette URL, et la cause est journalisée
+
+Scenario: un script s'exécute sous le sujet donné, dans le contexte donné
+  Given un contexte `G_home` dont le type accorde un toolset et deux sujets de droits différents
+  When @WidgetService::execute est appelée pour chacun avec le même script
+  Then chacun obtient le résultat de ses propres droits (verrouille l'identité du spectateur,
+    `AC-2`)
+
+Depends on:
+  miryad-core (feature `lymaille`) : `ScriptRunner`, `ScriptLimits`, `ScriptDeps`,
+    `ResourceRegistry`, `HostModules`, `EnvSecretResolver`, `SharedHost`, `LymailleError`.
+  ./cache.rs, ./model.rs.
+
+Tasks:
+  [ ] `runtime.rs` : @WidgetService, la traduction d'erreurs et ses tests. Le troisième Scenario
+    s'appuie sur une base réelle (`real_db`) et un type de contexte semé en test.
+  [x] Décidé 2026-11-13 : le jeton de l'utilisateur n'est pas transmis en première version
+    (`dsd/app/widgets.md#OI-4`) ; un serveur MCP en mode `forward` est inutilisable dans un
+    widget, comme dans un workflow batch.
+
+Done when:
+  Les trois Scenarios ont leurs tests ; aucune valeur de plafond n'est écrite dans ce fichier.

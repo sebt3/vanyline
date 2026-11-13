@@ -1,0 +1,27 @@
+Spec: Mod — agrégation du module widgets
+
+Platform: Rust/vanyline-app
+
+Purpose:
+  Le module `app/src/widgets/` (`dsd/app/widgets.md`, « Réalisation SpecDD ») : exécution des
+  widgets scriptés des tableaux de bord. Ce fichier ne porte que la déclaration des modules ;
+  tout le comportement vit dans les enfants.
+
+Owns:
+  ./mod.rs
+
+References:
+  /dsd/app/widgets.md — `FR-2` à `FR-7`
+  ./model.sdd ./run.sdd ./runtime.sdd ./output.sdd ./cache.sdd — enfants
+
+Exposes:
+  Déclarations `pub mod cache; pub mod model; pub mod output; pub mod run; pub mod runtime;`
+    (ordre alphabétique ; `pub` car `../main.rs` construit @runtime::WidgetService et
+    `../api/mod.rs` monte @run::handler_run).
+
+Must not:
+  Contenir de comportement : un module `mod.rs` qui ne fait que réexporter n'exige pas de
+    contrat propre.
+
+Done when:
+  Le module ne contient que les cinq déclarations.

@@ -87,8 +87,8 @@ Must not:
     corrigée en silence »).
   Introduire un cinquième `Kind` ni un quatrième `Scope` sans amender
     `dsd/app/dashboards.md` (`FR-1`).
-  Exposer `scripted` comme type standard : le nom est RÉSERVÉ (`FR-6`, Solution
-    `app/widgets` non ouverte) et n'apparaît nulle part ici.
+  Porter le script d'un widget `scripted` ou son exécution : le script est un champ opaque de
+    `Widget.config` (`dsd/app/dashboards.md#CON-1`), son exécution est `../widgets/`.
 
 Structure:
   ~120 lignes : cinq types (+ constante + utilitaire), derives serde/ts-rs, un module

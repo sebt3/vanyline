@@ -31,6 +31,12 @@ Must:
       modèle désigné par le réglage `default_profile` (`../db/entities/app_settings.sdd`,
       `"default"` s'il est absent) ; un contexte publié référence son type par la forme que
       l'ouverture de session résout (`G_home`, `G_config`).
+  Publier le type de contexte `G_home` avec `script_grants` = `{"toolsets":[],"modules":[]}` :
+    aucun droit de script par défaut, c'est l'administrateur qui étend les toolsets accordés aux
+    widgets scriptés de l'accueil (`dsd/app/widgets.md#OI-3`, `scripts-hote#DEC-2`) ; le type
+    `G_config` n'en porte pas (un script ne s'exécute jamais dans un contexte de configuration :
+    le `ScriptRunner` échoue fermé). L'app n'enregistre aucun module d'hôte ni aucune entité
+    lisible par les scripts.
   Ne jamais remplacer une définition publiée par un administrateur sous le même nom : la
     publication ne create que si l'identifiant est absent, ne patche jamais une ligne existante
     (`FR-6`).
@@ -65,6 +71,11 @@ Scenario: démarrage répété idempotent (`AC-4`)
   When @ensure_catalog s'exécute à chaque fois
   Then le catalogue compte exactement les entrées attendues, sans doublon ni variante datée
 
+Scenario: les types publiés portent les droits de script attendus
+  Given une base vide puis @ensure_catalog
+  When les types de contexte `G_home` et `G_config` sont lus
+  Then `G_home` porte `script_grants` `{"toolsets":[],"modules":[]}` et `G_config` n'en porte pas
+
 Scenario: définition administrateur intacte
   Given un administrateur a redéfini l'agent `G_vanyline_config` avant le démarrage
   When @ensure_catalog s'exécute
@@ -78,6 +89,8 @@ Scenario: ouverture selon l'écran (`AC-4`)
     `H_` avec `G_vanyline_project` / `G_vanyline_sandbox`
 
 Tasks:
+  [ ] `catalog.rs` : `script_grants` du type `G_home` à la publication (colonne posée par le
+    `Migrator` de miryad-core) ; Scenario ci-dessus.
   [x] B7 du chantier lymaille : code catalogue — publié, idempotent, `AC-4` vert, batterie
     validator verte 2026-11-12.
   [ ] Ouvrir un ticket amont chez miryad-core : les hooks de `definitions/catalog_context.rs`

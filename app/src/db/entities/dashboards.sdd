@@ -56,6 +56,7 @@ Structure:
     `VNL-APP-DSH-001` plus de 24 widgets · `002` définition sérialisée > 64 Kio ·
     `003` type de widget inconnu du registre · `004` coordonnées hors grille ou grille
     différente de 12 colonnes · `005` ids de widget dupliqués · `006` `config` non-objet ·
+    `011` `config` d'un widget `scripted` invalide (script vide ou `ttl_secs` négatif) ·
     `007` écran incohérent : `kind` hors `{custom, complementary}`, ou couple
     (scope, project_id, sandbox_id) invalide, ou projet / sandbox référencé qui n'est pas
     celui de l'écrivain, ou `def` non désérialisable en `DashboardDef` (forme
@@ -149,9 +150,10 @@ Scenario: la vue de sandbox est clée par projet et retient la sandbox d'origine
     projet ; supprimer le PROJET « p1 » supprime la ligne
 
 Scenario: un type de widget inconnu refuse sans lire le registre du frontend
-  Given un `def` portant le type `"scripted"` (réservé, `registry.sdd`)
+  Given un `def` portant le type inconnu `"fantome"`
   When la création est tentée
-  Then `VNL-APP-DSH-003` — et avec le type `"markdown"` + `config: 3`, `VNL-APP-DSH-006`
+  Then `VNL-APP-DSH-003` — avec le type `"markdown"` + `config: 3`, `VNL-APP-DSH-006` — et avec
+    un widget `scripted` de `config` `{}`, `VNL-APP-DSH-011`
 
 Scenario: deux personnalisations du même écran sont refusées 009
   Given une première ligne `custom` `scope=project` du projet « p1 » de l'appelante

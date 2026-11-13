@@ -34,10 +34,17 @@ Exposes:
       5. chaque `config` est un objet JSON → `VNL-APP-DSH-006`
       6. grille et coordonnées → `VNL-APP-DSH-004` : `layout.columns` vaut 12 ; chaque widget a
       `w ≥ 1`, `x + w ≤ 12`, `h ∈ [1, 64]`, `y < 4096`.
+      7. `config` d'un widget `scripted` → `VNL-APP-DSH-011` : `script` est une chaîne non
+      vide et `ttl_secs`, s'il est présent, un entier positif ou nul (`dsd/app/widgets.md#FR-1`).
     La grille est fixe (`FR-1`). `h ≤ 64` et `y < 4096` sont des garde-fous de rendu (une
     définition de 24 widgets ne peut pas déborder la pagination du moteur), pas des règles
     du DSD ; ils ne se relâchent qu'avec une décision du DSD.
     La fonction ne PANIQUE pas et ne lit ni DB ni registre dynamique.
+  @validate_ephemeral(def: &@model::DashboardDef) -> `Result<(), (&'static str, &'static str)>`
+    — `pub` : `validate_definition` plus le refus de tout widget `scripted` (`VNL-APP-DSH-012`),
+    appelée à la réception d'un tableau éphémère (`dsd/app/dashboards.md#FR-9`,
+    `dsd/app/widgets.md#FR-9`) ; un éphémère n'est jamais stocké, le hook d'écriture ne
+    l'appelle pas.
   @DASHBOARD_MAX_WIDGETS — `pub const usize = 24` ; @DASHBOARD_MAX_BYTES —
     `pub const usize = 65_536` : les deux bornes `OI-2` du DSD, une seule définition.
 
@@ -54,13 +61,23 @@ Must not:
     chez les enfants) ; déclarer un cinquième module.
 
 Scenario: la première borne touchée est celle rendue
-  Given quatre définitions fautives : 25 widgets de type connu ; 25 widgets dont un
-    `scripted` (donc aussi type inconnu) ; un widget `x=11 w=4` ; un widget à config
-    scalaire `3`
+  Given quatre définitions fautives : 25 widgets de type connu ; 25 widgets dont un de type
+    inconnu `fantome` ; un widget `x=11 w=4` ; un widget à config scalaire `3`
   When `validate_definition` est appelée sur chacune
   Then les marqueurs rendus sont dans l'ordre des règles : la première 001 (taille OK,
     >24), la seconde 001 AUSSI (la borne de nombre prime sur le type inconnu), la
     troisième 004, la quatrième 006 — jamais deux marqueurs pour une définition
+
+Scenario: la config d'un widget scripté est contrôlée
+  Given un widget `scripted` de `config` `{script: "1"}`, un autre de `config` `{}`, un autre de
+    `{script: "", ttl_secs: 5}` et un autre de `{script: "1", ttl_secs: -1}`
+  When `validate_definition` est appelée sur chacun
+  Then le premier passe ; les trois autres rendent `VNL-APP-DSH-011`
+
+Scenario: un tableau éphémère refuse un widget scripté
+  Given une définition valide portant un widget `scripted` de `config` valide
+  When `validate_ephemeral` est appelée
+  Then `VNL-APP-DSH-012`, alors que `validate_definition` rend `Ok`
 
 Scenario: une définition standard passe
   Given le défaut accueil de `./defaults.sdd`
@@ -72,9 +89,11 @@ Depends on:
   ./model.sdd (types), ./registry.sdd (`known`), @serde_json (mesure de taille).
 
 Tasks:
+  [ ] `mod.rs` : règle 7 (`VNL-APP-DSH-011`) et @validate_ephemeral (`VNL-APP-DSH-012`) ; les
+    deux Scenarios ci-dessus.
   [ ] `mod.rs` : la règle 6 impose `columns = 12` et `w ≤ 12` (plus de borne `[4, 24]` ni de
     `w ≤ 64`) ; mise à jour de la fonction et de ses tests.
 
 Done when:
-  Les deux Scenarios ont leurs tests (testable sans DB) ; l'entité et resolve appellent
+  Les quatre Scenarios ont leurs tests (testable sans DB) ; l'entité et resolve appellent
     bien CETTE fonction (grep : aucun second impl des bornes).
