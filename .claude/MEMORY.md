@@ -428,12 +428,17 @@ de test à recréer) ; `app` mono-réplique pour les sessions ; contextes `H_` (
 - **Tâches déléguées à Qwen : `docs/chantier-lymaille.md`** (40 tâches, vagues A à G). Qwen ne décide rien : ses questions
   sont des `[?]` dans les `Tasks` des specs concernées. **Première chose à faire à la reprise : relire ces `[?]`** (elles
   guident la suite), puis trancher.
-- **Avancement (2026-11-13)** : 18/40 closes — A1-A5, B1-B9, C1-C4. Specs 156, lint 0/0 ;
+- **Avancement (2026-11-13)** : 22/40 closes — A1-A5, B1-B9, C1-C4, G1/G2/G4/G5 (tableaux de bord côté app : `app/src/dashboards/`, entité + migration `m20261113_000001` — 7ᵉ de chaîne, route `GET /api/dashboards/resolve` — 18ᵉ de `api_router`, 12 ressources router/MCP/openapi, `dashboard-domain.ts` exporté vers @vanyline/protocol). Specs 156, lint 0/0 ;
   app 345 tests verts, workspace ~2244. Migrations app ramassées à 6 (000010, 20261005_00000{1,2,4},
   20261023_00000{1,2}) ; entités restantes 6 ; `AppError` 25 variantes ; l'app ne dépend plus de
   cfgstore ni tools. OpenAPI des ressources lymaille = fragments manuels (ToSchema absent de
   miryad-core 0.3.1 — arbitré ; ticket amont dans `main.sdd` Tasks).
-- **[?] à ratifier (récap)** : encodage `H_` + frontière Denied/HostError (`host.sdd`) ; create-only SQL
+- **[?] à ratifier (récap)** : index de garde des personnalisations en expressions
+  COALESCE (`migration/m20261113_000001_create_vanyline_dashboards.sdd`) ; doublon de
+  personnalisation rendu 500 par miryad-core et non 409 (`db/entities/dashboards.sdd`) ;
+  `VNL-APP-DSH-008` rendu 500 par le barème alors que Raises dit 400 (`dashboards/resolve.sdd`) ;
+  colonne `sandbox` ajoutée au trio de clés DEC-3 (`db/entities/dashboards.sdd`) ;
+  bornes `Layout.columns` [4,24] et `DashboardDef.id` Option<i32 (`dashboards/model.sdd`). encodage `H_` + frontière Denied/HostError (`host.sdd`) ; create-only SQL
   + profil « default » (`sessions/catalog.sdd`) ; valeur `trigger` (`workflow/runtime.sdd`) ;
   `spec.replicas` (`application.sdd`) ; dette passe-cluster step `subagent` (`steps/mod.sdd`) ;
   sort de `default_model` d'app_settings (forme `{provider_id, model}` sans référent depuis C3 —

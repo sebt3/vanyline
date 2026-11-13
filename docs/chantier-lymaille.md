@@ -164,7 +164,7 @@ Specs, **parallélisables entre elles et avec tout le reste** :
 Code, **séquentiel**, après A2 et la spec correspondante :
 
 - [x] **G4 — Modèle, registre, défauts, résolution** (`app/src/dashboards/`), entité, migration, ressource, route `resolve`.
-- [ ] **G5 — Types** : export ts-rs vers `packages/protocol/src/generated/`, job CI `tsrs` étendu.
+- [x] **G5 — Types** : export ts-rs vers `packages/protocol/src/generated/`, job CI `tsrs` étendu.
 - [ ] **G6 — Moteur de rendu et widgets standard** (après G5) : un widget à la fois, chacun avec ses tests.
 - [ ] **G7 — Écrans par défaut** : accueil, projet et vue d'ensemble de sandbox en définitions par défaut ; retrait de
   `HomeDashboard.vue`, `ProjectDashboard.vue` et des specs et tests associés (`DEC-7`). `FR-9` (tableau éphémère) attend B8.
@@ -188,3 +188,7 @@ leur Solution (`dsd/app/<nom>.md`) existera. Ne pas en rédiger.
   la migration). Doublon rendu 500 `MRD-REST-003` par miryad-core 0.3.1 (pas 409 — `[?]`
   entité) ; `VNL-APP-DSH-008` rendu 500 par le barème error.sdd alors que Raises dit 400
   (`[?]` resolve.sdd).
+- G5 (commits `fa17dab`/`64ea2a9`) : `dashboard-domain.ts` AGREGÉ (un fichier par domaine,
+  chaîne `chat-event`/`host-event` ; le test filtre les `import type` que ts-rs 12 émet vers
+  des frères inexistants — figé dans le Scenario de `model.sdd`). Leçon `[!]` : une
+  instruction en cours de session à un sous-agent ne amende pas une spec ; passer par le .sdd.
