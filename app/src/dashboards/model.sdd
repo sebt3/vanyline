@@ -101,6 +101,9 @@ Scenario: export ts-rs des formes publiées
   When le test d'export est exécuté
   Then le fichier généré déclare `DashboardDef`, `Widget`, `Layout`, `Scope`, `Kind` et la
     déclaration de `Widget` porte `type` comme clé du type de widget (pas `widget_type`)
+    And le fichier agrégé ne porte AUCUNE ligne `import type` (ts-rs 12 en émet par type
+    vers des frères inexistants en fichier unique — le test les filtre et l'asserte ;
+    écart validé par le primary 2026-11-13)
 
 Depends on:
   @serde / @serde_json (data), @ts_rs sous feature `ts-rs` (mécanisme posé par
