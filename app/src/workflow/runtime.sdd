@@ -61,7 +61,9 @@ Exposes:
     par ./../main.rs).
   @WorkflowRuntime — handle `Clone` dans @AppState : `trigger(dag) -> RunHandle` (délègue à
     `miryad_core::workflow::client::trigger_run` — signature 0.3.1 : la délégation passe
-    en plus `vars` objet vide et un `trigger` ; @RunHandle porte `invocation_id`, la
+    en plus `vars` objet vide et un `trigger` valant toujours `Some("app")` pour les runs lancés
+    depuis l'API de l'app — les déclencheurs futurs prendront `session` ou `scheduler` ;
+    @RunHandle porte `invocation_id`, la
     liaison persistée par ./../db/entities/workflow_runs.sdd), l'URL d'admin et d'ingress
     (pour ./status.sdd), le client HTTP partagé. @WorkflowRuntime IMPLÉMENTE @RestateAdmin
     de ./status.sdd (W3 2026-10-10).
@@ -115,12 +117,8 @@ Raises:
   ./../../main.rs (exit(1)) — cf. ./main.sdd `Raises`.
 
 Tasks:
-  [?] Valeur du paramètre `trigger` que @WorkflowRuntime::trigger doit passer à
-    `trigger_run` depuis miryad-core 0.3.1 : `None` (comportement actuel préservé —
-    suggestion minimaliste de A1) ou une chaîne nommant la source (`"app"` — le DSD
-    `app/sessions` introduit des déclenchements par session, le `trigger` distinguerait
-    app/scheduler/session). Observé : `trigger_run(config, http, dag, vars, trigger)`,
-    `trigger: Option<&str>`, propagé aux runs enfants.
+  [ ] `runtime.rs` : @WorkflowRuntime::trigger passe `Some("app")` à `trigger_run` (`None`
+    jusqu'ici) ; un test vérifie la valeur transmise.
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : FAIL-FAST (exit 1, `VNL-WF-001`) quand la config d'engagement est partielle ou non dérivable ; silence seulement si AUCUNE variable n'est posée.
     — FAIT 2026-10-14 (P3, validator PASS : `from_config -> @Result<@Option, @WorkflowError>`
     (`InvalidConfig`, `MRD-WORKFLOW-007` imbriqué), trois Scenarios
@@ -133,9 +131,9 @@ Tasks:
     exactement @ServiceOptions::inactivity_timeout + @abort_timeout (endpoint/builder.rs
     de la lib), 25 h acceptées telles quelles, rien de plus fin par service ; posées sur
     @StepDispatcher seul, @recommended_options() conservé (retry borné à 5).
-  [?] Plusieurs réplicas de l'app : Restate répartit les invocations sur l'URL de déploiement
-    (Service) — vérifier qu'un step déjà journalisé reprend correctement sur un autre réplica
-    (garanti par Restate), et que `register_deployment` concurrent est idempotent.
+  [ ] Avec plusieurs réplicas de l'app, Restate répartit les invocations sur l'URL de
+    déploiement (Service) et garantit la reprise d'un step journalisé sur un autre réplica ;
+    vérifier sur un cluster réel que `register_deployment` concurrent est idempotent.
 
 Scenario: demarrage_complet
   Given une config valide et un faux Restate (admin + ingress)

@@ -6,12 +6,10 @@ Purpose:
   Entité SeaORM de la table `vanyline_app_settings` : les RÉGLAGES GLOBAUX de l'application, par
   clé (clé/valeur JSON). Contrat posé le 2026-10-04 : ils sont configurables par l'API avec un
   jeton d'administrateur et par l'interface si l'utilisateur en a les droits. Le premier réglage
-  est `default_model` : le modèle par défaut utilisé pour amorcer les agents système d'un
-  utilisateur qui n'a encore AUCUN profil de modèle (l'amorçage `system_agents.rs` a été
-  retiré en C2 du chantier lymaille, 2026-11-12 ; la destination du réglage est l'agent de
-  catalogue par défaut — cf. `../../sessions/catalog.sdd` Tasks `[?]`). Lecture
-  ouverte à tout utilisateur authentifié (les valeurs ne sont pas secrètes : un identifiant de
-  fournisseur global et un nom de modèle), écriture réservée aux administrateurs. Fichier neuf,
+  est `default_profile` : le nom du profil de modèle lymaille (`lymaille_profiles`, ressource
+  administrée séparément) que les agents du catalogue par défaut utilisent
+  (`../../sessions/catalog.sdd`). Lecture ouverte à tout utilisateur authentifié (la valeur n'est
+  pas secrète : un nom de profil), écriture réservée aux administrateurs. Fichier neuf,
   conception.
 
 Owns:
@@ -29,17 +27,16 @@ Exposes:
     écriture `AccessPolicy::AdminOnly`, aucune colonne propriétaire. Hooks `before_create` et
     `before_update` (forme asynchrone @MiryadResource depuis miryad-core 0.3.1 : `db: &C`
     en premier paramètre, `C: @sea_orm::ConnectionTrait`, futur `Send` ; `db` ignoré) :
-    la clé doit être connue (`default_model` en v1) et la valeur valide pour sa
+    la clé doit être connue (`default_profile` en v1) et la valeur valide pour sa
     clé, sinon `HookError` (422) avec code contracté — `VNL-SET-001` (clé inconnue), `VNL-SET-002`
     (valeur invalide pour sa clé) :
-    - `default_model` : `{ "provider_id": <entier>, "model": <chaîne non vide>, "options"?: <objet> }`
-      où `provider_id` désigne un fournisseur LLM existant ; `options` sont les paramètres du
-      profil (température, etc.).
+    - `default_profile` : `{ "profile": <chaîne non vide> }`, le nom d'un profil lymaille. Son
+      existence n'est pas vérifiée à l'écriture : lymaille résout un profil par son nom à
+      l'exécution, sans clé étrangère.
 
 Handles:
-  La création de la ligne `default_model` est faite par l'administrateur (API ou interface) ; une
-  clé absente signifie « pas de modèle par défaut ». (Historique : l'amorçage
-  `NoModelProfile` de `../../system_agents.sdd` a été retiré en C2 du chantier lymaille.)
+  La création de la ligne `default_profile` est faite par l'administrateur (API ou interface) ;
+  une clé absente signifie le profil nommé `"default"`.
 
 Must:
   Réserver l'écriture aux administrateurs ; garder la lecture ouverte aux utilisateurs authentifiés.
@@ -51,16 +48,9 @@ Must not:
     dans leurs entités (profils, agents).
 
 Tasks:
-  [?] Sort du réglage `default_model` après C3 du chantier lymaille (2026-11-12) : son
-    `provider_id` référençait `vanyline_llm_providers` et sa destination de sémantique
-    était l'amorçage des profils maison — les deux retirés. La table et la route CRUD
-    `app-settings` sont CONSERVÉES (décision C3 : seule ressource de réglages globaux
-    restante), mais la FORME `{ provider_id, model }` ne correspond à rien dans le modèle
-    lymaille (`lymaille_providers`/`lymaille_profiles` sont des ressources admin séparées,
-    sans notion de défaut). Garder la forme actuelle comme simple couple de chaînes sans
-    vérification de référence, ou redéfinir le réglage (ex: un nom de profil lymaille) —
-    avec le semis du profil `"default"` proposé par `../../sessions/catalog.sdd` Tasks
-    `[?]` ? Décision à poser avant la vague E (écran paramètres).
+  [ ] `app_settings.rs` : clé `default_profile` et sa validation à la place de `default_model`
+    (le couple `{ provider_id, model }` n'a plus de référent depuis C3) ; Scenarios
+    ci-dessous.
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTÉS — `VNL-SET-001` (clé inconnue), `VNL-SET-002` (valeur invalide). (Question d'origine : Codes des HookError (S8, 2026-10-13) : non contractés par la spec ; retenus
     `VNL-SET-001` (clé inconnue) et `VNL-SET-002` (valeur invalide), sur le motif « code
     applicatif libre du hook » déjà posé par `VNL-WFA-001` (`./project_workflows.sdd`).
@@ -76,15 +66,15 @@ Scenario: cle_inconnue
   When `before_create`
   Then `HookError` (422) code `VNL-SET-001`
 
-Scenario: default_model_valide
-  Given `{key: "default_model", value: {provider_id: 1, model: "qwen3.6:35b-a3b"}}`
+Scenario: default_profile_valide
+  Given `{key: "default_profile", value: {profile: "default"}}`
   When `before_create`
-  Then accepté
+  Then accepté, sans vérifier l'existence du profil
 
-Scenario: default_model_invalide
-  Given une valeur sans `model`, puis avec `provider_id` non numérique
+Scenario: default_profile_invalide
+  Given une valeur sans `profile`, puis avec `profile` vide, puis avec `profile` non chaîne
   When `before_create`
-  Then `HookError` code `VNL-SET-002` dans les deux cas
+  Then `HookError` code `VNL-SET-002` dans les trois cas
 
 Scenario: ecriture_reservee_aux_admins
   Given un utilisateur ordinaire

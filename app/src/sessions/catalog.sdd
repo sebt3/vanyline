@@ -16,14 +16,21 @@ References:
   ./host.sdd — les identifiants `H_` que la table écran → agent nomme sans les stocker.
 
 Must:
-  Publier au démarrage, de façon idempotente (relancer n'ajoute ni ne duplique rien) et via les
-    stores de miryad-core, le catalogue par défaut (`FR-6`) :
+  Publier au démarrage, de façon idempotente (relancer n'ajoute ni ne duplique rien), le
+    catalogue par défaut (`FR-6`) par insertion create-only (`INSERT … ON CONFLICT DO NOTHING`)
+    dans les trois tables que le `Migrator` de miryad-core pose (types de contexte, contextes,
+    agents) — aucun schéma vanyline (`CON-2`). Les stores de miryad-core ne conviennent pas à
+    cette publication : ils exigent un sujet administrateur résolu en base (absent au premier
+    démarrage) et leurs `put_*` remplacent la ligne, ce qui contredit la règle suivante :
     - contexte `G_home` de type `G_home`, nature `Work`, agent par défaut `G_vanyline_home`,
       ouvrable par tout utilisateur authentifié (`DEC-7`) ;
     - contexte `G_config` de type `G_config`, nature `Config`, agent par défaut
       `G_vanyline_config`, ouvrable par tout utilisateur authentifié (`DEC-7`) ;
     - agents `G_vanyline_home`, `G_vanyline_config`, `G_vanyline_project`, `G_vanyline_sandbox`
-      (productifs `Work` sauf `G_vanyline_config`, nature `Config`).
+      (productifs `Work` sauf `G_vanyline_config`, nature `Config`), tous sur le profil de
+      modèle désigné par le réglage `default_profile` (`../db/entities/app_settings.sdd`,
+      `"default"` s'il est absent) ; un contexte publié référence son type par la forme que
+      l'ouverture de session résout (`G_home`, `G_config`).
   Ne jamais remplacer une définition publiée par un administrateur sous le même nom : la
     publication ne create que si l'identifiant est absent, ne patche jamais une ligne existante
     (`FR-6`).
@@ -45,7 +52,8 @@ Must not:
   Écrire un contexte de type `H_` : les `H_` ne sont pas dans le catalogue (vu par ./host.sdd).
 
 Depends on:
-  miryad-core (feature `lymaille`) — stores du catalogue (types de contexte, contextes, agents).
+  miryad-core (feature `lymaille`) — tables du catalogue (types de contexte, contextes, agents).
+  ../db/entities/app_settings.sdd — réglage `default_profile`.
 
 Exposes:
   @ensure_catalog — appelé au démarrage avant que les routes de ./mod.sdd servent ; idempotent.
@@ -71,27 +79,19 @@ Scenario: ouverture selon l'écran (`AC-4`)
 
 Tasks:
   [x] B7 du chantier lymaille : code catalogue — publié, idempotent, `AC-4` vert, batterie
-    validator verte 2026-11-12. Les trois observations ci-dessous restent `[?]` à ratifier.
-  [?] « Via les stores de miryad-core » : @LymailleStores et ses stores (@SeaAgentStore,
-    @SeaContextTypeStore, @SeaContextStore de miryad-core 0.3.1) exigent un sujet admin résolu
-    en base (@check_write / @require_admin → @UnknownSubject sur une base fraîche au démarrage)
-    et leurs @put_* sont des remplacements (upsert), incompatibles avec « ne patche jamais une
-    ligne existante » au démarrage. Observé : aucune écriture de store ne peut atteindre le
-    catalogue au premier démarrage. Implémenté : @ensure_catalog insère en create-only
-    (`INSERT … ON CONFLICT DO NOTHING`) dans les trois tables posées par le `Migrator` de
-    miryad-core — aucun schéma vanyline, `CON-2` respecté. Alternative : amendement amont d'un
-    chemin système dans les stores.
-  [?] Modèle par défaut des agents publiés : @AgentDefinition exige un nom de profil non vide,
-    mais le réglage `default_model` d'app-settings (`{ provider_id, model }`) n'a aucune
-    correspondance avec la table des profils de miryad-core, et rien n'y est semé au démarrage.
-    Observé : @resolve_profile de `lymaille` rend `UnknownProfile` pour un nom absent. Proposé :
-    les quatre agents portent le nom de profil stable `"default"` (convention d'amorçage de
-    `system_agents.rs`) ; la correspondance du réglage vers un profil, ou son semis, est à
-    poser en B9/C3.
-  [?] Forme de la référence `context_type` des contextes publiés : le `context_type` de
-    `interactive/manager.rs` (miryad-core 0.3.1) résout la référence par `name` dans la table
-    des types, dont les noms sont `G_` — la référence doit donc être `G_home` / `G_config` ;
-    or les hooks de `definitions/catalog_context.rs` exigent de cette colonne une classification
-    `Private` et refuseraient donc la référence par le CRUD d'un administrateur. Contradiction
-    interne à miryad-core, hors de portée de la Solution (`DEC-6` : pas d'amendement) ; la
-    publication porte la forme que l'ouverture résout.
+    validator verte 2026-11-12.
+  [ ] Ouvrir un ticket amont chez miryad-core : les hooks de `definitions/catalog_context.rs`
+    exigent de la colonne `context_type` une classification `Private` et refuseraient la forme
+    `G_…` par le CRUD d'un administrateur, alors que l'ouverture de session ne résout que
+    cette forme (contradiction interne, hors de portée de la Solution — `DEC-6`).
+  [ ] `catalog.rs` : profil des quatre agents lu du réglage `default_profile`.
+  [?] Profil par défaut : un profil lymaille (`ModelProfile`) nomme un fournisseur, que l'app
+    ne connaît pas au premier démarrage ; `ensure_catalog` ne peut donc pas semer de profil
+    `"default"` utilisable. Soit aucun semis — ouvrir une session sans profil désigné échoue
+    avec une erreur explicite nommant le profil manquant, l'administrateur le crée —, soit un
+    semis conditionnel quand exactement un fournisseur existe. À trancher.
+  [?] Suivi du réglage : les agents publiés en create-only gardent le nom de profil écrit à la
+    publication ; changer `default_profile` ensuite ne les modifie pas. Faire résoudre le
+    profil à l'ouverture de session (si lymaille permet de le surcharger) ou réécrire les
+    lignes d'agents que l'administrateur n'a pas modifiées ? À trancher avec l'API de
+    lymaille.

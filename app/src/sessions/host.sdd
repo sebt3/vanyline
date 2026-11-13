@@ -26,8 +26,10 @@ Must:
     appel que le principal de @CallerPrincipal est lié à `<owner>` via `vanyline_owner_links` ;
     lié ⇒ @McpDecision::Granted avec @McpGrant{url = @sandbox_mcp_url(owner, nom), token =
     @Zeroizing d'un jeton frais par @VnlK8sClient::owner_token, expires_at = celui du cache} ; non lié, sandbox absente, ou TokenRequest
-    en échec ⇒ @McpDecision::Denied (et @HostError seulement pour une panne interne, sans
-    contenu). Les autres contextes et rôles ⇒ @McpDecision::Unprovided (`FR-2`, `DEC-2`).
+    en échec ⇒ @McpDecision::Denied ; panne de lecture du lien en base ou échec de
+    @VnlK8sClient::discover (cluster injoignable avant tout appel) ⇒ @HostError, sans
+    contenu. @VnyError::K8sApiError aplatit la cause : l'app ne distingue pas un mint refusé
+    d'un apiserver injoignable au moment du TokenRequest, les deux sont `Denied`. Les autres contextes et rôles ⇒ @McpDecision::Unprovided (`FR-2`, `DEC-2`).
   Appelée à l'assemblage ET à chaque appel d'outil, la vérification du lien rend la révocation
     effective à l'appel suivant, pas à la fin de la session (`FR-2`).
   Pour @resolve_context : @H_project_<nom> et @H_sandbox_<owner>_<nom> rendent le
@@ -39,7 +41,13 @@ Must:
     `<owner>` voient leurs `"-"` convertis en `"_"` pour rester dans l'alphabet exigé par
     @identity::classify (alphanumérique + `"_"`, casse sensible) ; la résolution inverse
     (identifiant → nom d'entité) fait `"_"` → `"-"`. Sur des noms valides DNS-1123 l'encodage
-    est injectif et total (cf. Tasks `[?]`).
+    est injectif et total ; la source de miryad-core (`lymaille/identity.rs`) n'accepte que
+    `[A-Za-z0-9_]`, et un nom K8s ne peut pas porter `"_"` (l'amendement amont pour accepter
+    `"-"` est écarté : on construit avec ce que livre la stack). Pour
+    `H_sandbox_<owner>_<nom>`, le `"_"` de jointure est indistinguable d'un `"_"` encodé
+    (`H_sandbox_jean_marc_web` = `jean-marc`×`web` ou `jean`×`marc-web`) : la résolution
+    inverse rend toutes les lectures valides, et l'appelant lève l'ambiguïté par son propre
+    lien d'owner (un seul par utilisateur : `user_id` unique dans `vanyline_owner_links`).
   Garder le jeton hors de tout chemin persistant : jamais écrit en base, jamais dans un log,
     jamais dans une réponse au navigateur ; @McpGrant porte un @Zeroizing, le `Debug` de la
     structure reste opaque ; le renouvellement suit le cache de @owner_token tel quel (`FR-4`,
@@ -60,8 +68,9 @@ Depends on:
   `zeroize` — @Zeroizing du jeton dans @McpGrant.
 
 Handles:
-  Panne apiserver sur @owner_token ⇒ @HostError (refus fermé, `FR-1`) : la session continue
-    sans le serveur MCP de ce rôle jusqu'au prochain appel, sans message contenant la panne.
+  Panne interne (lecture du lien, cluster injoignable avant tout appel) ⇒ @HostError (refus
+    fermé, `FR-1`) : la session continue sans le serveur MCP de ce rôle jusqu'au prochain
+    appel, sans message contenant la panne.
 
 Scenario: utilisateur lié obtient le serveur sandbox
   Given un utilisateur lié à l'owner `ana` et la sandbox `web` de `ana` en phase Running
@@ -84,23 +93,6 @@ Scenario: H_ jamais écrit
   Then l'écriture est refusée — l'app ne propose aucun chemin d'écriture pour les `H_`
 
 Tasks:
-  [?] Forme des identifiants `H_` face à @identity::classify (`DEC-9`, `OI-1`) : la source de
-    miryad-core 0.3.1 (`lymaille/identity.rs`) n'accepte que `[A-Za-z0-9_]` — un nom K8s avec
-    `"-"` (fréquent : `mon-projet`) rendrait `H_project_mon-projet` invalide. Encodage
-    réversible `"-"` ↔ `"_"` proposé dans le `Must` (injectif sur DNS-1123, les noms d'objets
-    K8s ne peuvent pas porter `"_"`). Alternative : amendement amont pour accepter `"-"` —
-    écarté pour ce lot par la règle « on construit avec ce que livre la stack ». À ratifier.
-    Complément porté par B6 (2026-11-12) : pour `H_sandbox_<owner>_<nom>`, le `"_"` de jointure
-    est indistinguable d'un `"_"` encodé (`H_sandbox_jean_marc_web` = `jean-marc`×`web` ou
-    `jean`×`marc-web`). La résolution inverse rend TOUTES les lectures valides et l'appelant
-    lève l'ambiguïté par le lien d'owner de l'appelant (unique par utilisateur, `user_id`
-    unique dans `vanyline_owner_links`). À ratifier avec l'encodage ci-dessus.
-  [?] Frontière `Denied` / `HostError` sur @owner_token : le `Must` rend « @TokenRequest en
-    échec » par `Denied`, `Handles` rend « panne apiserver sur @owner_token » par `HostError`,
-    et @VnyError::K8sApiError aplatit la cause — l'app ne peut distinguer mint refusé et
-    apiserver injoignable. Portée par B6 (2026-11-12) : panne de lecture du lien et échec de
-    @VnlK8sClient::discover (cluster injoignable, avant tout appel) ⇒ `HostError` ; sandbox
-    absente et @TokenRequest en échec ⇒ `Denied`. À ratifier.
   [x] @Depends on omis deux crates implicites dans le corps des `Must` : @ToolsetContext vient
     de `lymaille` (0.2.1, version déclarée par miryad-core 0.3.1 — graphe résolu inchangé) et
     @Zeroizing de `zeroize`. Les deux dépendances ont été déclarées dans `../../Cargo.toml`

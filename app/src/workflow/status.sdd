@@ -60,6 +60,9 @@ Must:
   Grouper les lectures (une requête pour la liste, pas N).
   Rendre `Unknown` pour une invocation purgée, jamais une erreur ni un faux succès.
   Ne jamais écrire le statut en base.
+  Supposer que Restate conserve les invocations terminées au moins 14 jours (`FR-6` de
+    `dsd/app/dashboards.md` : runs des 14 derniers jours) : la rétention est réglée par le
+    controller, et une invocation purgée se lit `Unknown`.
   Borner le délai des appels à l'admin Restate (5 s) ; au-delà, erreur de disponibilité.
 
 Must not:
@@ -75,20 +78,17 @@ Raises:
     classement transport-vs-décodage reproduit celui de miryad-core).
 
 Tasks:
-  [?] Formes exactes des endpoints d'admin Restate sur la version déployée : IMPLÉMENTATION
-    W1 2026-10-10 sur la doc officielle Restate 1.7 (lecture groupée `POST /query` sur
-    `sys_invocation`, journal `sys_journal`, annulation `PATCH /invocations/{id}/cancel`),
-    testée contre faux admin — AUCUN Restate réel déployé : le format n'est PAS contracté.
-    Lettre amendée (validation W1) : l'implémentation sur doc est admise ; la vérification
-    contre le cluster réel est le follow-up bloquant la contraction du format. Hypothèses
-    non verrouillées : vocabulaire `sys_invocation.status` (`paused`⇒`Suspended`,
-    `killed`⇒`Failed` ; `cancelled` pourrait arriver réel en `completed`+failure⇒`Failed`),
-    enveloppe `{"rows": […]}`, horodatages RFC 3339 OU millisecondes epoch (parse
-    tolérant, autre forme ⇒ `None`), et le `404`⇒`Unknown` de la lecture de détail.
-    Note : le @StepDispatcher de miryad-core 0.3.1 journalise dans un `ctx.run()` sans
-    nom ⇒ `steps` probablement vide en réel — jamais inventé.
-  [?] Rétention : durée de conservation des invocations terminées côté Restate à configurer pour
-    couvrir l'affichage (2 semaines / 50 derniers) ; `Unknown` est l'effet d'une purge.
+  [ ] Vérifier sur un Restate réel (DevStation ou Rennes) les formes d'admin implémentées sur
+    la doc Restate 1.7 et testées contre un faux admin : lecture groupée `POST /query` sur
+    `sys_invocation`, journal `sys_journal`, annulation `PATCH /invocations/{id}/cancel`,
+    vocabulaire de `sys_invocation.status` (`paused`⇒`Suspended`, `killed`⇒`Failed` ;
+    `cancelled` pourrait arriver en `completed` + failure ⇒ `Failed`), enveloppe
+    `{"rows": […]}`, horodatages RFC 3339 ou millisecondes epoch (parse tolérant, autre forme
+    ⇒ `None`), `404` ⇒ `Unknown` de la lecture de détail. Le format n'est contracté qu'après
+    cette vérification. Le @StepDispatcher de miryad-core 0.3.1 journalise dans un `ctx.run()`
+    sans nom : `steps` probablement vide en réel, jamais inventé.
+  [ ] Faire régler par le controller la rétention Restate des invocations terminées à au
+    moins 14 jours (spec du controller, hors de celle-ci).
 
 Scenario: liste_groupee
   Given 50 identifiants d'invocation et un faux admin Restate

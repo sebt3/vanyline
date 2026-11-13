@@ -27,7 +27,7 @@ Scenario: ddl_applique_sur_une_vraie_base
   Then colonnes et unicité de `key` existent
 
 Scenario: cle_unique
-  Given une ligne `default_model`
+  Given une ligne `default_profile`
   When une seconde ligne de même clé est insérée
   Then violation d'unicité
 

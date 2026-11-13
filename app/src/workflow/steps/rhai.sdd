@@ -44,7 +44,10 @@ Handles:
   L'authentification est celle du modèle lymaille (`build_auth` avec le
   @miryad_core::lymaille::EnvSecretResolver de `../sessions/mod.sdd`) : `none` sans
   en-tête, `static` en porteur résolu à l'appel (jamais figé au montage), `forward` sans
-  session interactive donc inutilisable en batch (cf. Tasks `[?]`).
+  session interactive donc inutilisable en batch : un serveur `forward` reste ÉNUMÉRÉ par
+  `mcp_servers()` et lève `Forbidden` (erreur Rhai) à l'appel, plutôt que de disparaître de la
+  liste (l'erreur nomme la cause, un outil « inconnu » la masquerait ; cohérent avec la
+  politique `Denied`/`HostError` de `../../sessions/host.sdd`).
   Plus, pour un run de portée SANDBOX seulement, le
   serveur `sandbox` (URL interne de la sandbox du run, jeton de l'Owner). Un workflow de projet
   n'a jamais le serveur `sandbox` : il n'a pas de sandbox (aucune règle supplémentaire
@@ -66,6 +69,9 @@ Must:
   Créer un client MCP par exécution (aucun état partagé entre exécutions de scripts).
 
 Must not:
+  Atteindre un serveur MCP externe à session (`Mcp-Session-Id`, handshake `initialize`) : le
+    pont est POST-only et SANS ÉTAT, seul le profil du serveur MCP de la sandbox (strictement
+    sans état, `../../../../sandbox/src/mcp.sdd`) est atteint (borné W2 2026-10-10).
   Réimplémenter le kind `rhai` : s'appuyer sur `RhaiStep` + `with_setup` (issue #27).
   Donner le serveur `sandbox` à un run de portée projet.
 
@@ -74,15 +80,13 @@ Tasks:
     `with_setup` est livré en miryad-core 0.1.5 (source du registre vérifiée, tests
     inclus ; validation W2 2026-10-10) — kind implémenté et testé
     (`kind_rhai_via_le_rhaistep_de_miryad`).
-  [?] Serveurs `forward` en batch : `build_auth` refuse le mode `forward` sans jeton
-      interactif (`Forbidden`) — les écarter de `mcp_servers()` ou les énumérer et lever
-      l'erreur à l'appel ? Écarter silencieusement est le défaut proposé (cohérent avec
-      « serveur inutilisable ») ; à ratifier avec la politique `Denied`/`HostError` de
-      `../../sessions/host.sdd`.
-  [!] Pont MCP POST-only SANS ÉTAT : les serveurs externes à session (`Mcp-Session-Id`,
-    handshake `initialize`) sont hors de portée du pont rhai — seul le profil du serveur
-    MCP de la sandbox (strictement sans état, ../../sandbox/src/mcp.sdd) est atteint
-    (borné W2 2026-10-10 ; séam `prefixed_mcp` privé).
+  [ ] `rhai.rs` : vérifier que l'énumération conserve les serveurs `forward` et que l'appel lève
+    `Forbidden` ; le Scenario ci-dessous le verrouille.
+
+Scenario: serveur_forward_enumere_et_refuse_a_l_appel
+  Given un serveur MCP global en mode `forward` autorisé à l'utilisateur déclencheur
+  When un script appelle `mcp_servers()` puis un outil de ce serveur
+  Then la liste contient le serveur et l'appel lève `Forbidden`, sans jeton interactif
 
 Scenario: lister_les_serveurs
   Given deux serveurs MCP globaux dont `allowed_groups` autorise l'utilisateur
