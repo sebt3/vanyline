@@ -136,9 +136,10 @@ Tasks:
   [?] L'ordre miryad-core → app n'est protégé que par la séquence de code de `../main.rs`
       : en SQLite en mémoire (tests) les FK ne sont pas appliquées, l'ordre n'est vérifié
       qu'en PostgreSQL réel. Faut-il le contracter davantage (test, garde-fou) ?
-  [ ] Dériver un test du Scenario « les six migrations s’appliquent dans l’ordre exact
-      enregistré » : à ce jour seul le test d'application complète existe, l'ordre lui-même
-      n'est vérifié par aucun test.
+  [x] Dériver un test du Scenario « les six migrations s’appliquent dans l’ordre exact
+      enregistré » — FAIT en C3 du chantier lymaille (2026-11-13, validator vert) : le test
+      assertion exactement les 6 versions dans l'ordre (rowid) + absence explicite des 9
+      retirées + inexistence des 9 tables via sqlite_master.
   [ ] Rattacher les specs enfants `./m20260825_0000XX_*.sdd` (en cours de rédaction) dans
       `Structure` et vérifier qu'elles ne re-dupliquent pas le contrat d'ordre.
 

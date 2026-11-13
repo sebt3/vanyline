@@ -102,11 +102,11 @@ Specs (parallélisables après B9), puis code séquentiel :
 - [x] **C2 — Chat maison.** Retirer `ws/chat.rs`, `api/conversations.rs`, `system_agents.rs`, `api/local_tools.rs`, les entités
   `chat_contexts`, `conversations`, `messages` **et leurs migrations d'origine** (`m20260825_000007` à `000009` et leurs `.sdd`),
   retirées de `migration/mod.rs` : table propre, aucune migration `drop` ; specs associées.
-- [ ] **C3 — Configuration LLM maison.** Retirer `config_store.rs`, les entités et l'API de `agents`, `llm_providers`,
+- [x] **C3 — Configuration LLM maison.** Retirer `config_store.rs`, les entités et l'API de `agents`, `llm_providers`,
   `mcp_servers`, `model_profiles`, `skills`, `toolsets` (remplacées par les ressources de miryad-core, `miryad-core#DEC-14`),
   migrations d'origine retirées de la même façon (`m20260825_000001` à `000006`, hors `000010` `owner_links` qui reste ; la
   migration `m20261005_000003` qui altère `agents` disparaît avec elle). `app_settings` : conserver (`[?]` dans sa spec : les réglages globaux restent-ils nécessaires ?).
-- [ ] **C4 — Tests.** Les tests supprimés avec le code ne sont pas remplacés par d'autres que ceux des Scenario des specs
+- [x] **C4 — Tests.** Les tests supprimés avec le code ne sont pas remplacés par d'autres que ceux des Scenario des specs
   nouvelles ou amendées ; la batterie complète reste verte.
 
 ## D — Frontend (après B8 pour les types, B9 pour le serveur)
@@ -174,3 +174,11 @@ Code, **séquentiel**, après A2 et la spec correspondante :
 Les Solutions `app/widgets`, `app/ui-actions`, `app/artifacts`, `app/workflows`, `app/review`,
 `app/planning`, `app/configuration` ne sont pas écrites : aucune tâche d'exécution n'existe pour elles. Elles s'ouvriront quand
 leur Solution (`dsd/app/<nom>.md`) existera. Ne pas en rédiger.
+
+## Notes de clôture
+
+- C3 (commit `00d9181`) : OpenAPI des dix ressources lymaille en **fragments manuels**
+  (arbitrage Sébastien 2026-11-13 — `resource_openapi` exige `ToSchema`, absent de
+  miryad-core 0.3.1 ; ticket amont tracé dans `main.sdd` Tasks). C4 clos sur la batterie
+  complète verte du validator rendue sur l'arbre C3 exact (aucun test de comportement
+  recréé hors Scenario : discipline TTD tenue tâche par tâche A→C).

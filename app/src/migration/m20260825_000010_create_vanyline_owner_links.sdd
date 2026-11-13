@@ -16,6 +16,7 @@ Purpose:
   n'est pas respecté. Particularité vis-à-vis du patron des neuf sœurs : l'unicité est
   portée par `@ColumnDef::unique_key()` (contrainte `UNIQUE` inline sur la colonne), et non
   par un `@Index::create().unique(...)` inline comme dans `./m20260825_000001_create_vanyline_skills.rs`
+  (sœur retirée en C3 du chantier lymaille, 2026-11-13)
   — les deux formes produisent une contrainte de table valide. La règle de régression
   Phase 3 de `./mod.sdd` (fragment `(...)` orphelin) ne vise que `.index(...)` sans
   `.unique()` inline ; la forme `.unique_key()` de ce fichier n'est pas concernée par cette
@@ -175,7 +176,8 @@ Depends on:
     unique ; ../main.rs — appelant du migrateur (échec : `VNL-DB-005`).
   ./m20260825_000001_create_vanyline_skills.rs — sœur au patron DDL proche (même FK, même
     auto-incrément), citée pour contraste : unicité par `@Index::create().unique(...)`
-    inline table là, par `@ColumnDef::unique_key()` inline colonne ici.
+    inline table là, par `@ColumnDef::unique_key()` inline colonne ici. Cette sœur est
+    RETIRÉE en C3 du chantier lymaille (2026-11-13) : la comparaison devient historique.
 
 Tasks:
   [?] `k8s_owner_name` nullable : aucun chemin de code de l'app n'insère de ligne au nom
@@ -199,7 +201,8 @@ Tasks:
   [?] `ON DELETE CASCADE` sans `ON UPDATE` : asymétrie suppression (cascade, le lien
       disparaît avec l'utilisateur miryad-core) vs mise à jour de `miryad_users.id`
       (refusée par `NO ACTION` en PostgreSQL) — voulue ? Écho du `[?]` équivalent de
-      `./m20260825_000001_create_vanyline_skills.sdd`.
+      `./m20260825_000001_create_vanyline_skills.sdd` (spec sœur retirée en C3 du chantier
+      lymaille — l'écho n'a plus de porteur amont, l'arbitrage se reprend ici).
   [!] Asymétrie de garde-fous : `up` défensif (`IF NOT EXISTS`) mais `down` sans
       `IF EXISTS` — un second `down` sur table absente est une erreur. Volontaire ou
       oubli ? (Lié au `[?]` de politique de rollback, ouvert dans `./mod.sdd` — les deux
