@@ -14,6 +14,7 @@
 mod api;
 mod auth;
 mod config;
+mod dashboards;
 mod db;
 mod error;
 mod k8s;
@@ -289,6 +290,7 @@ fn resources_router() -> Router<AppState> {
             db::entities::app_settings::Entity,
             AppState,
         >())
+        .merge(resource_router::<db::entities::dashboards::Entity, AppState>())
 }
 
 /// `POST /mcp` : CRUD de la configuration (les onze entités du `resource_router`) par le
@@ -308,7 +310,8 @@ pub(crate) fn mcp_config_router() -> Router<AppState> {
         .register::<definitions::catalog_context::Entity>()
         .register::<definitions::user_context::Entity>()
         .register::<definitions::mcp_server::Entity>()
-        .register::<db::entities::app_settings::Entity>();
+        .register::<db::entities::app_settings::Entity>()
+        .register::<db::entities::dashboards::Entity>();
     mcp_router(registry)
 }
 
@@ -413,6 +416,7 @@ fn openapi_spec() -> utoipa::openapi::OpenApi {
 
     let mut spec = OpenApiBuilder::new().paths(paths).build();
     spec.merge(resource_openapi::<db::entities::app_settings::Entity>());
+    spec.merge(resource_openapi::<db::entities::dashboards::Entity>());
     spec.info = utoipa::openapi::Info::new("vanyline", env!("CARGO_PKG_VERSION"));
     spec
 }
@@ -421,11 +425,11 @@ fn openapi_spec() -> utoipa::openapi::OpenApi {
 mod tests {
     use super::*;
 
-    /// Scenario: `openapi_spec fusionne onze ressources avec un seul schéma de sécurité`
-    /// (`main.sdd`, onze ressources depuis le retrait C3 du chantier lymaille : les dix
-    /// définitions lymaille de miryad-core + `app-settings`, aucun chemin de la config maison).
+    /// Scenario: `openapi_spec fusionne douze ressources avec un seul schéma de sécurité`
+    /// (`main.sdd`, douze ressources depuis la vague G : les dix définitions lymaille de
+    /// miryad-core + `app-settings` + `dashboards`, aucun chemin de la config maison).
     #[test]
-    fn openapi_spec_exposes_all_eleven_resources_without_duplicate_security_scheme() {
+    fn openapi_spec_exposes_all_twelve_resources_without_duplicate_security_scheme() {
         let spec = openapi_spec();
 
         for resource in [
@@ -440,6 +444,7 @@ mod tests {
             "lymaille_contexts",
             "lymaille_mcp_servers",
             "app-settings",
+            "dashboards",
         ] {
             assert!(
                 spec.paths
@@ -481,26 +486,40 @@ mod tests {
         assert_eq!(spec.info.title, "vanyline");
         assert_eq!(spec.info.version, env!("CARGO_PKG_VERSION"));
 
-        // And du Scenario (arbitrage Sébastien 2026-11-13) : les dix fragments lymaille sont
-        // manuels et ne déclarent AUCUN schéma de modèle — les `schemas` du document final
-        // sont exactement ceux du fragment `app-settings`, rien de plus.
-        let fragment = resource_openapi::<db::entities::app_settings::Entity>();
-        let doc_schemas: Vec<&String> = spec
+        // And du Scenario (arbitrage Sébastien 2026-11-13, étendu à la vague G) : les dix
+        // fragments lymaille sont manuels et ne déclarent AUCUN schéma de modèle — les
+        // `schemas` du document final sont exactement l'union des deux fragments d'entités
+        // de l'app (`app_settings`, `dashboards`), rien de plus.
+        let settings_fragment = resource_openapi::<db::entities::app_settings::Entity>();
+        let dashboards_fragment = resource_openapi::<db::entities::dashboards::Entity>();
+        let mut doc_schemas: Vec<&String> = spec
             .components
             .iter()
             .flat_map(|components| components.schemas.keys())
             .collect();
-        let expected_schemas: Vec<&String> = fragment
+        let mut expected_schemas: Vec<&String> = settings_fragment
             .components
             .iter()
             .flat_map(|components| components.schemas.keys())
+            .chain(
+                dashboards_fragment
+                    .components
+                    .iter()
+                    .flat_map(|components| components.schemas.keys()),
+            )
             .collect();
+        doc_schemas.sort_unstable();
+        expected_schemas.sort_unstable();
+        // `schemas` est une MAP indexée par nom : `HookErrorBody`, déclaré par les deux
+        // fragments d'entités, n'apparaît qu'une fois dans le document (même dédoublonnage
+        // que les security_schemes ci-dessous).
+        expected_schemas.dedup();
         assert_eq!(
             doc_schemas, expected_schemas,
             "aucun schéma de modèle lymaille ne doit figurer dans le document : {doc_schemas:?}"
         );
 
-        // OpenApi::merge dédoublonne security_schemes/security par nom/égalité — les 11
+        // OpenApi::merge dédoublonne security_schemes/security par nom/égalité — les 12
         // fragments déclarent le même schéma Bearer, il ne doit apparaître qu'une fois.
         let components = spec.components.expect("components present");
         assert_eq!(

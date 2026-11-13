@@ -20,7 +20,7 @@ Purpose:
   ./api/mod.sdd est celle-là : le préfixe `/api` est la propriété
   EXCLUSIVE du @nest d'ici ; `/api/v1` n'est plus un nest (retrait C3 de
   @api_v1_router) et n'existe que dans les chemins complets des @merge ;
-  (4) @openapi_spec, la fusion des onze fragments OpenAPI.
+  (4) @openapi_spec, la fusion des douze fragments OpenAPI.
   Le serveur est en HTTP PLAIN (@tokio::net::TcpListener sans TLS) : le TLS est terminé
   en amont (Ingress de l'Application — cf. ../../docs/architecture.md). Les comportements
   internes des modules (handlers, WS, migrations enfants, config par variable, mapping
@@ -55,8 +55,8 @@ Structure:
     ligne canonique quatre lints, `../../tooling.sdd` ratifié 2026-10-14) — seule ligne de
     ./main.rs que ../../tooling.sdd autorise à
     modifier dans ce fichier ; aucune autre exemption dans le corps.
-  Déclarations de modules (12, toutes privées, sans `pub`) : `mod api; mod auth;
-  mod config; mod db; mod error; mod k8s; mod mcp_domain; mod migration;
+  Déclarations de modules (13, toutes privées, sans `pub`) : `mod api; mod auth;
+  mod config; mod dashboards; mod db; mod error; mod k8s; mod mcp_domain; mod migration;
   mod naming; mod sessions; mod workflow; mod ws;` —
   tout module du crate doit être déclaré ici pour exister (`mod system_agents;` retiré en
   C2 du chantier lymaille, `mod config_store;` retiré en C3 du même chantier,
@@ -68,8 +68,8 @@ Structure:
   @tracing::error! avec identifiant `VNL-*` puis @std::process::exit(1).
   @health — fonction privée `async fn health() -> &'static str`, corps littéral `"ok"`.
   @openapi_spec — fonction privée (documentée par le commentaire de code) : fusion par
-  @OpenApi::merge de ONZE fragments — UN @resource_openapi (l'entité de l'app
-  `app_settings`) et DIX MANUELS, un par définition lymaille (arbitrage Sébastien
+  @OpenApi::merge de DOUZE fragments — DEUX @resource_openapi (les entités de l'app
+  `app_settings` et `dashboards`) et DIX MANUELS, un par définition lymaille (arbitrage Sébastien
   2026-11-13 : @resource_openapi exige `Model: @utoipa::ToSchema`, que miryad-core 0.3.1 ne
   dérive PAS pour `lymaille::definitions` — vérifié dépôt amont et crates publiés ; la
   modification de miryad-core étant interdite par le chantier, les fragments sont construits
@@ -77,11 +77,13 @@ Structure:
   ressasser le @SecurityScheme ni déclarer de schéma de modèle). `info` posé une seule fois
   sur le document final.
   @mod tests (cfg(test)) — un seul test,
-  `openapi_spec_exposes_all_eleven_resources_without_duplicate_security_scheme` ; c'est le
+  `openapi_spec_exposes_all_twelve_resources_without_duplicate_security_scheme` ; c'est le
   SEUL test du fichier ; tout le reste de ./main.rs (séquence, assemblage, codes de
   sortie) n'est testé par aucun test du dépôt (cf. Tasks).
-  Ordre de merge des 11 ressources dans le router ET de fusion dans @openapi_spec (deux
-  listes IDENTIQUES depuis C3 — `[?]` d'alignement soldé ; l'ancienne divergence router/openapi
+  Ordre de merge des 12 ressources dans le router ET de fusion dans @openapi_spec (deux
+  listes IDENTIQUES depuis C3 — `[?]` d'alignement soldé ; la 12ᵉ, `dashboards` (vague G),
+  est une entité de l'app : son fragment OpenAPI vient de @resource_openapi, contrairement
+  aux dix lymaille ; l'ancienne divergence router/openapi
   est sans objet, les ressources n'ont jamais de routes communes ; la méthode de production
   des fragments diffère — un @resource_openapi, dix manuels — pas l'ordre) : les dix entités de
   `miryad_core::lymaille::definitions` — `agent`, `toolset`, `profile`, `provider`,
@@ -229,16 +231,17 @@ Returns:
   - @merge(@miryad_core::auth::auth_router()) — routes OIDC de miryad-core (chemins
     hors dépôt, non contractés ici — la documentation architecture mentionne le callback
     `/auth/callback` ; frontière, cf. Tasks `[!]`).
-  - 11 @merge(@resource_router::<@Entity, @AppState>()) — CRUD monté en CHEMINS
+  - 12 @merge(@resource_router::<@Entity, @AppState>()) — CRUD monté en CHEMINS
     COMPLETS `/api/v1/{resource_name}` et `/api/v1/{resource_name}/{id}` (chemins
     attestés par le test de @openapi_spec) : les dix définitions lymaille de
-    miryad-core puis `app-settings` (ordre d'Exposes ; depuis le retrait C3 du chantier
+    miryad-core, puis les deux entités de l'app par ordre alphabétique `app-settings`,
+    `dashboards` (ordre d'Exposes ; depuis le retrait C3 du chantier
     lymaille des six entités de config maison et de `skills`, sans équivalent lymaille).
   - @merge(@mcp_config_router()) — monté revue 2026-10-14 (part `[x]` de la tâche « Moteur
     de workflow et MCP » ci-dessous) : `miryad_core::mcp::@mcp_router` sur @route
-    `"/mcp"`, `POST` seul, registre @McpToolRegistry (@OutputFormat::Json) avec les ONZE
-    entités dans le même ordre qu'Exposes (dix définitions lymaille + app_settings,
-    depuis le retrait C3 du chantier lymaille) — CRUD de la configuration par MCP avec l'identité de l'appelant
+    `"/mcp"`, `POST` seul, registre @McpToolRegistry (@OutputFormat::Json) avec les DOUZE
+    entités dans le même ordre qu'Exposes (dix définitions lymaille + app_settings +
+    dashboards) — CRUD de la configuration par MCP avec l'identité de l'appelant
     (401 sans jeton, jamais 404 ; test `mcp_config_monte_et_authentifie`) ; sans collision
     avec `/mcp/domain` (chemins distincts, pas de préfixe partagé en service).
   - @merge(mcp_domain::@mcp_domain_router()) — monté M1 2026-10-11 (avant les deux
@@ -272,17 +275,17 @@ Returns:
     — SPA : fichier statique sous `STATIC_DIR`, sinon `index.html`. Le @fallback_service
     est branché APRÈS @with_state ; `static_dir` est cloné avant le move de `config` dans
     l'état.
-  @openapi_spec() : document @utoipa OpenAPI — pour chacune des 11 ressources (noms
+  @openapi_spec() : document @utoipa OpenAPI — pour chacune des 12 ressources (noms
     verbatims `lymaille_catalog_agents`, `lymaille_catalog_toolsets`, `lymaille_profiles`,
     `lymaille_providers`, `lymaille_agents`, `lymaille_toolsets`,
     `lymaille_catalog_context_types`, `lymaille_catalog_contexts`, `lymaille_contexts`,
-    `lymaille_mcp_servers`, `app-settings`) un chemin collection `/api/v1/{resource}` et
-    un chemin item `/api/v1/{resource}/{id}` ; le fragment `app-settings` (via
-    @resource_openapi) porte le schéma du modèle et le @SecurityScheme ; les dix fragments
+    `lymaille_mcp_servers`, `app-settings`, `dashboards`) un chemin collection `/api/v1/{resource}` et
+    un chemin item `/api/v1/{resource}/{id}` ; les fragments `app-settings` et `dashboards`
+    (via @resource_openapi) portent le schéma de leur modèle et le @SecurityScheme ; les dix fragments
     MANUELS portent les mêmes méthodes (collection `GET`+`POST`, item `GET`+`PUT`+`DELETE`,
     le `{id}` en paramètre de chemin) et l'exigence `bearer_auth` par simple référence de nom
-    — ils ne déclarent NI schéma de modèle NI @security_scheme (le composant modèle du
-    document final est donc celui d'`app-settings` seul) ; `info.title` = `"vanyline"`,
+    — ils ne déclarent NI schéma de modèle NI @security_scheme (les composants modèle du
+    document final sont donc ceux des deux seules entités de l'app) ; `info.title` = `"vanyline"`,
     `info.version` =
     `env!("CARGO_PKG_VERSION")` (posés sur le document FINAL, les fragments ne portent
     pas d'`info`) ; exactement UN @security_schemes (le schéma Bearer commun, dédoublonné
@@ -676,20 +679,21 @@ Scenario: routeur_de_production_assemble_sans_panique
   # Resserré en C3 du chantier lymaille : les chemins `/api/v1/lymaille_*` des définitions
   # mergées sont vérifiés par le test d'@openapi_spec (mêmes sources), pas sondés ici.
 
-Scenario: openapi_spec fusionne onze ressources avec un seul schéma de sécurité
+Scenario: openapi_spec fusionne douze ressources avec un seul schéma de sécurité
   Given un appel direct à @openapi_spec() dans le module de test de ./main.rs (test
-    `openapi_spec_exposes_all_eleven_resources_without_duplicate_security_scheme`)
+    `openapi_spec_exposes_all_twelve_resources_without_duplicate_security_scheme`)
   When le document est inspecté
   Then les chemins `/api/v1/{resource}` et `/api/v1/{resource}/{id}` existent pour
     `lymaille_catalog_agents`, `lymaille_catalog_toolsets`, `lymaille_profiles`,
     `lymaille_providers`, `lymaille_agents`, `lymaille_toolsets`,
     `lymaille_catalog_context_types`, `lymaille_catalog_contexts`, `lymaille_contexts`,
-    `lymaille_mcp_servers`, `app-settings`
+    `lymaille_mcp_servers`, `app-settings`, `dashboards`
     And aucun chemin `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`,
     `skills` ni `agents` nu n'apparaît (retrait C3 du chantier lymaille)
     And les composants `schemas` du document ne contiennent AUCUN schéma de modèle
-    lymaille (les dix fragments sont manuels, seule l'entité `app_settings` porte le sien —
-    limitation ToSchema de miryad-core 0.3.1, arbitrage 2026-11-13)
+    lymaille (les dix fragments sont manuels, seules les entités de l'app
+    `app_settings` et `dashboards` portent le leur — limitation ToSchema de miryad-core
+    0.3.1, arbitrage 2026-11-13)
     And `info.title` vaut `"vanyline"` et `info.version` la version du crate
     And `components.security_schemes` compte exactement 1 entrée (Bearer dédoublonné)
     And la sécurité globale du document compte exactement 1 entrée

@@ -4,6 +4,7 @@ mod m20261005_000002_create_vanyline_workflow_runs;
 mod m20261005_000004_create_vanyline_app_settings;
 mod m20261023_000001_create_vanyline_projects;
 mod m20261023_000002_create_vanyline_sandboxes;
+mod m20261113_000001_create_vanyline_dashboards;
 
 use sea_orm::sea_query::{Alias, DynIden, IntoIden};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261005_000004_create_vanyline_app_settings::Migration),
             Box::new(m20261023_000001_create_vanyline_projects::Migration),
             Box::new(m20261023_000002_create_vanyline_sandboxes::Migration),
+            Box::new(m20261113_000001_create_vanyline_dashboards::Migration),
         ]
     }
 
@@ -54,15 +56,14 @@ mod migrations_apply_cleanly {
         assert!(count.is_empty());
     }
 
-    /// Scenario: `les six migrations s'appliquent dans l'ordre exact enregistré`
-    /// (`./mod.sdd`, resserré à six en C3 du chantier lymaille : `m20260825_000001` à
-    /// `000006` et `m20261005_000003` retirées — configuration LLM portée par les tables
-    /// `miryad_*` du migrateur miryad-core, tables propres, aucune migration drop ;
-    /// `000007` à `000009` l'avaient été en C2). L'ordre est lu par `rowid` : la table de
+    /// Scenario: `les sept migrations s'appliquent dans l'ordre exact enregistré`
+    /// (`./mod.sdd`, « six »→« sept » le 2026-11-13 : vague G,
+    /// `m20261113_000001_create_vanyline_dashboards` ajoutée en fin de chaîne —
+    /// `dsd/app/dashboards.md` `DEC-3`). L'ordre est lu par `rowid` : la table de
     /// suivi est une table SQLite à clé `version` TEXT, le `rowid` implicite suit l'ordre
     /// d'insertion = ordre d'application.
     #[tokio::test]
-    async fn les_six_migrations_sappliquent_dans_lordre_exact_enregistre() {
+    async fn les_sept_migrations_sappliquent_dans_lordre_exact_enregistre() {
         use sea_orm::{ConnectionTrait, Statement};
         use sea_orm_migration::MigratorTrait;
 
@@ -97,8 +98,9 @@ mod migrations_apply_cleanly {
                 "m20261005_000004_create_vanyline_app_settings",
                 "m20261023_000001_create_vanyline_projects",
                 "m20261023_000002_create_vanyline_sandboxes",
+                "m20261113_000001_create_vanyline_dashboards",
             ],
-            "la table de suivi doit porter exactement six lignes dans l'ordre de `Must`"
+            "la table de suivi doit porter exactement sept lignes dans l'ordre de `Must`"
         );
         for withdrawn in [
             "m20260825_000001_create_vanyline_skills",
@@ -149,7 +151,7 @@ mod migrations_apply_cleanly {
 
     /// Scenario: `un step partiel n'applique que le préfixe` (`./mod.sdd`) — `up` avec
     /// step `Some(3)` : les trois premières migrations de `Must` sont appliquées et
-    /// enregistrées, les trois suivantes absentes.
+    /// enregistrées, les quatre suivantes absentes.
     #[tokio::test]
     async fn un_step_partiel_n_applique_que_le_prefixe() {
         use sea_orm::{ConnectionTrait, Statement};
@@ -190,6 +192,7 @@ mod migrations_apply_cleanly {
             "m20261005_000004_create_vanyline_app_settings",
             "m20261023_000001_create_vanyline_projects",
             "m20261023_000002_create_vanyline_sandboxes",
+            "m20261113_000001_create_vanyline_dashboards",
         ] {
             assert!(
                 !versions.iter().any(|v| v == absent),
@@ -586,20 +589,19 @@ mod workflow_migrations {
         assert_eq!(left, [] as [Model; 0], "cascade must drop the run");
     }
 
-    /// Scenario: `down_supprime_la_table` (les deux specs) — `Migrator::down` annule la fin de
-    /// chaîne : depuis la chaîne à SIX migrations (C3 du chantier lymaille), quatre pas (000016
-    /// et 000015 identité, 000004 `app_settings`, puis 000002) annulent
-    /// `vanyline_workflow_runs` (disparaît, `vanyline_project_workflows` reste) ; un pas de plus
-    /// annule la première. La migration `m20261005_000003` (`agents_system`) et le bout de
-    /// chaîne retiré en C3 ne sont plus exercés ici.
+    /// Scenario: `down_supprime_la_table` (les deux specs) — appel de `down` annulant la fin
+    /// de chaîne : depuis la chaîne à SEPT migrations (vague G : `m20261113_000001`
+    /// dashboards en bout), cinq pas (dashboards, les deux d'identité, `000004`
+    /// `app_settings`, puis `000002`) annulent `vanyline_workflow_runs` (disparaît,
+    /// `vanyline_project_workflows` reste) ; un pas de plus annule la première.
     #[tokio::test]
     async fn down_supprime_les_tables() {
         let db = real_db().await;
         assert!(table_sql(&db, "vanyline_workflow_runs").await.is_some());
 
-        crate::migration::Migrator::down(&db, Some(4))
+        crate::migration::Migrator::down(&db, Some(5))
             .await
-            .expect("four-step down succeeds (000016, 000015, 000004, then 000002)");
+            .expect("five-step down succeeds (dashboards, 000016, 000015, 000004, then 000002)");
         assert!(
             table_sql(&db, "vanyline_workflow_runs").await.is_none(),
             "vanyline_workflow_runs must be dropped by its down()"
@@ -696,17 +698,17 @@ mod system_migrations {
         assert!(dup.is_err(), "duplicate key must violate UNIQUE");
     }
 
-    /// Scenario: `down_supprime_la_table` (`m20261005_000004`) — trois pas de `down` (les deux
-    /// migrations d'identité `m20261023_*` sont annulées d'abord, puis `000004`) DROP la table,
-    /// la chaîne workflow reste posée.
+    /// Scenario: `down_supprime_la_table` (`m20261005_000004`) — quatre pas de `down` (la
+    /// migration dashboards de la vague G et les deux migrations d'identité `m20261023_*`
+    /// sont annulées d'abord, puis `000004`) DROP la table, la chaîne workflow reste posée.
     #[tokio::test]
     async fn down_supprime_app_settings() {
         let db = real_db().await;
         assert!(table_sql(&db, "vanyline_app_settings").await.is_some());
 
-        crate::migration::Migrator::down(&db, Some(3))
+        crate::migration::Migrator::down(&db, Some(4))
             .await
-            .expect("three-step down succeeds (000016, 000015, then 000004)");
+            .expect("four-step down succeeds (dashboards, 000016, 000015, then 000004)");
         assert!(
             table_sql(&db, "vanyline_app_settings").await.is_none(),
             "vanyline_app_settings must be dropped by its down()"

@@ -1,0 +1,103 @@
+Spec: Registry — registre des types de widgets
+
+Platform: Rust/vanyline-app — données statiques
+
+Purpose:
+  Le REGISTRE des types de widgets (`dsd/app/dashboards.md` `FR-4`, `DEC-1`) : pour chaque
+  type, son nom, le schéma JSON de sa `config`, ses besoins de contexte (projet, sandbox)
+  et sa source de données. Deux consommateurs : le hook d'écriture de
+  `../db/entities/dashboards.sdd` (un type inconnu refuse la définition, `FR-3`) et la
+  documentation frontend (les besoins pilotent le contexte monté par le moteur de rendu,
+  vague G3/G6). Le registre ne REND rien : le rendu des types inconnus (définition plus
+  récente que l'app) est un emplacement d'erreur côté frontend (`FR-4` seconde phrase,
+  `AC-5`). Fichier neuf, conception.
+
+Owns:
+  ./registry.rs
+
+References:
+  /dsd/app/dashboards.md — `FR-4`, `FR-6`, `FR-10`, `DEC-1`, `AC-5`
+  ./model.sdd — le `Widget` dont le champ `widget_type` est la clé du registre
+  ../db/entities/dashboards.sdd — consommateur d'écriture
+
+Exposes:
+  @Needs — `pub struct` { @project: `bool`, @sandbox: `bool` } : le contexte qu'un widget
+    exige pour être monté (le moteur frontend ne fournit jamais plus, jamais moins).
+  @DataSource — `pub enum` serde `snake_case` : `Projects`, `Sandboxes`, `Workflows`,
+    `Runs`, `CodeHealth`, `Chat`, `Dashboards`, `Inline` (données portées par `config` —
+    markdown, bar, pie) — huit sources ; `Scripted` n'existe PAS ici (`app/widgets`, non
+    ouverte). `FR-10` (rythmes de rafraîchissement) est la documentation de ces variantes,
+    pas un champ.
+  @WidgetType — `pub struct` { @name: `&'static str`, @config_schema:
+    `&'static serde_json::Value` (schéma JSON `lazy_static`/`json!` en const-fn par
+    `std::sync::OnceLock`), @needs: `@Needs`, @source: `@DataSource` }.
+  @all() -> `&'static [@WidgetType]` — le registre complet, ordre alphabétique de `name`.
+  @known(@name: &str) -> `Option<&'static @WidgetType>` — recherche par nom exact
+    (sensible à la casse).
+
+Structure:
+  Table des types livrés (`FR-6` — dix, verbatims) :
+
+  | name         | needs (proj, sand) | source      | config (schéma minimal)                       |
+  |--------------|--------------------|-------------|-----------------------------------------------|
+  | bar          | (0, 0)             | Inline      | `{title?, data: [{label, value}]}`             |
+  | chat         | (0, 0)             | Chat        | `{}`                                          |
+  | code-health  | (0, 1)             | CodeHealth  | `{}`                                          |
+  | dashboards   | (1, 0)             | Dashboards  | `{}`                                          |
+  | markdown     | (0, 0)             | Inline      | `{text}` (markdown sans HTML brut, Sécurité)   |
+  | pie          | (0, 0)             | Inline      | `{title?, data: [{label, value}]}`             |
+  | projects     | (0, 0)             | Projects    | `{}`                                          |
+  | runs         | (0, 0)             | Runs        | `{days?, max?}` (défauts frontend 14/50)       |
+  | sandboxes    | (1, 0)             | Sandboxes   | `{}`                                          |
+  | workflows    | (1, 0)             | Workflows   | `{}`                                          |
+
+  Les schémas `config` sont DÉCLARATIFS pour le frontend ; la validation d'écriture ne
+  vérifie que « `config` est un objet JSON » (`Must`) — pas la grammaire du schéma.
+
+Must:
+  Lister EXACTEMENT les dix types du tableau — `known("scripted")` doit rendre `None`
+    tant que `app/widgets` n'est pas ouverte (`FR-6` : « réservé au registre » = le nom est
+    pris, pas le type).
+  Déclarer les besoins conformément au tableau : un widget de besoin `project` rendu hors
+    écran projet est une erreur de montage frontend (`AC-7`), le registre ne fait que le
+    dire.
+
+Must not:
+  Contenir de code de rendu, de chargement de données, ou de dépendance à axum/sea_orm.
+  Valider la `config` contre son schéma (côté app) : seule la forme objet est exigée à
+    l'écriture ; les clés inconnues dans `config` sont TOÉRÉES (évolution de widget sans
+    montée de l'app — les définitiones plus récentes que l'app se lisent, `FR-4`).
+
+Scenario: les dix types standard sont connus
+  Given le registre
+  When `known` est appelé sur chacun des dix noms du tableau
+  Then chacun rend `Some` avec `needs` et `source` du tableau, et `all()` compte exactement
+    dix entrées dans l'ordre alphabétique
+
+Scenario: scripted est réservé mais absent
+  Given le registre
+  When `known("scripted")` est appelé
+  Then `None` est rendu — une définition l'écrivant est refusée en écriture (hook) comme
+    un type inconnu ordinaire
+
+Scenario: un nom inconnu rend None sans distinction
+  Given n'importe quelle chaîne non listée (« Markdown », "", « widget/chat »)
+  When `known` est appelé
+  Then `None` — aucune signalétique particulière pour « futur type » vs « faute de frappe »
+    (le refus à l'écriture est le même, `AC-4`)
+
+Depends on:
+  @serde_json (schémas), `./model.sdd` (aucune — les types ne se citent pas ; la clé est
+    la chaîne `Widget.widget_type`).
+
+Tasks:
+  [?] Besoins de `chat` : `(0,0)` suppose que le widget prend le contexte de l'écran
+    courant (`app/sessions` — le chat n'a pas de sélecteur) ; `OI-1` du DSD (widget vs
+    colonne de conversation) peut le retirer de la grille. Ratifier avec la vague D/G3.
+  [?] Rythmes de rafraîchissement de `FR-10` (sondage runs 10 s) : laissés au frontend
+    (choix posé ici, le registre ne porte que la SOURCE) — confirmer avec la spec
+    frontend G3.
+
+Done when:
+  Les trois Scenarios ont leurs tests ; le tableau est relu contre `FR-6` à chaque
+    ouverture de Solution de widgets (`app/widgets`).

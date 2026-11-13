@@ -2,7 +2,7 @@ Spec: Db Entities
 
 Purpose:
   Module `entities` de la couche base de données de l'`app` : registre déclaratif des
-  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les six
+  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les sept
   sous-modules d'entités — aucun comportement propre, aucune réexportation, aucune
   fonction utilitaire : le contrat table ↔ entité (colonnes, clé primaire, relations)
   vit dans chaque fichier enfant (specs séparées en cours de rédaction, règle
@@ -18,8 +18,8 @@ Owns:
   ./mod.rs
 
 Structure:
-  ./mod.rs — six déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
-    `pub mod app_settings;`,
+  ./mod.rs — sept déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
+    `pub mod app_settings;`, `pub mod dashboards;`,
     `pub mod owner_links;`, `pub mod project_workflows;`,
     `pub mod projects;`, `pub mod sandboxes;`,
     `pub mod workflow_runs;` (les trois entités du chat maison — `chat_contexts`,
@@ -30,6 +30,8 @@ Structure:
     `vanyline_projects` / `vanyline_sandboxes`), 2026-10-23.
   ./owner_links.sdd — entité `owner_links` (table `vanyline_owner_links`), spec à venir.
   ./app_settings.sdd — entité `app_settings` (table `vanyline_app_settings`).
+  ./dashboards.sdd — entité `dashboards` (table `vanyline_dashboards`), vague G
+    (`dsd/app/dashboards.md`).
   Retirées en C3 du chantier lymaille (2026-11-12) avec leurs entités : `agents`,
     `llm_providers`, `mcp_servers`, `model_profiles`, `skills`, `toolsets` — la
     configuration vit dans `../../../miryad-core/src/lymaille/definitions/` (crate
@@ -53,7 +55,7 @@ Must not:
       volontairement les consommateurs listés ci-dessus.
 
 Depends on:
-  ./app_settings.rs, ./owner_links.rs,
+  ./app_settings.rs, ./dashboards.rs, ./owner_links.rs,
     ./project_workflows.rs, ./projects.rs, ./sandboxes.rs, ./workflow_runs.rs — chaque
     enfant dépend de `sea_orm`. (`chat_contexts.rs`, `conversations.rs`, `messages.rs`
     retirés en C2 du chantier lymaille.)

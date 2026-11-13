@@ -1,0 +1,88 @@
+Spec: Defaults — tableaux par défaut livrés avec l'application
+
+Platform: Rust/vanyline-app — données statiques versionnées
+
+Purpose:
+  Les définitions par défaut des trois écrans (`dsd/app/dashboards.md` `FR-2`, `DEC-2`) :
+  versions CODÉES de l'`app`, jamais en base — la base ne porte que personnalisations et
+  tableaux complémentaires. Un seul consommateur en app : `./resolve.sdd` (origine
+  `default`). Rendre les défauts à l'état d'origine = supprimer la ligne de
+  personnalisation par l'API générique des ressources (`AC-3`) — il n'existe aucune route
+  « reset » ici. Fichier neuf, conception.
+
+Owns:
+  ./defaults.rs
+
+References:
+  /dsd/app/dashboards.md — `FR-2`, `FR-6`, `FR-7`, `DEC-2`, `AC-2`, `AC-3`, `AC-7`
+  ./model.sdd — les types ; ./registry.sdd — les types cités doivent être `known()`
+  ./resolve.sdd — consommateur unique
+  ../../../frontend/src/components/dashboards/dashboards.sdd — comportements à reproduire
+    (états vides, clone en cours, 503 du moteur) via les widgets, pas ici
+
+Exposes:
+  @default_for(@scope: @Scope) -> `Option<&'static @DashboardDef>` — la définition par
+    défaut de l'écran : `Some` pour les trois scopes (tableau ci-dessous), `None` est la
+    voie d'erreur « écran sans défaut » (`VNL-APP-DSH-008` chez le consommateur) et
+    n'arrive qu'avec un futur scope sans défaut — jamais pour les trois actuels.
+    Le `id` de la définition rendue est `None` (un défaut n'est pas une ligne) et son
+    `kind` n'est pas porté (c'est `./resolve.sdd` qui annote l'origine).
+
+Structure:
+  Composition livrée (proposée, ratifiée en G7 — `[?]` ci-dessous) :
+
+  | écran   | widgets (ordre de rendu)                                        |
+  |---------|-----------------------------------------------------------------|
+  | home    | projects, sandboxes, runs, chat                                 |
+  | project | workflows, runs, dashboards, chat                               |
+  | sandbox | code-health, workflows, chat                                    |
+
+  Grille 12 colonnes ; placement deux colonnes larges (w=6) en rangée 0, `runs` pleine
+  largeur dessous, `chat` dernière. Chaque définition passe les bornes de `FR-3` (≤ 24
+  widgets, < 64 Kio, types connus, coordonnées valides, ids uniques) — vérifié par TEST,
+  pas par promesse : le hook d'écriture n'est jamais appelé sur un défaut.
+
+Must:
+  Composer UNIQUEMENT des types `./registry.sdd::known()` (le test de cohérence est le
+    garde-fou : une suppression de type du registre casse ce test, pas la production).
+  Versionner le FICHIER, pas les lignes : une montée d'app fait évoluer les défauts sans
+    jamais toucher les personnalisations (`DEC-2` — c'est tout l'objet de la Solution).
+  Donner aux widgets des `id` stables en dur (`"w-projects"`, `"w-sandboxes"`, …) : un
+    utilisateur qui personnalise depuis le défaut repart de ces ids, et l'édition par
+    l'agent de configuration les lit sans surprise.
+
+Must not:
+  Lire ou écrire la base, ni embarquer `sea_orm` : ces définitions sont `const`-like
+    (`std::sync::OnceLock` de `DashboardDef` construits par `json!` + désérialisation
+    contrôlée au premier appel, panique interdite — la construction invalide est attrapée
+    par un test, jamais par un `expect` en production).
+  Contenir de logique de résolution (c'est `./resolve.sdd`) ni de destination de widgets
+    (le comportement est dans les composants, `FR-7`).
+
+Scenario: les trois écrans ont un défaut
+  Given chaque `@Scope` livré
+  When `default_for` est appelé
+  Then `Some` est rendu, avec `id` `None`, la grille 12 colonnes, et les widgets du
+    tableau Structure (noms et ordre)
+
+Scenario: chaque défaut respecte les bornes d'écriture
+  Given les trois définitions livrées
+  When chacune est passée aux mêmes garde-fous que le hook de
+    `../db/entities/dashboards.sdd` (fonction de validation partagée, `Must` de la dite
+    spec)
+  Then aucune limite n'est franchie et chaque `widget_type` est `known()`
+
+Depends on:
+  ./model.sdd, ./registry.sdd — types et known().
+
+Tasks:
+  [?] Composition exacte des trois écrans (tableau ci-dessus) : reprise des écrans actuels
+    (`HomeDashboard.vue`, `ProjectDashboard.vue`, vue sandbox) à valider en G7 quand les
+    widgets existent — la spec G4 implémente CETTE table, G7 la ratifie ou l'amende.
+  [?] `workflows` en défaut sandbox : liste des workflows de portée sandbox du projet de
+    la sandbox, ou du projet parent ? Le widget porte le besoin projet (`registry.sdd`) —
+    la vue d'ensemble de sandbox connaît son projet.
+
+Done when:
+  Les deux Scenarios ont leurs tests ; la table est reprise telle quelle par
+    `defaults.rs` (tout écart est amendé ici d'abord).

@@ -70,6 +70,13 @@ pub fn api_router() -> Router<AppState> {
             "/sandboxes/{sandbox}/runs",
             get(workflows::list_sandbox_runs),
         )
+        // Résolution des tableaux de bord (vague G, `dsd/app/dashboards.md` DEC-5) — le
+        // handler vit hors du module `api` (`../dashboards/resolve.sdd`), seule exception à
+        // CE module.
+        .route(
+            "/dashboards/resolve",
+            get(crate::dashboards::resolve::handler_resolve),
+        )
 }
 
 #[cfg(test)]
@@ -162,6 +169,19 @@ mod tests {
             ask("GET", "/api/me").await,
             StatusCode::NOT_FOUND,
             "GET /api/me doit être monté"
+        );
+    }
+
+    /// Scenario: `api_router expose la route de résolution des tableaux` — route branchée
+    /// (le refus d'auth en aval est le contrat de `../dashboards/resolve.sdd` et de
+    /// l'`@AuthUser`) ; l'enregistrement `GET` cohabite sans conflit matchit avec les
+    /// chemins `/sandboxes/...` du même router.
+    #[tokio::test]
+    async fn api_router_expose_la_route_de_resolution_des_tableaux() {
+        assert_ne!(
+            ask("GET", "/api/dashboards/resolve?scope=home").await,
+            StatusCode::NOT_FOUND,
+            "GET /api/dashboards/resolve doit être monté"
         );
     }
 

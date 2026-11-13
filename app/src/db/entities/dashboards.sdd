@@ -1,0 +1,167 @@
+Spec: Dashboards — entité MiryadResource des définitions
+
+Platform: Rust/vanyline-app — SeaORM, hooks async de miryad-core
+
+Purpose:
+  La ressource `dashboards` (`dsd/app/dashboards.md` `DEC-3`) : une ligne = une définition
+  PORTÉE par un utilisateur (personnalisation `custom` d'un écran, ou tableau
+  `complementary` d'un projet). CRUD par miryad-core (`resource_router`, MCP, module
+  lymaille `resources` — aucune route propre) ; LA garde-d'écriture `FR-3` vit dans ses
+  hooks : toute définition invalide est refusée `VNL-APP-DSH-*`, jamais corrigée. La
+  résolution est hors de elle (`../../dashboards/resolve.sdd`). Fichier neuf, conception.
+
+Owns:
+  ./dashboards.rs
+
+References:
+  /dsd/app/dashboards.md — `FR-1`..`FR-3`, `FR-5`, `FR-11`, `DEC-3`, `DEC-4`, `AC-1`, `AC-4`, `AC-6`
+  ../../dashboards/mod.sdd — @validate_definition ; ../../dashboards/model.sdd — types
+  ../migration/m20261113_000001_create_vanyline_dashboards.sdd — le DDL (FK, index partiel)
+  ./project_workflows.sdd — précédent d'entité `OwnerOnly` à hook de cohérence colonnes
+  ../../../tooling.sdd — harnais
+
+Exposes:
+  @Model — `#[derive(Clone, Debug, PartialEq, Serialize, Deserialize,
+    utoipa::ToSchema, DeriveEntityModel)]`, `#[schema(as = Dashboard)]`,
+    `#[sea_orm(table_name = "vanyline_dashboards")]`, champs :
+      - `id: i32` — `#[sea_orm(primary_key)]`, `#[serde(default)]` (même raison que
+        ./project_workflows.rs : les payloads de création du frontend n'envoient pas l'id).
+      - `owner_id: i32` — `#[serde(default)]`, écrasé par miryad-core (`owner_column`).
+      - `scope: String` — `"home"|"project"|"sandbox"` (validé au hook, colonne texte —
+        pas d'enum SQL, précédent `project_workflows.scope`).
+      - `kind: String` — `"custom"|"complementary"` à l'écriture ; `"default"` et
+        `"ephemeral"` refusés au hook (`Must`) : la base ne porte que ce que l'utilisateur
+        écrit (`DEC-2`).
+      - `project: Option<String>` — écran projet ; NULL ailleurs.
+      - `sandbox: Option<String>` — écran sandbox ; NULL ailleurs. `[?]` (Tasks) : colonne
+        ajoutée par rapport au trio de clés `DEC-3`, sans elle deux sandboxes personnalisées
+        d'un même owner sont en collision.
+      - `title: String` — libellé (colonne, pas dupliquée dans `def`).
+      - `def: Json` — `serde_json::Value` des colonnes `layout` + `widgets`
+        (`{"layout": …, "widgets": […]}`, `DEC-3` « colonnes de clé plus une colonne
+        JSON ») ; `id`/`scope`/`kind`/`project`/`sandbox`/`title` du type `DashboardDef`
+        NE SONT PAS dans le JSON — reconstitués à la lecture par la résolution.
+  @Entity/@Column/@PrimaryKey/@Relation — générés SeaORM ; `Relation` vide.
+  @impl @MiryadResource for @Entity — `resource_name() = "dashboards"` ;
+    `read_policy = write_policy = AccessPolicy::OwnerOnly` ; `owner_column() =
+    Column::OwnerId` ; hooks `before_create`/`before_update` (async, pattern
+    `std::future::ready` de ./project_workflows.rs).
+
+Structure:
+  Table des marqueurs du hook (publication `FR-11` — l'appel HTTP rend 422 par la
+  traduction miryad-core des `HookError`, message fixe, jamais le contenu d'un widget) :
+    `VNL-APP-DSH-001` plus de 24 widgets · `002` définition sérialisée > 64 Kio ·
+    `003` type de widget inconnu du registre · `004` coordonnées hors grille ou grille
+    hors `[4,24]` · `005` ids de widget dupliqués · `006` `config` non-objet ·
+    `007` écran incohérent : `kind` hors `{custom, complementary}`, ou couple
+    (scope, project, sandbox) invalide, ou `def` non désérialisable en `DashboardDef`
+    (forme `layout`/`widgets` absente).
+  Les codes `001..006` sont rendus par `crate::dashboards::validate_definition` (définitions
+  `layout`/`widgets` seules) ; `007` et les règles de colonnes sont propres au hook.
+  Règles de colonnes du hook, dans l'ordre :
+    a. `kind ∈ {"custom", "complementary"}` → sinon 007.
+    b. `scope="home"` ⇒ `project` et `sandbox` NULL ; `"project"` ⇒ `project` non vide et
+      `sandbox` NULL ; `"sandbox"` ⇒ `sandbox` non vide et `project` NULL ; `scope`
+      inconnu ⇒ tout 007.
+    c. `complementary` ⇒ `scope="project"` (les complémentaires sont des tableaux de
+      projet, `FR-5`) → sinon 007.
+    d. `title` non vide et ≤ 200 caractères → sinon 007.
+    e. `def` désérialisable (tolérant aux clés inconnues) → sinon 007.
+    f. `validate_definition(&reconstruit)` (règles 002, 001, 005, 003, 006, 004 — ordre de
+      `../../dashboards/mod.sdd`).
+  `before_delete` : aucun hook — supprimer une personnalisation EST le « rendre les
+  défauts » (`FR-2`, `AC-3`).
+
+Accepts:
+  Toute écriture par les voies miryad-core (REST générique, MCP, module lymaille
+    `resources`) sous la session du propriétaire : les hooks ne distinguent pas la voie —
+    l'agent de configuration écrit avec le droit de l'utilisateur, mêmes bornes
+    (`Sécurité` du DSD).
+
+Returns:
+  Hook : `Ok(active)` inchangé (AUCUNE normalisation : pas de trim de title, pas de tri
+    de widgets — refuser, ne jamais corriger) ou `Err(@HookError::with_code(code, msg))`.
+
+Raises:
+  Uniquement `HookError` ; jamais de panic. `DbErr` de doublon (index partiel violé) :
+    propagée par miryad-core → 409 côté REST (contrat `miryad-core` `rest::core`, pas ici).
+
+Handles:
+  - Unicité : l'index partiel de la migration (UNIQUE `(owner_id, scope, project, sandbox)`
+    WHERE `kind='custom'`) — un second `custom` sur le même écran est un 409, pas un
+    007 ; les tests couvrent les deux moteurs (SQLite applique l'index partiel).
+  - Lecture par `../../dashboards/resolve.sdd` : filtre `kind='custom'` + colonnes
+    d'écran, `def` relu sous `DashboardDef`.
+
+Must:
+  Publier les codes à la table ci-dessus, message fixe sans contenu embarqué.
+  Appliquer les règles a→f dans l'ordre, `validate_definition` en dernier — le premier
+    manquement rend son seul marqueur.
+  Écraser `owner_id` comme les autres entités (c'est miryad-core qui le pose ; le hook ne
+    le lit pas).
+  Déclarer les derives exactement ci-dessus (la parité ts-rs/`ToSchema` est celle des six
+    entités survivantes de l'app, `ToSchema` compris — contrairement aux définitions
+    lymaille, `../../main.sdd`).
+
+Must not:
+  Écrire en base au démarrage, amorcer des lignes, ni porter les défauts (`DEC-2` — ils
+    vivent dans `../../dashboards/defaults.rs`).
+  Accepter `kind` `"default"` ou `"ephemeral"` : un tableau éphémère n'a ni ligne ni route
+    (`FR-9`).
+  Valider l'existence du projet ou de la sandbox référencés : les widgets afficheront
+    l'erreur (`Sécurité` — données hors de portée = erreur de widget) ; la reference
+    invalidité est une question de fraicheur, pas d'écriture.
+  Interdire plusieurs `complementary` sur le même projet (pas d'index là-dessus, `FR-5`).
+
+Scenario: le CRUD de l'écran personnalisé est borné par les hooks
+  Given une session utilisateur et un `def` valide (deux widgets, grille 12)
+  When la création REST passe par `rest::core::create` puis une mise à jour de 25 widgets
+  Then la création rend la ligne (colonnes posées, `owner_id` écrasé) et la mise à jour
+    est refusée `VNL-APP-DSH-001` (422)
+
+Scenario: les écrans incohérents sont refusés 007
+  Given (`scope=home`, `project="p1"`), (`scope=project`, `project=NULL`),
+    (`scope=sandbox`, `sandbox=NULL`, `project="p1"`), `kind="default"`,
+    `kind="complementary"` avec `scope="home"`, `title=""`
+  When les six créations sont tentées
+  Then chacune est refusée `VNL-APP-DSH-007` — aucune ligne écrite
+
+Scenario: un type de widget inconnu refuse sans lire le registre du frontend
+  Given un `def` portant le type `"scripted"` (réservé, `registry.sdd`)
+  When la création est tentée
+  Then `VNL-APP-DSH-003` — et avec le type `"markdown"` + `config: 3`, `VNL-APP-DSH-006`
+
+Scenario: deux personnalisations du même écran, c'est 409 pas 422
+  Given une première ligne `custom` `scope=project, project="p1"` de l'appelante
+  When une seconde création valide sur le même écran passe par l'API générique
+  Then l'index partiel rejette (409 de miryad-core) ; pendant ce temps un SECOND
+    `complementary` sur le même projet passe (`FR-5`, pas d'index)
+
+Scenario: un complementary d'un autre utilisateur n'est pas visible
+  Given un complementary créé par ana sur « p1 »
+  When ben (autre utilisateur) liste `GET /api/v1/dashboards`
+  Then aucune ligne d'ana — filtre `OwnerOnly` de miryad-core (`AC-6`)
+
+Depends on:
+  @sea_orm, @utoipa (`ToSchema`), miryad-core (@MiryadResource, @AccessPolicy,
+    @HookError — hooks async, feature `db`), ../../dashboards (model + registre +
+    validate_definition).
+
+Tasks:
+  [?] Colonne `sandbox` ajoutée au trio de clés `DEC-3` (collision de deux écrans sandbox
+    sinon) — appliquée pour débloquer G4, ratifier ou trouver un autre codage (ex :
+    `project="sandbox:<nom>"` — écarté ici, type faible).
+  [?] `title ≤ 200` : borne posée ici (aucune dans le DSD) — valeur ?
+  [?] 409 vs 500 pour le doublon : `Raises`/`Handles` promettent « 409 côté REST par
+    miryad-core » ; miryad-core 0.3.1 (`rest::core`) traduit le `DbErr` de contrainte en 500
+    `MRD-REST-003`, pas 409. Le test (`deux_personnalisations_du_meme_ecran_sont_refusees`)
+    verrouille le refus (jamais 201, jamais 422) sans statuer sur le code. Le 409 appartient
+    au contrat miryad-core — ratifier là-bas ou amender ici.
+  [ ] Le 409 de doublon (index partiel) n'est pas encore documenté côté frontend (le
+    bouton « personnaliser » sur écran déjà personnalisé doit faire un PUT, pas un POST) —
+    à poser avec la spec frontend G3.
+
+Done when:
+  Les cinq Scenarios ont leurs tests DB réels (`real_db` + `rest::core`, motifs
+    ./project_workflows.sdd) et passent ; les marqueurs sont uniques dans le crate
+    (grep `VNL-APP-DSH-`).

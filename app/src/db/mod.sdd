@@ -14,8 +14,8 @@ Owns:
 Structure:
   ./mod.rs — déclarations `pub mod entities;` et
     `#[cfg(test)] pub(crate) mod test_support;`, rien d'autre.
-  ./entities/ — six modules d'entités SeaORM déclarés dans
-    ./entities/mod.rs dans l'ordre alphabétique : `app_settings`,
+  ./entities/ — sept modules d'entités SeaORM déclarés dans
+    ./entities/mod.rs dans l'ordre alphabétique : `app_settings`, `dashboards`,
     `owner_links`, `project_workflows`, `projects`, `sandboxes`,
     `workflow_runs` (les entités du chat maison — `chat_contexts`, `conversations`,
     `messages` — retirées en C2 du chantier lymaille, les six entités de configuration

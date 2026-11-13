@@ -1,0 +1,116 @@
+Spec: Model — types de définition des tableaux de bord
+
+Platform: Rust/vanyline-app/lib — serde, ts-rs (feature `ts-rs`)
+
+Purpose:
+  Porte les TYPES PUREMENT DATÉS de la Solution tableaux de bord (`dsd/app/dashboards.md`
+  `FR-1`, `FR-3`) : `DashboardDef`, `Widget`, `Layout`, `Scope`, `Kind`. Aucun accès DB,
+  aucune résolution, aucune validation de registre ici : la borne d'écriture vit dans le
+  hook de `../db/entities/dashboards.rs`, le registre dans `./registry.rs`, les défauts
+  dans `./defaults.rs`, la route dans `./resolve.rs`. Ces types sont la SOURCE UNIQUE de la
+  forme TypeScript `dashboard-domain` (`DEC-3`, vague G5) et du contenu de la colonne JSON
+  de la ressource. Fichier neuf, conception.
+
+Owns:
+  ./model.rs
+
+References:
+  /dsd/app/dashboards.md — `FR-1`, `FR-9`, `FR-11`, `DEC-3`, `AC-1`, `OI-2`
+  ./registry.sdd — types connus du registre (validés à l'écriture par l'entité, pas ici)
+  ../db/entities/dashboards.sdd — consommatrice (colonne `def`, hook de validation)
+  ./resolve.sdd — consommatrice (réponse de résolution)
+  ../sessions/events.sdd — précédent d'export ts-rs vers `packages/protocol` par feature
+  ../../../tooling.sdd — harnais (aucun panic en production)
+
+Exposes:
+  @Scope — `pub enum` serde `snake_case` : `Home` (⟷ `"home"`), `Project` (⟷ `"project"`),
+    `Sandbox` (⟷ `"sandbox"`) — exactement trois, dans cet ordre. Derives `Debug`, `Clone`,
+    `Copy`, `PartialEq`, `Eq`, `Serialize`, `Deserialize`, `TS` ; plus `as_str()` et
+    `FromStr` totaux (`"home"|"project"|"sandbox"` → `Some`, tout le reste `None` — pas
+    d'erreur).
+  @Kind — `pub enum` serde `snake_case` : `Default`, `Custom`, `Complementary`,
+    `Ephemeral` — exactement quatre. Mêmes derives. Un `Kind` ne voyage JAMAIS dans le
+    JSON stocké (c'est une colonne de la ressource, `../db/entities/dashboards.sdd`) :
+    présent dans le type pour que la forme `FR-1` soit complète dans la réponse de
+    résolution et pour les définitions éphémères (`FR-9`), jamais requis à la
+    désérialisation (`#[serde(default)]` → `Custom` n'est pas le défaut : le défaut serde
+    est posé par chaque consommateur explicite, cf. `Must`).
+  @Layout — `pub struct` { @columns: `u16` } ; la grille standard vaut `12`
+    (`FR-1` : « grille de 12 colonnes ») ; `columns` est une donnée de la définition
+    (l'éditeur de grille du frontend s'y cale), bornée à l'écriture par la règle
+    d'`../db/entities/dashboards.sdd`. `Default` = `{ columns: 12 }`.
+  @Widget — `pub struct` { @id: `String`, `#[serde(rename = "type")]` @widget_type:
+    `String`, @config: `serde_json::Value`, @x: `u16`, @y: `u16`, @w: `u16`, @h: `u16` }.
+    `config` est un objet JSON dont la grammaire appartient au type déclaré
+    (`./registry.sdd`) — CE fichier ne la valide pas.
+  @DashboardDef — `pub struct` { @id: `Option<i32>` (identifiant de ligne : `Some` pour
+    une définition persistée rendue par `./resolve.sdd`, `None` pour un défaut livré et
+    pour tout éphémère — `FR-9`), @title: `String`, @layout: `@Layout`,
+    @widgets: `Vec<@Widget>` }. Serde : `id` et `title` avec `#[serde(default)]` côté
+    désérialisation tolérante des consommateurs ; le JSON STOCKÉ (colonne `def`) ne porte
+    que `{layout, widgets}` — la colonne `title` de la ressource fait foi côté persistance
+    (cf. `../db/entities/dashboards.sdd`).
+  @DASHBOARD_GRID_COLUMNS — constante `pub u16 = 12` : la borne haute structurelle de la
+    grille utilisée par le hook de validation et les défauts ; `Layout::columns` peut la
+    porter autrement (définition importée) mais AUCUN défaut livré ne le fait.
+  @serializes_within_limit(def, max_bytes) — fonction utilitaire `pub(crate)` :
+    sérialise et compare la longueur à `max_bytes` (sert la borne 64 Kio du hook sans
+    dupliquer `serde_json` ailleurs).
+
+Must not:
+  Contenir de dépendance à `sea_orm`, `axum`, `miryad_core` ou à la base : ces types sont
+    des données pures (testables sans DB, sérialisables des deux côtés du réseau).
+  Valider quoi que ce soit au désérialisation par `Deserialize` (pas de
+    `#[serde(try_from)]`, pas de validateur) : TOUTE validation est explicite et échoue
+    avec les marqueurs `VNL-APP-DSH-*` du hook de `../db/entities/dashboards.sdd` — une
+    désérialisation réussie ne préjuge pas de la légalité (`FR-3` : « refusée, jamais
+    corrigée en silence »).
+  Introduire un cinquième `Kind` ni un quatrième `Scope` sans amender
+    `dsd/app/dashboards.md` (`FR-1`).
+  Exposer `scripted` comme type standard : le nom est RÉSERVÉ (`FR-6`, Solution
+    `app/widgets` non ouverte) et n'apparaît nulle part ici.
+
+Structure:
+  ~120 lignes : cinq types (+ constante + utilitaire), derives serde/ts-rs, un module
+  `#[cfg(test)] mod tests` (scénarios ci-dessous). Aucun `impl` comportemental hors
+  derives, `Default` de `Layout` et `FromStr`/`Display` de `Scope`.
+
+Scenario: aller-retour serde stable de la forme FR-1
+  Given une `@DashboardDef` complète (deux widgets dont un `markdown`, grille 12, id
+    `Some(7)`) sérialisée puis désérialisée
+  When la valeur est comparée à l'original
+  Then l'aller-retour est identique (`PartialEq`) et le JSON porte littéralement les clés
+    `id`, `title`, `layout.columns`, `widgets[].id|type|config|x|y|w|h` — la clé du type
+    du widget est `type`, pas `widget_type`
+
+Scenario: scope et kind en snake_case verbatim
+  Given les trois `@Scope` et les quatre `@Kind`
+  When chacun est sérialisé
+  Then les chaînes sont exactement `"home"`, `"project"`, `"sandbox"`, `"default"`,
+    `"custom"`, `"complementary"`, `"ephemeral"` — et `@Scope::from_str` refuse `"global"`
+    comme `"Home"` (insensible à la casse : NON, sensible : seule la forme exacte passe)
+
+Scenario: export ts-rs des formes publiées
+  # La génération effective et le job CI appartiennent à G5 ; ici le contrat est que la
+  # feature `ts-rs` de l'app rende ces types exportables avec leurs noms verbatims.
+  Given le crate compilé avec la feature `ts-rs`
+  When les derives @TS des cinq types sont interrogés (nom + déclaration)
+  Then les noms exportés sont `DashboardDef`, `Widget`, `Layout`, `Scope`, `Kind` et la
+    déclaration de `Widget` porte `type` comme clé du type de widget
+
+Depends on:
+  @serde / @serde_json (data), @ts_rs sous feature `ts-rs` (mécanisme posé par
+    `../sessions/events.sdd`), `../../../packages/protocol` (consommateur des formes, vague
+    G5 — hors CE fichier).
+
+Tasks:
+  [?] `Layout.columns` : laissé comme donnée libre bornée [1,24] par le hook, ou champ
+    supprimé tant que tout vaut 12 (`OI-2` du DSD — bornes à ajuster à l'usage) ?
+    Proposé : conservé, borné [4,24], défaut 12.
+  [?] `DashboardDef.id` en `Option<i32>` : la réponse de résolution éphémère
+    (`app/ui-actions`, non ouverte) devra rendre `null` — forme confirmée, ou id opaque
+    `String` pour préparer un autre stockage ?
+
+Done when:
+  Les trois Scenarios ont leurs tests taggués et passent ; le type est exporté en
+    TypeScript par la chaîne G5 (CI `tsrs` étendue, vérifiée là-bas, pas ici).
