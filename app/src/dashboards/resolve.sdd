@@ -134,6 +134,10 @@ Depends on:
     Column), ../../error.sdd (@AppError).
 
 Tasks:
+  [ ] Le Scenario « rendre les défauts revient au défaut » supprime en test par
+    `Entity::delete_by_id` au lieu du DELETE de l'API générique que dit son `When`
+    (validator G4, 2026-11-13) — le Then est asserté, le bout-en-bout strict (voie
+    `rest::core::delete`) reste à faire.
   [?] Forme exacte de la réponse (`{origin, dashboard}` avec clés d'écran à l'intérieur de
     `dashboard` porté par la réponse, DSD `DEC-5` « ASSUMPTION ») — figée ici, miroir TS en
     G3/G5 ; validée avec le moteur de rendu frontend.

@@ -155,15 +155,15 @@ Code, **séquentiel**, dans cet ordre (chaque étape après sa spec) :
 
 Specs, **parallélisables entre elles et avec tout le reste** :
 
-- [ ] **G1 — `app/src/dashboards/{mod,model,registry,defaults,resolve}.sdd`** : `FR-1` à `FR-4`, `FR-11`, `DEC-2`, `DEC-5`.
-- [ ] **G2 — Entité et migration** : `db/entities/dashboards.sdd`, `migration/m<date>_create_vanyline_dashboards.sdd`, ressource
+- [x] **G1 — `app/src/dashboards/{mod,model,registry,defaults,resolve}.sdd`** : `FR-1` à `FR-4`, `FR-11`, `DEC-2`, `DEC-5`.
+- [x] **G2 — Entité et migration** : `db/entities/dashboards.sdd`, `migration/m<date>_create_vanyline_dashboards.sdd`, ressource
   `MiryadResource` en `OwnerOnly` (`DEC-3`). Le montage de la route `resolve` va dans `main.sdd`.
 - [ ] **G3 — Specs frontend** : moteur de rendu, hôte de widget, un composant par widget standard (`FR-6`, `FR-7`, `FR-8`,
   `FR-10`), route des tableaux complémentaires ; types `dashboard-domain` dans `@vanyline/protocol`.
 
 Code, **séquentiel**, après A2 et la spec correspondante :
 
-- [ ] **G4 — Modèle, registre, défauts, résolution** (`app/src/dashboards/`), entité, migration, ressource, route `resolve`.
+- [x] **G4 — Modèle, registre, défauts, résolution** (`app/src/dashboards/`), entité, migration, ressource, route `resolve`.
 - [ ] **G5 — Types** : export ts-rs vers `packages/protocol/src/generated/`, job CI `tsrs` étendu.
 - [ ] **G6 — Moteur de rendu et widgets standard** (après G5) : un widget à la fois, chacun avec ses tests.
 - [ ] **G7 — Écrans par défaut** : accueil, projet et vue d'ensemble de sandbox en définitions par défaut ; retrait de
@@ -182,3 +182,9 @@ leur Solution (`dsd/app/<nom>.md`) existera. Ne pas en rédiger.
   miryad-core 0.3.1 ; ticket amont tracé dans `main.sdd` Tasks). C4 clos sur la batterie
   complète verte du validator rendue sur l'arbre C3 exact (aucun test de comportement
   recréé hors Scenario : discipline TTD tenue tâche par tâche A→C).
+- G4 (commit `b94c892`) : index de garde des `custom` en **index d'expressions**
+  `COALESCE(project,'')/COALESCE(sandbox,'')` WHERE `kind='custom'` (un index partiel sur
+  colonnes NULLABLEs ne rejette rien — NULL distinct ; `[?]` de ratification dans la spec de
+  la migration). Doublon rendu 500 `MRD-REST-003` par miryad-core 0.3.1 (pas 409 — `[?]`
+  entité) ; `VNL-APP-DSH-008` rendu 500 par le barème error.sdd alors que Raises dit 400
+  (`[?]` resolve.sdd).

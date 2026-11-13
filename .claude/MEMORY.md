@@ -428,5 +428,17 @@ de test à recréer) ; `app` mono-réplique pour les sessions ; contextes `H_` (
 - **Tâches déléguées à Qwen : `docs/chantier-lymaille.md`** (40 tâches, vagues A à G). Qwen ne décide rien : ses questions
   sont des `[?]` dans les `Tasks` des specs concernées. **Première chose à faire à la reprise : relire ces `[?]`** (elles
   guident la suite), puis trancher.
+- **Avancement (2026-11-13)** : 18/40 closes — A1-A5, B1-B9, C1-C4. Specs 156, lint 0/0 ;
+  app 345 tests verts, workspace ~2244. Migrations app ramassées à 6 (000010, 20261005_00000{1,2,4},
+  20261023_00000{1,2}) ; entités restantes 6 ; `AppError` 25 variantes ; l'app ne dépend plus de
+  cfgstore ni tools. OpenAPI des ressources lymaille = fragments manuels (ToSchema absent de
+  miryad-core 0.3.1 — arbitré ; ticket amont dans `main.sdd` Tasks).
+- **[?] à ratifier (récap)** : encodage `H_` + frontière Denied/HostError (`host.sdd`) ; create-only SQL
+  + profil « default » (`sessions/catalog.sdd`) ; valeur `trigger` (`workflow/runtime.sdd`) ;
+  `spec.replicas` (`application.sdd`) ; dette passe-cluster step `subagent` (`steps/mod.sdd`) ;
+  sort de `default_model` d'app_settings (forme `{provider_id, model}` sans référent depuis C3 —
+  avant vague E écran paramètres) ; serveurs `forward` en batch step rhai (impl = énumérer + erreur
+  à l'appel, le `[?]` proposait écarter) ; tests orphelins hooks agents système (`agents.sdd`) ;
+  `[?]` WS-order et OIDC/any de `api/mod.sdd` ; dette allows `tooling.sdd`.
 - Limites connues portées par le DSD : événements `Host` non rejoués, horodatage d'historique approximatif, tableaux non
   partagés entre utilisateurs (`dashboards#DEC-4`).

@@ -71,6 +71,9 @@ Depends on:
     "miryad_users")`, précédent des sœurs).
 
 Tasks:
+  [ ] Le Scenario « le partiel garde sa promesse » ne vérifie pas l'absence de
+    sur-restriction : un `custom` sur un écran DIFFÉRENT du même owner doit passer
+    (validator G4, 2026-11-13) — ajouter l'insertion et son assertion.
   [?] L'index partiel n'existe pas côté PostgreSQL via le builder SeaORM si
     `.partial()` n'émet pas le WHERE attendu — le test des deux moteurs tranche ; repli
     éventuel : deux index partiels émis en `Schema::raw` par moteur (à éviter). Constat
