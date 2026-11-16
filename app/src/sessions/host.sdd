@@ -37,17 +37,22 @@ Must:
     de l'appelant ⇒ @None sans distinction absent/interdit ; tout autre identifiant ⇒ @None.
     Jamais écriture : ni REST, ni MCP, ni session `Config` ne create/update un identifiant `H_`
     (`FR-3`, `DEC-9`).
-  Fabriquer les identifiants `H_` par encodage réversible des noms d'entités K8s : `<nom>` et
-    `<owner>` voient leurs `"-"` convertis en `"_"` pour rester dans l'alphabet exigé par
-    @identity::classify (alphanumérique + `"_"`, casse sensible) ; la résolution inverse
-    (identifiant → nom d'entité) fait `"_"` → `"-"`. Sur des noms valides DNS-1123 l'encodage
-    est injectif et total ; la source de miryad-core (`lymaille/identity.rs`) n'accepte que
-    `[A-Za-z0-9_]`, et un nom K8s ne peut pas porter `"_"` (l'amendement amont pour accepter
-    `"-"` est écarté : on construit avec ce que livre la stack). Pour
-    `H_sandbox_<owner>_<nom>`, le `"_"` de jointure est indistinguable d'un `"_"` encodé
-    (`H_sandbox_jean_marc_web` = `jean-marc`×`web` ou `jean`×`marc-web`) : la résolution
-    inverse rend toutes les lectures valides, et l'appelant lève l'ambiguïté par son propre
-    lien d'owner (un seul par utilisateur : `user_id` unique dans `vanyline_owner_links`).
+  Fabriquer les identifiants `H_` avec les noms d'entités K8s tels quels, sans encodage :
+    `H_project_<nom>` et `H_sandbox_<owner>_<nom>`. @identity::classify de miryad-core (0.4.0)
+    accepte le `"-"` dans un identifiant de préfixe `H_` exact. Un nom K8s (DNS-1123) ne porte
+    jamais de `"_"` : le `"_"` de jointure de `H_sandbox_<owner>_<nom>` est donc unique et la
+    résolution inverse est sans ambiguïté — l'identifiant se coupe en exactement deux étiquettes
+    DNS-1123 (non vides, ≤ 63, minuscules/chiffres/`"-"` aux milieux) ; toute autre forme
+    (zéro ou plus d'un `"_"`, étiquette invalide) ⇒ aucune lecture. Pour `H_project_<nom>`, le
+    suffixe entier est l'étiquette ; un suffixe portant un `"_"` n'est pas un projet.
+  Pour @default_profile : relire à CHAQUE appel le réglage `default_profile` de
+    `vanyline_app_settings` (`../db/entities/app_settings.sdd`) et rendre `Some(<profil>)` ;
+    ligne absente ⇒ `Some("default")` (le nom qu'un administrateur crée, `../db/entities/app_settings.sdd`
+    `Handles`) ; lecture en échec ou valeur qui n'a pas la forme `{"profile": <chaîne non vide>}` ⇒
+    @HostError sans contenu, journalisé `VNL-APP-SES-110` (lecture en échec) ou `VNL-APP-SES-111`
+    (valeur de mauvaise forme). Jamais mis en cache : changer le
+    réglage joue à l'ouverture de session suivante, sans réécrire aucune ligne d'agent
+    (`./catalog.sdd`).
   Garder le jeton hors de tout chemin persistant : jamais écrit en base, jamais dans un log,
     jamais dans une réponse au navigateur ; @McpGrant porte un @Zeroizing, le `Debug` de la
     structure reste opaque ; le renouvellement suit le cache de @owner_token tel quel (`FR-4`,
@@ -59,11 +64,14 @@ Must not:
   Distinguer dans @resolve_context « inexistant » de « interdit » — l'un comme l'autre @None.
 
 Exposes:
-  @VnlLymailleHost — fourni comme @SharedHost au montage (./mod.sdd).
+  @VnlLymailleHost — fourni comme @SharedHost au montage (./mod.sdd) ; il implémente
+    @resolve_mcp, @resolve_context et @default_profile (les autres méthodes du trait gardent leur
+    défaut).
 
 Depends on:
   vanyline-lib (feature `k8s`) — @VnlK8sClient.
-  sea-orm — relecture de `vanyline_owner_links` et des entités Project/Sandbox côté hôte.
+  sea-orm — relecture de `vanyline_owner_links`, de `vanyline_app_settings` et des entités Project/Sandbox côté hôte.
+  ../db/entities/app_settings.sdd — le réglage `default_profile`.
   `lymaille` 0.3 — @ToolsetContext (retour de @resolve_context).
   `zeroize` — @Zeroizing du jeton dans @McpGrant.
 
@@ -76,6 +84,16 @@ Scenario: utilisateur lié obtient le serveur sandbox
   Given un utilisateur lié à l'owner `ana` et la sandbox `web` de `ana` en phase Running
   When @resolve_mcp sur `H_sandbox_ana_web` rôle `"sandbox"`
   Then @McpDecision::Granted avec l'URL `/mcp` de la sandbox et un jeton du ServiceAccount d'`ana`
+
+Scenario: noms à tiret, résolution sans ambiguïté
+  Given un owner `jean-marc` et une sandbox `marc-web` d'un autre owner `jean`
+  When @resolve_mcp sur `H_sandbox_jean-marc_web` puis sur `H_sandbox_jean_marc-web` par leurs owners respectifs
+  Then chaque identifiant ne se lit que d'une façon (`jean-marc`×`web`, puis `jean`×`marc-web`) ; un identifiant à deux `"_"` de jointure ou sans `"_"` ne se résout pas
+
+Scenario: profil par défaut relu à chaque appel
+  Given aucune ligne `default_profile`, puis une ligne `{"profile": "qwen"}`, puis une ligne `{"profile": ""}`
+  When @default_profile est appelé après chaque état
+  Then `Some("default")`, puis `Some("qwen")`, puis @HostError
 
 Scenario: lien supprimé en cours de session (`AC-2`)
   Given une session ouverte sur `H_sandbox_ana_web` et un lien utilisateur↔`ana` supprimé depuis
@@ -93,6 +111,10 @@ Scenario: H_ jamais écrit
   Then l'écriture est refusée — l'app ne propose aucun chemin d'écriture pour les `H_`
 
 Tasks:
+  [x] Lot 1 du retrait des contournements (2026-11-16, miryad-core 0.4.0, tickets #75 et #76) :
+    `host.rs` — identifiants `H_` sans encodage (suppression de `encode_k8s_name` /
+    `decode_k8s_name`, `parse_sandbox_id` rend au plus une lecture), @default_profile ; scénarios
+    ci-dessus.
   [x] @Depends on omis deux crates implicites dans le corps des `Must` : @ToolsetContext vient
     de `lymaille` (0.3, version déclarée par miryad-core 0.4.0 — graphe résolu inchangé) et
     @Zeroizing de `zeroize`. Les deux dépendances ont été déclarées dans `../../Cargo.toml`

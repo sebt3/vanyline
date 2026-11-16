@@ -16,30 +16,36 @@ References:
   ./host.sdd — les identifiants `H_` que la table écran → agent nomme sans les stocker.
 
 Must:
-  Publier au démarrage, de façon idempotente (relancer n'ajoute ni ne duplique rien), le
-    catalogue par défaut (`FR-6`) par insertion create-only (`INSERT … ON CONFLICT DO NOTHING`)
-    dans les trois tables que le `Migrator` de miryad-core pose (types de contexte, contextes,
-    agents) — aucun schéma vanyline (`CON-2`). Les stores de miryad-core ne conviennent pas à
-    cette publication : ils exigent un sujet administrateur résolu en base (absent au premier
-    démarrage) et leurs `put_*` remplacent la ligne, ce qui contredit la règle suivante :
+  Publier au démarrage, de façon idempotente, le catalogue par défaut (`FR-6`) par le chemin
+    système de miryad-core (`miryad_core::lymaille::store::publish` : @ensure_agent,
+    @ensure_context_type, @ensure_catalog_context) avec la provenance `source = "vanyline"` et
+    `version = env!("CARGO_PKG_VERSION")` — aucun SQL brut, aucun schéma vanyline (`CON-2`).
+    Sémantique de miryad-core, reprise telle quelle : ligne absente ⇒ créée ; ligne gérée par
+    `vanyline`, non modifiée depuis sa publication et de version inférieure ⇒ mise à jour (le
+    catalogue suit les versions de l'app) ; ligne gérée à la même version ⇒ inchangée ; ligne non
+    gérée (créée par un administrateur) ou modifiée depuis ⇒ laissée intacte (`Skipped`, jamais une
+    erreur). Les entrées :
     - contexte `G_home` de type `G_home`, nature `Work`, agent par défaut `G_vanyline_home`,
       ouvrable par tout utilisateur authentifié (`DEC-7`) ;
     - contexte `G_config` de type `G_config`, nature `Config`, agent par défaut
       `G_vanyline_config`, ouvrable par tout utilisateur authentifié (`DEC-7`) ;
     - agents `G_vanyline_home`, `G_vanyline_config`, `G_vanyline_project`, `G_vanyline_sandbox`
-      (productifs `Work` sauf `G_vanyline_config`, nature `Config`), tous sur le profil de
-      modèle désigné par le réglage `default_profile` (`../db/entities/app_settings.sdd`,
-      `"default"` s'il est absent) ; un contexte publié référence son type par la forme que
-      l'ouverture de session résout (`G_home`, `G_config`).
-  Publier le type de contexte `G_home` avec `script_grants` = `{"toolsets":[],"modules":[]}` :
-    aucun droit de script par défaut, c'est l'administrateur qui étend les toolsets accordés aux
-    widgets scriptés de l'accueil (`dsd/app/widgets.md#OI-3`, `scripts-hote#DEC-2`) ; le type
-    `G_config` n'en porte pas (un script ne s'exécute jamais dans un contexte de configuration :
-    le `ScriptRunner` échoue fermé). L'app n'enregistre aucun module d'hôte ni aucune entité
-    lisible par les scripts.
-  Ne jamais remplacer une définition publiée par un administrateur sous le même nom : la
-    publication ne create que si l'identifiant est absent, ne patche jamais une ligne existante
-    (`FR-6`).
+      (productifs `Work` sauf `G_vanyline_config`, nature `Config`), **sans profil** : le profil de
+      modèle vient du réglage `default_profile`, relu à chaque ouverture de session par l'hôte
+      (`./host.sdd`, @default_profile) — changer le réglage joue immédiatement, sans réécrire de
+      ligne ; aucun profil n'est semé (un profil nomme un fournisseur que l'app ne connaît pas au
+      premier démarrage) : tant que l'administrateur n'a pas créé le profil désigné, l'ouverture
+      d'une session échoue avec l'erreur de lymaille nommant le profil manquant ;
+      un contexte publié référence son type par la forme que l'ouverture de session résout
+      (`G_home`, `G_config`).
+  Publier les types de contexte `G_home` et `G_config` avec `script_grants` vides
+    (`{"toolsets":[],"modules":[]}`) : aucun droit de script par défaut, c'est l'administrateur
+    qui étend les toolsets accordés aux widgets scriptés de l'accueil (`dsd/app/widgets.md#OI-3`,
+    `scripts-hote#DEC-2`). Pour `G_config` le droit vide est sans conséquence : un script ne
+    s'exécute jamais dans un contexte de configuration. L'app n'enregistre aucun module d'hôte ni
+    aucune entité lisible par les scripts.
+  Ne jamais remplacer une définition créée ou modifiée par un administrateur sous le même nom
+    (`FR-6`) : c'est la garantie de @ensure_* ci-dessus, vérifiée par Scenario.
   Porter la table de correspondance (constante, compilée) écran → agent pour les contextes `H_` :
     Project → `G_vanyline_project`, Sandbox → `G_vanyline_sandbox` ; l'ouverture d'une session
     sur un `H_` passe l'agent explicite correspondant, sans que l'appelant nomme d'agent et sans
@@ -58,8 +64,8 @@ Must not:
   Écrire un contexte de type `H_` : les `H_` ne sont pas dans le catalogue (vu par ./host.sdd).
 
 Depends on:
-  miryad-core (feature `lymaille`) — tables du catalogue (types de contexte, contextes, agents).
-  ../db/entities/app_settings.sdd — réglage `default_profile`.
+  miryad-core (feature `lymaille`) — `store::publish` (publication système du catalogue).
+  ../db/entities/app_settings.sdd — réglage `default_profile`, lu par ./host.sdd et non ici.
 
 Exposes:
   @ensure_catalog — appelé au démarrage avant que les routes de ./mod.sdd servent ; idempotent.
@@ -69,17 +75,29 @@ Exposes:
 Scenario: démarrage répété idempotent (`AC-4`)
   Given une base vide puis trois démarrages successifs
   When @ensure_catalog s'exécute à chaque fois
-  Then le catalogue compte exactement les entrées attendues, sans doublon ni variante datée
+  Then le catalogue compte exactement les entrées attendues, sans doublon ni variante datée, et
+    les lignes sont identiques d'un démarrage à l'autre ; chaque ligne porte `managed_by = "vanyline"`
+
+Scenario: les agents publiés ne désignent aucun profil
+  Given une base vide puis @ensure_catalog
+  When les quatre agents sont lus
+  Then leur définition ne porte aucun profil (le profil vient de @default_profile de l'hôte)
 
 Scenario: les types publiés portent les droits de script attendus
   Given une base vide puis @ensure_catalog
   When les types de contexte `G_home` et `G_config` sont lus
-  Then `G_home` porte `script_grants` `{"toolsets":[],"modules":[]}` et `G_config` n'en porte pas
+  Then les deux portent `script_grants` `{"toolsets":[],"modules":[]}`
 
 Scenario: définition administrateur intacte
   Given un administrateur a redéfini l'agent `G_vanyline_config` avant le démarrage
-  When @ensure_catalog s'exécute
+  When @ensure_catalog s'exécute, y compris avec une version de l'app supérieure
   Then la ligne de l'administrateur reste inchangée
+
+Scenario: le catalogue suit la montée de version
+  Given un catalogue publié par `vanyline` en version inférieure, jamais modifié
+  When @ensure_catalog s'exécute avec la version courante
+  Then les lignes sont mises à jour et portent la version courante ; une ligne modifiée par un
+    administrateur depuis sa publication reste intacte
 
 Scenario: ouverture selon l'écran (`AC-4`)
   Given quatre ouvertures depuis écran accueil, projet, sandbox et configuration
@@ -89,22 +107,10 @@ Scenario: ouverture selon l'écran (`AC-4`)
     `H_` avec `G_vanyline_project` / `G_vanyline_sandbox`
 
 Tasks:
-  [ ] `catalog.rs` : `script_grants` du type `G_home` à la publication (colonne posée par le
-    `Migrator` de miryad-core) ; Scenario ci-dessus.
+  [x] Lot 1 du retrait des contournements (2026-11-16, miryad-core 0.4.0, tickets #73, #74,
+    #75) : `catalog.rs` publie par @ensure_agent / @ensure_context_type / @ensure_catalog_context
+    (provenance `vanyline`, `CARGO_PKG_VERSION`), agents sans profil, `script_grants` vides des
+    deux types ; Scenario ci-dessus. Remplace le SQL brut create-only et solde les deux anciens
+    `[?]` sur le profil par défaut (pas de semis ; le suivi du réglage est assuré par l'hôte).
   [x] B7 du chantier lymaille : code catalogue — publié, idempotent, `AC-4` vert, batterie
     validator verte 2026-11-12.
-  [ ] Ouvrir un ticket amont chez miryad-core : les hooks de `definitions/catalog_context.rs`
-    exigent de la colonne `context_type` une classification `Private` et refuseraient la forme
-    `G_…` par le CRUD d'un administrateur, alors que l'ouverture de session ne résout que
-    cette forme (contradiction interne, hors de portée de la Solution — `DEC-6`).
-  [ ] `catalog.rs` : profil des quatre agents lu du réglage `default_profile`.
-  [?] Profil par défaut : un profil lymaille (`ModelProfile`) nomme un fournisseur, que l'app
-    ne connaît pas au premier démarrage ; `ensure_catalog` ne peut donc pas semer de profil
-    `"default"` utilisable. Soit aucun semis — ouvrir une session sans profil désigné échoue
-    avec une erreur explicite nommant le profil manquant, l'administrateur le crée —, soit un
-    semis conditionnel quand exactement un fournisseur existe. À trancher.
-  [?] Suivi du réglage : les agents publiés en create-only gardent le nom de profil écrit à la
-    publication ; changer `default_profile` ensuite ne les modifie pas. Faire résoudre le
-    profil à l'ouverture de session (si lymaille permet de le surcharger) ou réécrire les
-    lignes d'agents que l'administrateur n'a pas modifiées ? À trancher avec l'API de
-    lymaille.

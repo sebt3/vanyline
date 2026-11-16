@@ -18,7 +18,7 @@ use miryad_core::lymaille::host::{HostError, LymailleHost, McpDecision, McpGrant
 use miryad_core::lymaille::identity::CallerPrincipal;
 use vanyline_lib::k8s::{OwnerToken, VnlK8sClient};
 
-use crate::db::entities::owner_links;
+use crate::db::entities::{app_settings, owner_links};
 
 /// Préfixe des identifiants de contexte projet (`FR-3`).
 pub(crate) const PROJECT_PREFIX: &str = "H_project_";
@@ -226,24 +226,8 @@ impl VnlLymailleHost {
     }
 }
 
-/// Encodage réversible `-` ↔ `_` des noms K8s dans les identifiants `H_` (`DEC-9`, `[?]`
-/// des Tasks de `host.sdd`) — alphabet `identity::classify` : alphanumérique + `_`.
-/// Constructeur d'identifiants lu par les tests ; appelants de production = tranche DEC-8
-/// (ouverture par écran) — tooling.sdd
-#[allow(dead_code)]
-#[must_use]
-pub(crate) fn encode_k8s_name(name: &str) -> String {
-    name.replace('-', "_")
-}
-
-/// Décodage `_` → `-` d'une partie d'identifiant.
-#[must_use]
-pub(crate) fn decode_k8s_name(part: &str) -> String {
-    part.replace('_', "-")
-}
-
-/// Étiquette DNS-1123 : minuscules, chiffres, `-` aux milieux, ≤ 63 — l'alphabet des noms
-/// que l'encodage est censé reconstruire.
+/// Étiquette DNS-1123 : minuscules, chiffres, `-` aux milieux, ≤ 63 — l'alphabet d'un nom
+/// d'entité K8s, donc jamais de `_`.
 fn is_dns_label(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
@@ -253,60 +237,40 @@ fn is_dns_label(s: &str) -> bool {
         && s.ends_with(|c: char| c.is_ascii_alphanumeric())
 }
 
-/// Identifiant `H_project_…` d'un projet (encodé, `FR-3`). Constructeurs d'identifiants lus
-/// par les tests et les Scenario de `host.sdd` ; leurs appelants de production (ouverture par
-/// écran, tranche DEC-8/`DEC-6`) ne sont pas dans B9 — tooling.sdd
+/// Identifiant `H_project_<nom>` d'un projet : le nom K8s tel quel (`FR-3`, miryad-core 0.4.0
+/// accepte le `-` dans un identifiant `H_`). Constructeurs d'identifiants lus par les tests et
+/// les Scenario de `host.sdd` ; leurs appelants de production (ouverture par écran, tranche
+/// DEC-8/`DEC-6`) ne sont pas dans B9 — tooling.sdd
 #[allow(dead_code)]
 #[must_use]
 pub(crate) fn h_project_id(name: &str) -> String {
-    format!("{PROJECT_PREFIX}{}", encode_k8s_name(name))
+    format!("{PROJECT_PREFIX}{name}")
 }
 
-/// Identifiant `H_sandbox_<owner>_<nom>` d'une sandbox (deux parties encodées, `FR-2`).
+/// Identifiant `H_sandbox_<owner>_<nom>` d'une sandbox, noms K8s tels quels (`FR-2`).
 /// Constructeurs d'identifiants lus par les tests ; appelants de production = tranche DEC-8
 /// (ouverture par écran) — tooling.sdd
 #[allow(dead_code)]
 #[must_use]
 pub(crate) fn h_sandbox_id(owner: &str, name: &str) -> String {
-    format!(
-        "{SANDBOX_PREFIX}{}_{}",
-        encode_k8s_name(owner),
-        encode_k8s_name(name)
-    )
+    format!("{SANDBOX_PREFIX}{owner}_{name}")
 }
 
-/// Résolution inverse d'un identifiant projet : le suffixe décodé (`_` → `-`) d'un seul nom,
-/// `None` s'il ne reconstruit pas une étiquette DNS-1123 — pas d'ambiguïté possible ici, la
-/// jointure de deux noms n'existe que pour les sandbox.
+/// Résolution inverse d'un identifiant projet : le suffixe entier, `None` s'il n'est pas une
+/// étiquette DNS-1123 (un suffixe portant un `_` n'est donc pas un projet).
 #[must_use]
 pub(crate) fn parse_project_id(id: &str) -> Option<String> {
-    let rest = id.strip_prefix(PROJECT_PREFIX)?;
-    let name = decode_k8s_name(rest);
-    is_dns_label(&name).then_some(name)
+    let name = id.strip_prefix(PROJECT_PREFIX)?;
+    is_dns_label(name).then(|| name.to_string())
 }
 
-/// Résolution inverse d'un identifiant sandbox : TOUTES les lectures (owner, nom) compatibles
-/// avec l'encodage (le `_` de jointure est indistinguable d'un `_` encodé d'un nom à tiret —
-/// `[?]` de `host.sdd`) ; l'appelant lève l'ambiguïté par le lien d'owner et la relecture.
+/// Résolution inverse d'un identifiant sandbox : un nom K8s ne portant jamais de `_`, le `_`
+/// de jointure est unique et la lecture (owner, nom) sans ambiguïté ; `None` si l'identifiant
+/// n'est pas exactement deux étiquettes DNS-1123 jointes par un `_`.
 #[must_use]
-pub(crate) fn parse_sandbox_id(id: &str) -> Vec<(String, String)> {
-    let Some(rest) = id.strip_prefix(SANDBOX_PREFIX) else {
-        return Vec::new();
-    };
-    let mut candidates = Vec::new();
-    for (i, _) in rest.match_indices('_') {
-        if i == 0 {
-            // Owner vide : lecture impossible, pas une jointure
-            continue;
-        }
-        let (owner_part, join_rest) = rest.split_at(i);
-        let owner = decode_k8s_name(owner_part);
-        let name = decode_k8s_name(&join_rest[1..]);
-        if is_dns_label(&owner) && is_dns_label(&name) {
-            candidates.push((owner, name));
-        }
-    }
-    candidates
+pub(crate) fn parse_sandbox_id(id: &str) -> Option<(String, String)> {
+    let (owner, name) = id.strip_prefix(SANDBOX_PREFIX)?.split_once('_')?;
+    (is_dns_label(owner) && is_dns_label(name)).then(|| (owner.to_string(), name.to_string()))
 }
 
 /// Contexte projet `id` : paramètres parcimonieux dérivés de l'entité relue (`FR-3`) —
@@ -366,26 +330,24 @@ impl LymailleHost for VnlLymailleHost {
         if request.role != SANDBOX_ROLE {
             return Ok(McpDecision::Unprovided);
         }
-        let candidates = parse_sandbox_id(request.context);
-        if candidates.is_empty() {
+        let Some((owner, name)) = parse_sandbox_id(request.context) else {
             return Ok(McpDecision::Unprovided);
-        }
+        };
         // Lien vérifié À CHAQUE appel (`FR-2`) : la révocation est effective à l'appel
-        // suivant, pas à la fin de la session (`AC-2`). Le lien de l'appelant tranche aussi
-        // l'ambiguïté de jointure de l'encodage (`[?]` de `host.sdd`).
+        // suivant, pas à la fin de la session (`AC-2`).
         let Some(linked) = self.linked_owner(caller.user_id).await? else {
             tracing::debug!(
                 "VNL-APP-SES-102: hôte lymaille — principal sans lien d'owner, rôle refusé"
             );
             return Ok(McpDecision::Denied);
         };
-        let Some((owner, name)) = candidates.into_iter().find(|(o, _)| *o == linked) else {
+        if owner != linked {
             tracing::debug!(
                 "VNL-APP-SES-102: hôte lymaille — le lien d'owner ne couvre pas le contexte {}",
                 request.context
             );
             return Ok(McpDecision::Denied);
-        };
+        }
         let url = match self.gateway.sandbox_mcp_url(&owner, &name).await {
             Ok(url) => url,
             Err(HostGatewayError::Refused) => {
@@ -446,16 +408,15 @@ impl LymailleHost for VnlLymailleHost {
             };
             return Ok(Some(project_context(id, &owner, &name, &entity)?));
         }
-        let candidates = parse_sandbox_id(id);
-        if candidates.is_empty() {
+        let Some((owner, name)) = parse_sandbox_id(id) else {
             return Ok(None);
-        }
+        };
         let Some(linked) = self.linked_owner(caller.user_id).await? else {
             return Ok(None);
         };
-        let Some((owner, name)) = candidates.into_iter().find(|(o, _)| *o == linked) else {
+        if owner != linked {
             return Ok(None);
-        };
+        }
         let entity = match self.gateway.sandbox(&owner, &name).await {
             Ok(entity) => entity,
             Err(HostGatewayError::Refused) => return Ok(None),
@@ -467,6 +428,31 @@ impl LymailleHost for VnlLymailleHost {
             }
         };
         Ok(Some(sandbox_context(id, &owner, &name, &entity)?))
+    }
+
+    /// Profil par défaut des agents sans profil explicite (`FR-6`, ticket #75) : relu à chaque
+    /// appel, jamais mis en cache — changer le réglage joue à l'ouverture de session suivante.
+    async fn default_profile(&self) -> Result<Option<String>, HostError> {
+        let ligne = app_settings::Entity::find()
+            .filter(app_settings::Column::Key.eq(app_settings::KEY_DEFAULT_PROFILE))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "VNL-APP-SES-110: hôte lymaille — lecture du réglage default_profile échouée: {e}"
+                );
+                HostError
+            })?;
+        let Some(ligne) = ligne else {
+            return Ok(Some(app_settings::PROFIL_PAR_DEFAUT.to_string()));
+        };
+        let Some(nom) = app_settings::profil_de_la_valeur(&ligne.value) else {
+            tracing::warn!(
+                "VNL-APP-SES-111: hôte lymaille — le réglage default_profile n'a pas la forme attendue"
+            );
+            return Err(HostError);
+        };
+        Ok(Some(nom.to_string()))
     }
 }
 
@@ -1031,10 +1017,16 @@ mod tests {
         }
     }
 
-    // ── Encodage des identifiants (`DEC-9`, `[?]` des Tasks) ──
+    // ── Identifiants `H_` : noms K8s tels quels (`DEC-9`, miryad-core 0.4.0, ticket #76) ──
 
     #[test]
-    fn encodage_h_aller_retour_sur_noms_dns() {
+    fn identifiants_h_sans_encodage() {
+        assert_eq!(h_project_id("mon-projet"), "H_project_mon-projet");
+        assert_eq!(h_sandbox_id("jean-marc", "web"), "H_sandbox_jean-marc_web");
+    }
+
+    #[test]
+    fn aller_retour_sur_noms_dns() {
         let noms = ["web", "mon-projet", "a1", "abc-def-ghi"];
         for nom in noms {
             assert_eq!(
@@ -1045,31 +1037,12 @@ mod tests {
         }
         for owner in ["ana", "jean-marc"] {
             for nom in noms {
-                assert!(
-                    parse_sandbox_id(&h_sandbox_id(owner, nom))
-                        .iter()
-                        .any(|(o, n)| o == owner && n == nom),
+                assert_eq!(
+                    parse_sandbox_id(&h_sandbox_id(owner, nom)),
+                    Some((owner.to_string(), nom.to_string())),
                     "aller-retour sandbox sur {owner:?} × {nom:?}"
                 );
             }
-        }
-    }
-
-    /// Sur noms DNS-1123 sans tiret, l'encodage est injectif : deux paires distinctes,
-    /// deux identifiants distincts.
-    #[test]
-    fn encodage_injectif_sur_noms_sans_tiret() {
-        let mut vus = HashSet::new();
-        for owner in ["ana", "bob", "jean"] {
-            for nom in ["web", "api", "front"] {
-                assert!(
-                    vus.insert(h_sandbox_id(owner, nom)),
-                    "collision sur {owner:?} × {nom:?}"
-                );
-            }
-        }
-        for nom in ["web", "api", "front"] {
-            assert!(vus.insert(h_project_id(nom)), "collision sur {nom:?}");
         }
     }
 
@@ -1080,6 +1053,7 @@ mod tests {
             "H_project_Édouard",
             "H_project_-web",
             "H_project_web-",
+            "H_project_a_b",
             "H_sandbox_ana_web",
             "G_prod",
         ] {
@@ -1088,69 +1062,137 @@ mod tests {
                 "{id:?} ne doit pas se résoudre"
             );
         }
-        // le `_` du suffixe est l'encodage d'un `-` : il se décode, sans ambiguïté
-        assert_eq!(
-            parse_project_id("H_project_a_b").as_deref(),
-            Some("a-b"),
-            "le `_` du suffixe encode un `-`"
-        );
     }
 
-    /// Le `_` de jointure est indistinguable d'un `_` encodé : la résolution inverse rend
-    /// toutes les lectures valides ; l'appelant tranche par le lien d'owner.
+    /// Un nom K8s ne porte jamais de `_` : le `_` de jointure est unique, une seule lecture.
     #[test]
-    fn parse_sandbox_id_rend_les_lectures_valides() {
+    fn parse_sandbox_id_une_seule_lecture() {
         assert_eq!(
             parse_sandbox_id("H_sandbox_ana_web"),
-            vec![("ana".to_string(), "web".to_string())]
+            Some(("ana".to_string(), "web".to_string()))
         );
-        let mut attendus = parse_sandbox_id("H_sandbox_jean_marc_web");
-        attendus.sort();
         assert_eq!(
-            attendus,
-            vec![
-                ("jean".to_string(), "marc-web".to_string()),
-                ("jean-marc".to_string(), "web".to_string()),
-            ]
+            parse_sandbox_id("H_sandbox_jean-marc_web"),
+            Some(("jean-marc".to_string(), "web".to_string()))
+        );
+        assert_eq!(
+            parse_sandbox_id("H_sandbox_jean_marc-web"),
+            Some(("jean".to_string(), "marc-web".to_string()))
         );
         for id in [
             "H_sandbox_",
             "H_sandbox_ana",
             "H_sandbox__web",
+            "H_sandbox_ana_",
             "H_sandbox_anaweb",
+            "H_sandbox_jean_marc_web",
+            "H_sandbox_Ana_web",
+            "H_project_ana_web",
         ] {
-            assert!(
-                parse_sandbox_id(id).is_empty(),
-                "{id:?} ne doit rien rendre"
-            );
+            assert_eq!(parse_sandbox_id(id), None, "{id:?} ne doit rien rendre");
         }
     }
 
-    /// Le lien de l'appelant lève l'ambiguïté de jointure : c'est l'Owner de l'appelant qui
-    /// décide de la lecture candidate (`FR-2`).
+    /// Scenario « noms à tiret, résolution sans ambiguïté » : deux owners dont les noms
+    /// diffèrent par un tiret ne se confondent jamais.
     #[tokio::test]
-    async fn le_lien_de_l_appelant_leve_l_ambiguite_de_jointure() {
-        let (host, state, ids, _) = host_with(&[("sub-jean-marc", "jean-marc")], |g| {
-            g.sandboxes
-                .insert(("jean-marc".to_string(), "web".to_string()));
-            g.sandboxes
-                .insert(("jean".to_string(), "marc-web".to_string()));
-        })
+    async fn noms_a_tiret_resolus_sans_ambiguite() {
+        let (host, state, ids, _) = host_with(
+            &[("sub-jean-marc", "jean-marc"), ("sub-jean", "jean")],
+            |g| {
+                g.sandboxes
+                    .insert(("jean-marc".to_string(), "web".to_string()));
+                g.sandboxes
+                    .insert(("jean".to_string(), "marc-web".to_string()));
+            },
+        )
         .await;
-        let id = h_sandbox_id("jean-marc", "web");
-        let decision = host
-            .resolve_mcp(&request(&id, "sandbox"), &caller_for(&ids, "sub-jean-marc"))
-            .await
-            .expect("la résolution réussit");
-        assert!(
-            matches!(decision, McpDecision::Granted(_)),
-            "attendu Granted, obtenu : {decision:?}"
-        );
+        for (sujet, id) in [
+            ("sub-jean-marc", h_sandbox_id("jean-marc", "web")),
+            ("sub-jean", h_sandbox_id("jean", "marc-web")),
+        ] {
+            let decision = host
+                .resolve_mcp(&request(&id, "sandbox"), &caller_for(&ids, sujet))
+                .await
+                .expect("la résolution réussit");
+            assert!(
+                matches!(decision, McpDecision::Granted(_)),
+                "attendu Granted pour {id}, obtenu : {decision:?}"
+            );
+        }
         let g = state.lock().unwrap();
         assert_eq!(
             g.mcp_calls,
-            vec![("jean-marc".to_string(), "web".to_string())],
-            "la lecture candidate n'a pas été tranchée par le lien"
+            vec![
+                ("jean-marc".to_string(), "web".to_string()),
+                ("jean".to_string(), "marc-web".to_string()),
+            ],
+            "chaque identifiant ne se lit que d'une façon"
+        );
+    }
+
+    /// Un owner ne résout jamais l'identifiant d'un autre, même proche par le nom.
+    #[tokio::test]
+    async fn owner_proche_par_le_nom_denie() {
+        let (host, _state, ids, _) = host_with(&[("sub-jean", "jean")], |g| {
+            g.sandboxes
+                .insert(("jean-marc".to_string(), "web".to_string()));
+        })
+        .await;
+        let decision = host
+            .resolve_mcp(
+                &request(&h_sandbox_id("jean-marc", "web"), "sandbox"),
+                &caller_for(&ids, "sub-jean"),
+            )
+            .await
+            .expect("la résolution réussit");
+        assert!(
+            matches!(decision, McpDecision::Denied),
+            "attendu Denied, obtenu : {decision:?}"
+        );
+    }
+
+    /// Scenario « profil par défaut relu à chaque appel » (ticket #75).
+    #[tokio::test]
+    async fn profil_par_defaut_relu_a_chaque_appel() {
+        use crate::db::entities::app_settings;
+        use sea_orm::ActiveModelTrait as _;
+
+        let (host, _state, _ids, db) = host_with(&[], |_| {}).await;
+        assert_eq!(
+            host.default_profile().await.expect("lecture"),
+            Some("default".to_string()),
+            "ligne absente : le profil nommé `default`"
+        );
+
+        let ligne = app_settings::ActiveModel {
+            id: NotSet,
+            key: Set("default_profile".to_string()),
+            value: Set(serde_json::json!({"profile": "qwen"})),
+        }
+        .insert(&db)
+        .await
+        .expect("réglage posé");
+        assert_eq!(
+            host.default_profile().await.expect("lecture"),
+            Some("qwen".to_string())
+        );
+
+        let mut modifiee: app_settings::ActiveModel = ligne.into();
+        modifiee.value = Set(serde_json::json!({"profile": "mistral"}));
+        let ligne = modifiee.update(&db).await.expect("réglage modifié");
+        assert_eq!(
+            host.default_profile().await.expect("lecture"),
+            Some("mistral".to_string()),
+            "jamais mis en cache"
+        );
+
+        let mut illisible: app_settings::ActiveModel = ligne.into();
+        illisible.value = Set(serde_json::json!({"profile": ""}));
+        illisible.update(&db).await.expect("réglage modifié");
+        assert!(
+            host.default_profile().await.is_err(),
+            "valeur sans forme valide : HostError"
         );
     }
 }

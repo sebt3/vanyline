@@ -1,8 +1,7 @@
 //! Réglages globaux clé/valeur JSON de l'application — contrat : `./app_settings.sdd`.
 //! Lecture ouverte aux utilisateurs authentifiés, écriture réservée aux administrateurs ;
-//! seule clé connue en v1 : `default_model` (modèle par défaut de l'agent de catalogue,
-//! cf. `../../sessions/catalog.sdd` ; l'amorçage `../../system_agents.sdd` a été retiré en
-//! C2 du chantier lymaille).
+//! seule clé connue en v1 : `default_profile` (nom du profil de modèle par défaut des agents,
+//! cf. `../../sessions/host.sdd`).
 
 use miryad_core::auth::AuthPrincipal;
 use miryad_core::resource::{AccessPolicy, HookError, MiryadResource};
@@ -28,54 +27,42 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// Clé connue en v1 : le modèle par défaut, destination de l'agent de catalogue pour un
-/// utilisateur sans aucun profil (`../../sessions/catalog.sdd` ; historique : l'amorçage
-/// `NoModelProfile` de `../../system_agents.sdd` a été retiré en C2 du chantier lymaille).
-pub const KEY_DEFAULT_MODEL: &str = "default_model";
+/// Clé connue en v1 : le nom du profil de modèle lymaille par défaut, celui que reçoivent les
+/// agents du catalogue (`../../sessions/catalog.sdd`) par `LymailleHost::default_profile`
+/// (`../../sessions/host.sdd`).
+pub const KEY_DEFAULT_PROFILE: &str = "default_profile";
+
+/// Nom du profil désigné quand la ligne `default_profile` est absente (`./app_settings.sdd`
+/// `Handles`).
+pub const PROFIL_PAR_DEFAUT: &str = "default";
+
+/// Extrait le nom de profil d'une valeur `default_profile` : `{ "profile": <chaîne non vide> }`.
+/// `None` si la forme n'est pas celle-là. Partagé par la validation d'écriture et la lecture de
+/// l'hôte, pour qu'une valeur acceptée à l'écriture soit toujours relue.
+#[must_use]
+pub fn profil_de_la_valeur(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_object()?
+        .get("profile")?
+        .as_str()
+        .filter(|nom| !nom.is_empty())
+}
 
 /// Validation de la valeur d'un réglage POUR SA CLÉ (`app_settings.sdd` `Exposes`) :
-/// `default_model` = `{ "provider_id": <entier>, "model": <chaîne non vide>, "options"?: <objet> }`.
-/// La forme seule est vérifiée ici : les hooks (`before_create`/`before_update`, forme async à
-/// connexion générique de miryad-core 0.3.1) ignorent la connexion prêtée — `provider_id`
-/// désigne un fournisseur LLM existant par contrat d'usage (limite déjà actée pour
-/// `toolsets`/`skills` sous `./agents.sdd`).
+/// `default_profile` = `{ "profile": <chaîne non vide> }`. L'existence du profil n'est pas
+/// vérifiée : lymaille résout un profil par son nom à l'exécution, sans clé étrangère.
 fn validate_value(key: &str, value: &serde_json::Value) -> Result<(), HookError> {
-    if key != KEY_DEFAULT_MODEL {
+    if key != KEY_DEFAULT_PROFILE {
         return Err(HookError::with_code(
             "VNL-SET-001",
             format!("unknown app setting key: {key}"),
         ));
     }
-    let object = value.as_object().ok_or_else(|| {
-        HookError::with_code(
-            "VNL-SET-002",
-            format!("app setting {key} must be a JSON object, got: {value}"),
-        )
-    })?;
-    if object
-        .get("provider_id")
-        .is_none_or(|v| v.as_i64().is_none())
-    {
-        return Err(HookError::with_code(
-            "VNL-SET-002",
-            format!("app setting {key} requires a numeric 'provider_id', got: {value}"),
-        ));
-    }
-    if object
-        .get("model")
-        .is_none_or(|v| v.as_str().is_none_or(str::is_empty))
-    {
-        return Err(HookError::with_code(
-            "VNL-SET-002",
-            format!("app setting {key} requires a non-empty string 'model', got: {value}"),
-        ));
-    }
-    if object.contains_key("options") && !object["options"].is_object() {
+    if profil_de_la_valeur(value).is_none() {
         return Err(HookError::with_code(
             "VNL-SET-002",
             format!(
-                "app setting {key} 'options' must be a JSON object, got: {}",
-                object["options"]
+                "app setting {key} requires an object with a non-empty string 'profile', got: {value}"
             ),
         ));
     }
@@ -208,46 +195,30 @@ mod tests {
         );
     }
 
-    /// Scenario : `cle_inconnue` — une clé hors `default_model` est refusée.
+    /// Scenario : `cle_inconnue` — une clé hors `default_profile` est refusée (dont l'ancienne
+    /// clé `default_model`).
     #[tokio::test]
     async fn cle_inconnue() {
-        let err = Entity::before_create(
-            &mock_db(),
-            active_for("autre", serde_json::json!({})),
-            &test_principal(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("VNL-SET-001"));
-    }
-
-    /// Scenario : `default_model_valide` — la forme contractée est acceptée, avec et sans
-    /// `options`.
-    #[tokio::test]
-    async fn default_model_valide() {
-        assert!(
-            Entity::before_create(
+        for cle in ["autre", "default_model"] {
+            let err = Entity::before_create(
                 &mock_db(),
-                active_for(
-                    "default_model",
-                    serde_json::json!({"provider_id": 1, "model": "qwen3.6:35b-a3b"})
-                ),
-                &test_principal()
+                active_for(cle, serde_json::json!({})),
+                &test_principal(),
             )
             .await
-            .is_ok()
-        );
+            .unwrap_err();
+            assert_eq!(err.code.as_deref(), Some("VNL-SET-001"), "clé {cle}");
+        }
+    }
+
+    /// Scenario : `default_profile_valide` — la forme contractée est acceptée, sans vérifier
+    /// l'existence du profil.
+    #[tokio::test]
+    async fn default_profile_valide() {
         assert!(
             Entity::before_create(
                 &mock_db(),
-                active_for(
-                    "default_model",
-                    serde_json::json!({
-                        "provider_id": 1,
-                        "model": "qwen3.6:35b-a3b",
-                        "options": {"temperature": 0.2}
-                    })
-                ),
+                active_for("default_profile", serde_json::json!({"profile": "default"})),
                 &test_principal()
             )
             .await
@@ -255,30 +226,24 @@ mod tests {
         );
     }
 
-    /// Scenario : `default_model_invalide` — sans `model`, puis `provider_id` non
-    /// numérique : `HookError` dans les deux cas.
+    /// Scenario : `default_profile_invalide` — sans `profile`, `profile` vide, `profile` non
+    /// chaîne : `VNL-SET-002` dans les trois cas.
     #[tokio::test]
-    async fn default_model_invalide() {
-        let err = Entity::before_create(
-            &mock_db(),
-            active_for("default_model", serde_json::json!({"provider_id": 1})),
-            &test_principal(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("VNL-SET-002"));
-
-        let err = Entity::before_create(
-            &mock_db(),
-            active_for(
-                "default_model",
-                serde_json::json!({"provider_id": "un", "model": "m"}),
-            ),
-            &test_principal(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code.as_deref(), Some("VNL-SET-002"));
+    async fn default_profile_invalide() {
+        for valeur in [
+            serde_json::json!({}),
+            serde_json::json!({"profile": ""}),
+            serde_json::json!({"profile": 3}),
+        ] {
+            let err = Entity::before_create(
+                &mock_db(),
+                active_for("default_profile", valeur.clone()),
+                &test_principal(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code.as_deref(), Some("VNL-SET-002"), "valeur {valeur}");
+        }
     }
 
     /// `before_update` revalide la paire effective : passer la valeur à une forme invalide
@@ -287,8 +252,8 @@ mod tests {
     async fn before_update_revalide_la_paire_effective() {
         let existing = Model {
             id: 1,
-            key: "default_model".to_string(),
-            value: serde_json::json!({"provider_id": 1, "model": "m"}),
+            key: "default_profile".to_string(),
+            value: serde_json::json!({"profile": "default"}),
         };
 
         let mut active = ActiveModel {
@@ -296,7 +261,7 @@ mod tests {
             key: NotSet,
             value: NotSet,
         };
-        active.value = Set(serde_json::json!({"provider_id": "un", "model": "m"}));
+        active.value = Set(serde_json::json!({"profile": ""}));
         let err = Entity::before_update(&mock_db(), active, &existing, &test_principal())
             .await
             .unwrap_err();
@@ -305,7 +270,7 @@ mod tests {
         let active = ActiveModel {
             id: NotSet,
             key: NotSet,
-            value: Set(serde_json::json!({"provider_id": 2, "model": "autre-modele"})),
+            value: Set(serde_json::json!({"profile": "autre"})),
         };
         assert!(
             Entity::before_update(&mock_db(), active, &existing, &test_principal())
@@ -368,7 +333,7 @@ mod tests {
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"key": "default_model", "value": {"provider_id": 1, "model": "m"}})
+                        serde_json::json!({"key": "default_profile", "value": {"profile": "m"}})
                             .to_string(),
                     ))
                     .expect("valid request"),

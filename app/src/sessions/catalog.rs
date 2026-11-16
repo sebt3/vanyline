@@ -4,73 +4,79 @@
 //! défaut portés par le type) et les agents `G_vanyline_*`, publiés create-only idempotents
 //! (`DEC-7`, `FR-6`), plus la table compilée écran → agent pour les contextes `H_` (`DEC-6`).
 
-use chrono::Utc;
 use lymaille::{
     AgentDefinition, AgentKind, ContextLevel, ContextType, SessionKind, ToolsetContext,
 };
-use sea_orm::ConnectionTrait;
+use miryad_core::lymaille::host::ScriptGrants;
+use miryad_core::lymaille::store::publish::{
+    Provenance, ensure_agent, ensure_catalog_context, ensure_context_type,
+};
 use sea_orm::DatabaseConnection;
-use sea_orm::sea_query::{Alias, Expr, OnConflict, Query};
 
 use super::host::{parse_project_id, parse_sandbox_id};
 use crate::error::AppError;
 
-/// Tables du catalogue posées par le `Migrator` de miryad-core (`sessions#CON-2`) — noms
-/// complets, motif des stores de miryad-core (`src/lymaille/store/`).
-const CATALOG_AGENTS_TABLE: &str = "miryad_lymaille_catalog_agents";
-const CATALOG_CONTEXT_TYPES_TABLE: &str = "miryad_lymaille_catalog_context_types";
-const CATALOG_CONTEXTS_TABLE: &str = "miryad_lymaille_catalog_contexts";
+/// Source déclarée de la publication : la marque `managed_by` des lignes publiées.
+const SOURCE_CATALOGUE: &str = "vanyline";
+/// Version du schéma du type de contexte (champ `version` du `ContextType` lymaille), sans
+/// rapport avec la version de provenance de la publication.
+const VERSION_TYPE: &str = "1.0.0";
 
-/// Version sémantique des entrées publiées ; relancée, la publication est un `no-op`, aucune
-/// « variante datée » n'est ajoutée (`AC-4`).
-const VERSION_CATALOGUE: &str = "1.0.0";
-/// Nom du profil de modèle porté par les agents publiés. Par convention l'app amorce ce nom
-/// depuis le réglage global `default_model` (`app-settings`), comme le faisait
-/// `system_agents::resolve_or_bootstrap_profile` ; sans profil de ce nom en base, c'est
-/// `lymaille` qui refuse le tour (`UnknownProfile`) — aucun modèle codé en dur ici. La
-/// correspondance du réglage vers un profil miryad-core est `[?]` (Tasks de `catalog.sdd`).
-const PROFIL_MODELE: &str = "default";
-
-/// Publie le catalogue par défaut, create-only : chaque ligne est insérée avec
-/// `INSERT … ON CONFLICT DO NOTHING` sur sa clé `UNIQUE`, donc aucune ligne existante — par
-/// exemple redéfinie par un administrateur sous le même nom — n'est lue ni patchée (`FR-6`).
-/// Ouverture par tout utilisateur authentifié (`DEC-7`) : les lignes du catalogue sont
-/// `Public` en lecture chez miryad-core et le contexte ne porte pas de groupes
-/// (`allowed_groups` n'existe que sur les serveurs MCP) — rien à régler ici. Branché au
-/// démarrage en B9 (`mod.sdd` Tasks).
+/// Publie le catalogue par défaut, à la version de l'app (`CARGO_PKG_VERSION`) : relancé, c'est
+/// un no-op ; à une version supérieure, les lignes gérées non modifiées sont mises à jour et
+/// les lignes d'un administrateur — ou modifiées par lui — restent intactes (`FR-6`, sémantique
+/// de `miryad_core::lymaille::store::publish`). Ouverture par tout utilisateur authentifié
+/// (`DEC-7`) : les lignes du catalogue sont `Public` en lecture chez miryad-core et le contexte
+/// ne porte pas de groupes. Branché au démarrage en B9 (`mod.sdd` Tasks).
 pub(crate) async fn ensure_catalog(db: &DatabaseConnection) -> Result<(), AppError> {
-    publier_type(db, G_HOME, G_VANYLINE_HOME, SessionKind::Work).await?;
-    publier_contexte(db, G_HOME).await?;
-    publier_type(db, G_CONFIG, G_VANYLINE_CONFIG, SessionKind::Config).await?;
-    publier_contexte(db, G_CONFIG).await?;
-    publier_agent(
+    ensure_catalog_version(db, env!("CARGO_PKG_VERSION")).await
+}
+
+/// [`ensure_catalog`] à une version de provenance explicite — seam des tests de montée de
+/// version.
+pub(crate) async fn ensure_catalog_version(
+    db: &DatabaseConnection,
+    version: &str,
+) -> Result<(), AppError> {
+    let provenance = Provenance {
+        source: SOURCE_CATALOGUE.to_string(),
+        version: version.to_string(),
+    };
+    publier_type(db, &provenance, G_HOME, G_VANYLINE_HOME, SessionKind::Work).await?;
+    publier_contexte(db, &provenance, G_HOME).await?;
+    publier_type(
         db,
-        G_VANYLINE_HOME,
-        AgentKind::Work,
-        "Agent productif par défaut de l'accueil de vanyline.",
-    )
-    .await?;
-    publier_agent(
-        db,
+        &provenance,
+        G_CONFIG,
         G_VANYLINE_CONFIG,
-        AgentKind::Config,
-        "Agent de configuration par défaut de vanyline.",
+        SessionKind::Config,
     )
     .await?;
-    publier_agent(
-        db,
-        G_VANYLINE_PROJECT,
-        AgentKind::Work,
-        "Agent productif par défaut des projets de vanyline.",
-    )
-    .await?;
-    publier_agent(
-        db,
-        G_VANYLINE_SANDBOX,
-        AgentKind::Work,
-        "Agent productif par défaut des sandboxes de vanyline.",
-    )
-    .await?;
+    publier_contexte(db, &provenance, G_CONFIG).await?;
+    for (id, nature, prompt) in [
+        (
+            G_VANYLINE_HOME,
+            AgentKind::Work,
+            "Agent productif par défaut de l'accueil de vanyline.",
+        ),
+        (
+            G_VANYLINE_CONFIG,
+            AgentKind::Config,
+            "Agent de configuration par défaut de vanyline.",
+        ),
+        (
+            G_VANYLINE_PROJECT,
+            AgentKind::Work,
+            "Agent productif par défaut des projets de vanyline.",
+        ),
+        (
+            G_VANYLINE_SANDBOX,
+            AgentKind::Work,
+            "Agent productif par défaut des sandboxes de vanyline.",
+        ),
+    ] {
+        publier_agent(db, &provenance, id, nature, prompt).await?;
+    }
     Ok(())
 }
 
@@ -85,143 +91,82 @@ pub(crate) fn agent_pour_contexte(context: &str) -> Option<&'static str> {
     if parse_project_id(context).is_some() {
         return Some(G_VANYLINE_PROJECT);
     }
-    if !parse_sandbox_id(context).is_empty() {
+    if parse_sandbox_id(context).is_some() {
         return Some(G_VANYLINE_SANDBOX);
     }
     None
 }
 
-/// Publie la ligne de `catalog_context_types` du type `nom` : `active` est la forme
-/// sérialisée d'un `ContextType` construit par `lymaille` elle-même — schéma minimal sans
-/// paramètre, nature et agent par défaut portés par le type (`FR-6`) —, et `allowed_agents`
-/// contient l'agent par défaut, condition de l'ouverture par défaut chez miryad-core. La
-/// colonne `context_type` des contextes référence le type par ce nom `G_` : c'est ce que
-/// résout `interactive/manager.rs` de miryad-core (`[?]` dans `catalog.sdd`).
+/// Publie le type de contexte `nom` : schéma minimal sans paramètre, nature et agent par
+/// défaut portés par le type (`FR-6`), `allowed_agents` = l'agent par défaut (condition de
+/// l'ouverture par défaut chez miryad-core), `script_grants` vides (aucun droit de script par
+/// défaut, `widgets#OI-3`). La colonne `context_type` des contextes référence le type par ce
+/// nom `G_` : c'est ce que résout l'ouverture de session de miryad-core.
 async fn publier_type(
     db: &DatabaseConnection,
+    provenance: &Provenance,
     nom: &str,
     agent: &str,
     nature: SessionKind,
 ) -> Result<(), AppError> {
-    let actif = serde_json::to_value(
-        serde_json::from_value::<ContextType>(serde_json::json!({
-            "name": nom,
-            "version": VERSION_CATALOGUE,
-            "schema": { "type": "object" },
-            "roles": [],
-            "includes": [],
-            "default_agent": agent,
-            "session_kind": nature,
-        }))
-        .map_err(panne_crate)?,
-    )
+    let definition = serde_json::from_value::<ContextType>(serde_json::json!({
+        "name": nom,
+        "version": VERSION_TYPE,
+        "schema": { "type": "object" },
+        "roles": [],
+        "includes": [],
+        "default_agent": agent,
+        "session_kind": nature,
+    }))
     .map_err(panne_crate)?;
-    inserer_si_absente(
+    ensure_context_type(
         db,
-        CATALOG_CONTEXT_TYPES_TABLE,
-        "name",
-        &[
-            ("name", Expr::val(nom)),
-            ("version", Expr::val(VERSION_CATALOGUE)),
-            ("allowed_agents", Expr::val(serde_json::json!([agent]))),
-            (
-                "script_grants",
-                Expr::val(serde_json::json!({"toolsets": [], "modules": []})),
-            ),
-            ("active", Expr::val(actif)),
-            ("draft", Expr::null()),
-            ("created_at", Expr::val(Utc::now())),
-        ],
+        provenance,
+        &definition,
+        &[agent.to_string()],
+        &ScriptGrants::default(),
     )
     .await
+    .map(|_| ())
+    .map_err(panne_crate)
 }
 
-/// Publie la ligne de `catalog_contexts` du contexte `nom`, de niveau `Shared`, référencé par
-/// son propre nom comme type (`DEC-7`) : aucun paramètre, aucun rôle pour les deux contextes
-/// d'écran (`contenu minimal`).
-async fn publier_contexte(db: &DatabaseConnection, nom: &str) -> Result<(), AppError> {
-    let brut = serde_json::to_value(
-        ToolsetContext::new(nom.to_string(), ContextLevel::Shared).map_err(panne_crate)?,
-    )
-    .map_err(panne_crate)?;
-    inserer_si_absente(
-        db,
-        CATALOG_CONTEXTS_TABLE,
-        "name",
-        &[
-            ("name", Expr::val(nom)),
-            ("context", Expr::val(brut)),
-            ("context_type", Expr::val(nom)),
-            ("created_at", Expr::val(Utc::now())),
-        ],
-    )
-    .await
+/// Publie le contexte `nom`, de niveau `Shared`, référencé par son propre nom comme type
+/// (`DEC-7`) : aucun paramètre, aucun rôle pour les deux contextes d'écran.
+async fn publier_contexte(
+    db: &DatabaseConnection,
+    provenance: &Provenance,
+    nom: &str,
+) -> Result<(), AppError> {
+    let contexte =
+        ToolsetContext::new(nom.to_string(), ContextLevel::Shared).map_err(panne_crate)?;
+    ensure_catalog_context(db, provenance, &contexte, Some(nom))
+        .await
+        .map(|_| ())
+        .map_err(panne_crate)
 }
 
-/// Publie la ligne de `catalog_agents` de l'agent `id` : définition minimale — nom, nature,
-/// prompt d'une phrase, profil `default` (`[?]` de `catalog.sdd`). Les colonnes dérivées
-/// `kind` et `profile` sont posées comme le font les hooks de miryad-core, la forme étant
-/// produite par `lymaille` elle-même.
+/// Publie l'agent `id` : définition minimale — nom, nature, prompt d'une phrase, **sans
+/// profil** (le profil vient de `default_profile` de l'hôte, `host.sdd`).
 async fn publier_agent(
     db: &DatabaseConnection,
+    provenance: &Provenance,
     id: &str,
     nature: AgentKind,
     prompt: &str,
 ) -> Result<(), AppError> {
-    let definition = AgentDefinition::new(id.to_string(), nature, prompt.to_string())
-        .with_profile(PROFIL_MODELE.to_string());
-    definition.validate().map_err(panne_crate)?;
-    let brut = serde_json::to_value(&definition).map_err(panne_crate)?;
-    let nature_texte = serde_json::to_value(definition.kind())
-        .ok()
-        .and_then(|valeur| valeur.as_str().map(str::to_owned))
-        .ok_or_else(|| panne_crate("agent kind is not a text"))?;
-    inserer_si_absente(
-        db,
-        CATALOG_AGENTS_TABLE,
-        "agent_id",
-        &[
-            ("agent_id", Expr::val(id)),
-            ("kind", Expr::val(nature_texte)),
-            ("profile", Expr::val(PROFIL_MODELE)),
-            ("definition", Expr::val(brut)),
-            ("created_at", Expr::val(Utc::now())),
-        ],
-    )
-    .await
-}
-
-/// `INSERT … ON CONFLICT (<clé UNIQUE>) DO NOTHING` : la création create-only qui ne lit et
-/// ne patche jamais la ligne existante (`FR-6`), motif des upserts des stores de miryad-core
-/// sans la branche `update`.
-async fn inserer_si_absente(
-    db: &DatabaseConnection,
-    table: &str,
-    cle: &str,
-    colonnes: &[(&str, Expr)],
-) -> Result<(), AppError> {
-    let statement = Query::insert()
-        .into_table(Alias::new(table))
-        .columns(colonnes.iter().map(|(nom, _)| Alias::new(*nom)))
-        .values(colonnes.iter().map(|(_, valeur)| valeur.clone()))
-        .map_err(|cause| AppError::InternalError(format!("VNL-APP-SES-108: {cause}")))?
-        .on_conflict(
-            OnConflict::columns([Alias::new(cle)])
-                .do_nothing()
-                .to_owned(),
-        )
-        .to_owned();
-    db.execute(&statement)
+    let definition = AgentDefinition::new(id.to_string(), nature, prompt.to_string());
+    ensure_agent(db, provenance, &definition)
         .await
         .map(|_| ())
-        .map_err(|cause| AppError::InternalError(format!("VNL-APP-SES-108: {cause}")))
+        .map_err(panne_crate)
 }
 
-/// Panne de construction d'une définition par `lymaille` ou de (dé)sérialisation de leur forme
-/// stockée — implémentation interne à l'app, jamais un refus d'appel utilisateur.
+/// Panne de publication ou de construction d'une définition — implémentation interne à l'app,
+/// jamais un refus d'appel utilisateur.
 fn panne_crate(cause: impl std::fmt::Display) -> AppError {
     AppError::InternalError(format!(
-        "VNL-APP-SES-108: catalogue — définition refusée par la crate lymaille: {cause}"
+        "VNL-APP-SES-108: catalogue — publication refusée: {cause}"
     ))
 }
 
@@ -444,6 +389,109 @@ mod tests {
                 .unwrap_or_else(|| panic!("{identifiant} est publié au catalogue"));
             assert_eq!(ligne.kind, "work", "{identifiant} est un agent productif");
         }
+    }
+
+    /// Scenario « démarrage répété idempotent » (suite) : toute ligne publiée porte la marque
+    /// `vanyline` et la version courante de l'app.
+    #[tokio::test]
+    async fn lignes_publiees_marquees_vanyline() {
+        let db = real_db().await;
+        ensure_catalog(&db).await.expect("démarrage");
+        for ligne in agent::Entity::find().all(&db).await.unwrap() {
+            assert_eq!(ligne.managed_by.as_deref(), Some("vanyline"));
+            assert_eq!(
+                ligne.managed_version.as_deref(),
+                Some(env!("CARGO_PKG_VERSION"))
+            );
+        }
+        for ligne in context_type::Entity::find().all(&db).await.unwrap() {
+            assert_eq!(ligne.managed_by.as_deref(), Some("vanyline"));
+        }
+        for ligne in catalog_context::Entity::find().all(&db).await.unwrap() {
+            assert_eq!(ligne.managed_by.as_deref(), Some("vanyline"));
+        }
+    }
+
+    /// Scenario « les agents publiés ne désignent aucun profil » (ticket #75) : le profil vient
+    /// de `default_profile` de l'hôte, jamais d'une ligne d'agent.
+    #[tokio::test]
+    async fn agents_publies_sans_profil() {
+        let db = real_db().await;
+        ensure_catalog(&db).await.expect("démarrage");
+        let lignes = agent::Entity::find().all(&db).await.unwrap();
+        assert_eq!(lignes.len(), AGENTS_ATTENDUS.len());
+        for ligne in lignes {
+            let definition = serde_json::from_value::<AgentDefinition>(ligne.definition)
+                .expect("la colonne definition relit un `AgentDefinition`");
+            assert_eq!(definition.profile(), None, "{} sans profil", ligne.agent_id);
+            assert_eq!(
+                ligne.profile, "",
+                "colonne dérivée vide pour {}",
+                ligne.agent_id
+            );
+        }
+    }
+
+    /// Scenario « les types publiés portent les droits de script attendus ».
+    #[tokio::test]
+    async fn types_publies_avec_script_grants_vides() {
+        let db = real_db().await;
+        ensure_catalog(&db).await.expect("démarrage");
+        for ligne in context_type::Entity::find().all(&db).await.unwrap() {
+            assert_eq!(
+                ligne.script_grants,
+                serde_json::json!({"toolsets": [], "modules": []}),
+                "type {}",
+                ligne.name
+            );
+        }
+    }
+
+    /// Scenario « le catalogue suit la montée de version » : une ligne gérée non modifiée est
+    /// mise à jour, une ligne modifiée par un administrateur depuis sa publication reste intacte.
+    #[tokio::test]
+    async fn catalogue_suit_la_montee_de_version() {
+        let db = real_db().await;
+        ensure_catalog_version(&db, "0.0.1")
+            .await
+            .expect("ancienne version");
+
+        // Un administrateur retouche l'agent projet après la publication.
+        let projet = agent::Entity::find()
+            .filter(agent::Column::AgentId.eq(G_VANYLINE_PROJECT))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("agent projet publié");
+        let mut definition: serde_json::Value = projet.definition.clone();
+        definition["prompt"] = serde_json::json!("prompt retouché par un administrateur");
+        let mut active: agent::ActiveModel = projet.into();
+        active.definition = Set(definition.clone());
+        sea_orm::ActiveModelTrait::update(active, &db)
+            .await
+            .expect("retouche directe");
+
+        ensure_catalog(&db).await.expect("version courante");
+
+        let sandbox = agent::Entity::find()
+            .filter(agent::Column::AgentId.eq(G_VANYLINE_SANDBOX))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sandbox.managed_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "ligne non modifiée : mise à jour"
+        );
+        let projet = agent::Entity::find()
+            .filter(agent::Column::AgentId.eq(G_VANYLINE_PROJECT))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(projet.definition, definition, "ligne modifiée : intacte");
+        assert_eq!(projet.managed_version.as_deref(), Some("0.0.1"));
     }
 
     /// Vérifie le contexte stocké `nom` : sa référence de type, la nature et l'agent par défaut

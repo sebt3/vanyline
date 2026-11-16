@@ -610,8 +610,8 @@ mod tests {
         let user_cookie = session_cookie(&state, "alice", false).await;
         let admin_cookie = session_cookie(&state, "admin-user", true).await;
         let body = serde_json::json!({
-            "key": "default_model",
-            "value": {"provider_id": 1, "model": "qwen3.6:35b-a3b"}
+            "key": "default_profile",
+            "value": {"profile": "qwen"}
         })
         .to_string();
         let app = resources_router().with_state(state);

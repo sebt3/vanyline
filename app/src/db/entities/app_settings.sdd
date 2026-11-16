@@ -48,7 +48,7 @@ Must not:
     dans leurs entités (profils, agents).
 
 Tasks:
-  [ ] `app_settings.rs` : clé `default_profile` et sa validation à la place de `default_model`
+  [x] `app_settings.rs` : clé `default_profile` et sa validation à la place de `default_model`
     (le couple `{ provider_id, model }` n'a plus de référent depuis C3) ; Scenarios
     ci-dessous.
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : CONTRACTÉS — `VNL-SET-001` (clé inconnue), `VNL-SET-002` (valeur invalide). (Question d'origine : Codes des HookError (S8, 2026-10-13) : non contractés par la spec ; retenus

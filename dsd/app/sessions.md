@@ -240,9 +240,10 @@ Hors périmètre :
     - **Source:** user instruction, 2026-11-12 (« on peut se permettre de casser pour reconstruire »)
 
 - **DEC-9 - Identifiants `H_`**
-    - **Decision:** `H_project_<nom>` et `H_sandbox_<owner>_<nom>` (caractères `[A-Za-z0-9_-]`). Si
-      `identity::classify` de miryad-core refuse une forme, l'implémentation remonte la question par un `[?]` dans la spec
-      `host.sdd` (règle de `docs/chantier-lymaille.md`) plutôt que de choisir.
+    - **Decision:** `H_project_<nom>` et `H_sandbox_<owner>_<nom>` (caractères `[A-Za-z0-9_-]`), les noms d'entités K8s
+      tels quels. `identity::classify` refusait le `-` en miryad-core 0.3.1 (contournement : encodage `-`↔`_`, ambigu
+      pour la jointure des sandbox) ; il l'accepte depuis la 0.4.0 (ticket #76), l'encodage est supprimé. Un nom K8s ne
+      portant jamais de `_`, la jointure est sans ambiguïté.
     - **Source:** ASSUMPTION levée par l'instruction du 2026-11-12
 
 - **DEC-10 - Pont Matrix : bibliothèque seule**
@@ -290,8 +291,6 @@ Aucun Open Issue bloquant. Ce qui était ouvert est tranché par `DEC-6` à `DEC
 de configuration, Matrix, tables du chat, jeton, nommage `H_`, clients Bearer). Reste à vérifier à l'implémentation, sans décision
 à prendre :
 
-- **OI-1 - Forme des identifiants `H_` face à `identity::classify`** (`DEC-9`) : à confirmer par un test ; en cas de refus,
-  remonter la question.
 - **OI-2 - TTL réel du jeton d'Owner** (`sandbox/access#OI-8`, 600 s observé contre 900 s demandé) : à relever, sans
   effet sur ces contrats.
 

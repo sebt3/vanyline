@@ -37,8 +37,9 @@ Must:
     miryad-core, aucune migration `vanyline_*` pour elles (`CON-2`).
   Porter les identifiants d'erreur propres à la Solution sous `"VNL-APP-SES-NNN"` ; les refus de
     miryad-core gardent leurs `"MRD-LYMAILLE-NNN"` sans réécriture (`FR-12`). La suite est fixée
-    ainsi : `101..107` à ./host.rs, `108` à ./catalog.rs et ./events.rs (refus de charge et de
-    définition), et `109` au MONTAGE — panne de publication du catalogue au démarrage, montage
+    ainsi : `101..107`, `110` et `111` à ./host.rs (`110` : lecture du réglage `default_profile` en échec,
+    `111` : sa valeur de mauvaise forme), `108` à
+    ./catalog.rs et ./events.rs (refus de charge et de définition), et `109` au MONTAGE — panne de publication du catalogue au démarrage, montage
     refusé sans hôte, plafond `subagent` hors plage refusé au registre (./../main.rs,
     ./../workflow/runtime.rs) ; `109` est toujours une fatalité de démarrage, jamais une réponse
     à une requête.
