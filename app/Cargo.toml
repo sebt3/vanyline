@@ -40,7 +40,7 @@ url = "2"
 parking_lot = "0.12"
 bytes = "1"
 percent-encoding = "2"
-miryad-core = { version = "0.3.1", default-features = false, features = [
+miryad-core = { version = "0.4.0", default-features = false, features = [
     "swagger-ui",
     "workflow",
     "mcp",
@@ -48,15 +48,15 @@ miryad-core = { version = "0.3.1", default-features = false, features = [
     "matrix",
 ] }
 # `app/src/sessions/host.sdd` — @ToolsetContext construit par @VnlLymailleHost::resolve_context
-# (lymaille 0.2.1, version exactement déclarée par miryad-core 0.3.1 : le graphe résolu est
+# (lymaille 0.3, version déclarée par miryad-core 0.4.0 : le graphe résolu est
 # le même, une seule et même identité du type dans le trait) et @Zeroizing du jeton MCP
 # (`McpGrant.token`). Aucune dépendance nouvelle au graphe : les deux crates venaient déjà
 # via miryad-core.
-lymaille = "0.2.1"
+lymaille = "0.3"
 zeroize = "1"
 # W3 `app/src/workflow/runtime.rs` (runtime.sdd, Platform `restate-sdk`) : liaison des services
 # `DagInterpreter`/`StepDispatcher` à l'`Endpoint` et serveur HTTP/2 interne. Version identique à
-# celle déclarée par miryad-core 0.3.1 (`"0.12"`, résolu 0.12.1 dans `Cargo.lock`) et feature
+# celle déclarée par miryad-core 0.4.0 (`"0.12"`, résolu 0.12.1 dans `Cargo.lock`) et feature
 # `http_server` identique. Contrairement à miryad-core (dépendance optionnelle, montée par son
 # feature `workflow`, SANS `default-features = false`), le `default-features = false` ci-dessous
 # est propre à l'app : harnais de l'app (aucune feature par défaut importée sans décision) ;

@@ -27,8 +27,10 @@ Must:
   Monter les routes de conversation servies par miryad-core (`conversations_router`) sous
     `/api/v1/lymaille` et nulle part ailleurs — l'app n'ajoute aucune route de conversation
     propre et ne proxy pas le SSE.
-  Dépendre de `miryad-core >= 0.3.1` avec les features `lymaille` et `matrix` activées
-    (`CON-1`) ; 0.3.0 ne doit jamais être résolu. La feature `matrix` n'est montée nulle part :
+  Dépendre de `miryad-core >= 0.4.0` avec les features `lymaille` et `matrix` activées
+    (`CON-1`) ; aucune version antérieure ne doit être résolue (0.3.0 ne compile pas avec
+    `vynil-core` 0.9.1 ; 0.3.1 n'offre ni profil par défaut fourni par l'hôte, ni publication
+    système du catalogue, ni `script_grants` des contextes `H_…`). La feature `matrix` n'est montée nulle part :
     ses migrations seules sont appliquées, aucun pont Matrix configuré (`DEC-10`).
   Appliquer les migrations par la paire existante de ./../main.rs (`miryad_core::migration::Migrator::up`
     puis `crate::migration::Migrator::up`) — les tables `miryad_lymaille_*` viennent de
@@ -40,8 +42,9 @@ Must:
     refusé sans hôte, plafond `subagent` hors plage refusé au registre (./../main.rs,
     ./../workflow/runtime.rs) ; `109` est toujours une fatalité de démarrage, jamais une réponse
     à une requête.
-  Ne fonctionner qu'en une réplique d'`app` : le montage ne pose aucun verru distribué et
-    n'affiche aucune avertissement multiréplique — la contrainte est portée par le déploiement
+  Ne fonctionner qu'en une réplique d'`app` : le montage ne câble aucune porte de tour partagée
+    (`ManagerDeps::turn_lock` absent, hub d'événements sans journal ni relais ; la feature
+    `lymaille-pg` n'est pas activée) et n'affiche aucun avertissement multiréplique — la contrainte est portée par le déploiement
     (`DEC-1`, cf. ../../../controller/src/application.sdd).
 
 Must not:
@@ -67,4 +70,7 @@ Scenario: routes sous lymaille et pas ailleurs
   Then les routes de conversation n'existent que sous `/api/v1/lymaille`
 
 Tasks:
+  [x] Bump miryad-core 0.4.0 / lymaille 0.3 (2026-11-16) : `ManagerDeps` gagne `turn_lock`
+    (laissé absent, mono-réplique) ; les contournements des tickets livrés (#70 à #82) se retirent
+    dans les specs concernées, pas ici.
   [x] B6-B9 du chantier lymaille : code de montage — batteries validator vertes 2026-11-12.

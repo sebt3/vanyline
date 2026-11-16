@@ -449,12 +449,12 @@ Depends on:
     2026-11-13 dans le dépôt amont et les crates publiés), ce qui rend
     @resource_openapi inapplicable à ces entités — d'où les dix fragments manuels
     d'@openapi_spec (Exposes).
-  Crate externe `miryad-core` v0.3.1 (hors workspace, source absente du dépôt) —
+  Crate externe `miryad-core` v0.4.0 (hors workspace, source absente du dépôt) —
     @MiryadAuthState, @OidcClient, @auth_router, @resource_router, @resource_openapi,
     @swagger_ui_router, @miryad_core::migration::Migrator : surface subie, non specée
     (règle de `../../vanyline.sdd` : on spécifie notre usage de ce crate, pas le crate).
   ../Cargo.toml — nom du binaire `vanyline-app`, features structurantes : de
-    miryad-core `swagger-ui`, `workflow`, `mcp`, `lymaille`, `matrix` (version `0.3.1`,
+    miryad-core `swagger-ui`, `workflow`, `mcp`, `lymaille`, `matrix` (version `0.4.0`,
     `default-features = false`) ; feature `k8s` de vanyline-lib, `rustls`/`ring`,
     tower-http `fs`.
   ../../docs/architecture.md — sections « Backend web » (montée miryad-core, tables,

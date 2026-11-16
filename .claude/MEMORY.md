@@ -415,7 +415,7 @@ attaqué) :
 
 ## Chantier lymaille (2026-11-12) — où reprendre
 
-Stack posée : miryad-core **0.3.1** (features `lymaille` + `matrix`, `vynil-core` ≥ 0.9.1, lymaille 0.2.1). 0.3.0 ne compile
+Stack posée : miryad-core **0.4.0** (bump fait le 2026-11-16 : features `lymaille` + `matrix`, `vynil-core` ≥ 0.9.1, lymaille 0.3 ; tickets #70-#83 tous livrés, contournements encore à retirer spec par spec). Historique : 0.3.1 / lymaille 0.2.1. 0.3.0 ne compile
 pas avec `vynil-core` 0.9.1 : viser 0.3.1. Le bump n'exige aucune migration `vanyline_*` (migrations `miryad_lymaille_*` dans le
 `Migrator` de miryad-core, table de suivi propre).
 

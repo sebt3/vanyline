@@ -51,7 +51,7 @@ pub(crate) fn lymaille_shared_host(state: &AppState) -> Arc<VnlLymailleHost> {
 }
 
 /// Le `SessionManager` de l'app : deps d'assemblage de miryad-core avec l'hôte fourni au
-/// montage — `AssembleDeps::host` est le SEUL point où miryad-core 0.3.1 accepte l'hôte
+/// montage — `AssembleDeps::host` est le SEUL point où miryad-core 0.4.0 accepte l'hôte
 /// (`MiryadAuthState` ne porte aucun champ hôte) — secrets par variable d'environnement
 /// (`EnvSecretResolver`) et registre de ressources vide (les modules d'hôte ne sont pas
 /// montés dans cette tranche). Séam `pub(crate)` (jurisprudence `start_with`) : les Scenario
@@ -70,6 +70,7 @@ pub(crate) fn lymaille_session_manager(
     SessionManager::new(ManagerDeps {
         assemble,
         gate: TurnGate::new(),
+        turn_lock: None,
         limits: Limits::default(),
     })
 }

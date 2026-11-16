@@ -251,8 +251,8 @@ Must not:
 Depends on:
   std::env — @env::var et sa sémantique (@Err sur absente ET non-Unicode, @Ok sur vide :
     ce fichier traite le vide comme l'absence).
-  miryad-core (../Cargo.toml, version `0.3.1`, `default-features = false`, feature
-    `swagger-ui`) — @miryad_core::auth::OidcConfig (8 champs, toujours en 0.3.1, redirects
+  miryad-core (../Cargo.toml, version `0.4.0`, `default-features = false`, feature
+    `swagger-ui`) — @miryad_core::auth::OidcConfig (8 champs, toujours en 0.4.0, redirects
     retirés, timeouts obligatoires) ; consommé par ./main.rs::@OidcClient::new.
   ./main.rs — unique appelant de @from_env/@oidc_config au démarrage ; validations
     différées downstream (`"VNL-CFG-008"`, longueur du cookie `"VNL-CFG-007"`) et

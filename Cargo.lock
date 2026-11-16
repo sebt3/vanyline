@@ -3943,9 +3943,9 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lymaille"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be24f31a651396ce6a9f99103c522da6e3bb92277394394e357d209aced53ae8"
+checksum = "ca502c9f54bad5215a86ff283630e9b4f07c6667052cb9960993abb341728d25"
 dependencies = [
  "base64 0.23.1",
  "handlebars",
@@ -3959,6 +3959,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "ts-rs",
  "vynil-core",
  "yaml_serde",
 ]
@@ -4535,9 +4536,9 @@ dependencies = [
 
 [[package]]
 name = "miryad-core"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b6d2e914c2c623a0791556461fec644c0673d7be189f4c6ea11f10188509a80"
+checksum = "585c1478e9d8b9a3417b4ec4da0ca3aba0efaf609d7ff4181acf8b1ccb83ad39"
 dependencies = [
  "async-trait",
  "axum",
@@ -4562,6 +4563,7 @@ dependencies = [
  "rustls-pki-types",
  "sea-orm",
  "sea-orm-migration",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -10131,9 +10133,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.2"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 dependencies = [
  "zeroize_derive",
 ]

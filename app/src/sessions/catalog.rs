@@ -168,12 +168,8 @@ async fn publier_agent(
     nature: AgentKind,
     prompt: &str,
 ) -> Result<(), AppError> {
-    let definition = AgentDefinition::new(
-        id.to_string(),
-        nature,
-        prompt.to_string(),
-        PROFIL_MODELE.to_string(),
-    );
+    let definition = AgentDefinition::new(id.to_string(), nature, prompt.to_string())
+        .with_profile(PROFIL_MODELE.to_string());
     definition.validate().map_err(panne_crate)?;
     let brut = serde_json::to_value(&definition).map_err(panne_crate)?;
     let nature_texte = serde_json::to_value(definition.kind())
@@ -353,12 +349,14 @@ mod tests {
     #[tokio::test]
     async fn definition_administrateur_intacte() {
         let db = real_db().await;
-        let definition_admin = serde_json::to_value(AgentDefinition::new(
-            G_VANYLINE_CONFIG.to_string(),
-            AgentKind::Config,
-            "prompt administrateur".to_string(),
-            "profil-admin".to_string(),
-        ))
+        let definition_admin = serde_json::to_value(
+            AgentDefinition::new(
+                G_VANYLINE_CONFIG.to_string(),
+                AgentKind::Config,
+                "prompt administrateur".to_string(),
+            )
+            .with_profile("profil-admin".to_string()),
+        )
         .expect("la définition de l'administrateur se sérialise");
         agent::Entity::insert(agent::ActiveModel {
             id: NotSet,
@@ -367,6 +365,9 @@ mod tests {
             profile: Set("profil-admin".to_string()),
             definition: Set(definition_admin.clone()),
             created_at: Set(Utc::now()),
+            managed_by: NotSet,
+            managed_version: NotSet,
+            managed_digest: NotSet,
         })
         .exec(&db)
         .await
