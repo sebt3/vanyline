@@ -1,0 +1,61 @@
+Spec: Toolset — miroirs de la déclaration d'un toolset
+
+Platform: Rust/vanyline-app — serde, ts-rs (feature `ts-rs`)
+
+Purpose:
+  Les miroirs TypeScript de `lymaille::Toolset` et des types qu'il embarque (`Skill`,
+  `TypeRequirement`, `ParamDecl`, `RoleDecl`), pour l'écran d'édition d'un toolset : sa source Rhai,
+  ses skills, ses paramètres, ses rôles MCP et ses dépendances (`dsd/app/configuration.md#FR-5`).
+  Les colonnes `active` et `draft` d'une ligne de toolset portent chacune une déclaration complète.
+
+Owns:
+  ./toolset.rs
+
+References:
+  /dsd/app/configuration.md — `FR-3`, `FR-5`, `DEC-5`
+  ./mod.sdd — règles communes des miroirs
+  lymaille 0.2.1 : `toolsets/toolset.rs`, `toolsets/skill.rs`, `toolsets/version.rs`
+
+Exposes:
+  @Toolset — miroir de `lymaille::Toolset` : `name`, `description`, `version` (texte
+    `major.minor.patch`), `source` (texte Rhai), `skills`, `requirements`, `params`, `roles`,
+    `dependencies`. Les tables (`skills`, `requirements`, `params`, `roles`) sont des `BTreeMap` de
+    clé texte (type TypeScript `Record`), `dependencies` un ensemble trié de noms (tableau).
+  @Skill — `name`, `description`, `body`, `license`, `compatibility`, `metadata`, `annexes`.
+  @TypeRequirement — `name`, `minimum` (texte `major.minor.patch`).
+  @ParamDecl — `name`, `schema` (JSON), `default` facultatif.
+  @RoleDecl — `name`, `required`.
+  Mêmes règles de dérivation et de sérialisation que `./agent.sdd`.
+
+Must:
+  Sérialiser exactement comme le type de la crate (clés triées comprises) et accepter tout JSON
+    que la crate accepte en lecture.
+
+Must not:
+  Évaluer, compiler ou exécuter la source Rhai ; valider une version, un nom ou une valeur par
+    défaut (rôle de lymaille).
+
+Scenario: un toolset de la crate passe par le miroir sans changement
+  Given un `lymaille::Toolset` avec une source, deux skills dont une avec annexes, une exigence de
+    type, deux paramètres dont un avec valeur par défaut, un rôle requis et une dépendance
+  When il est sérialisé, lu comme @Toolset, sérialisé de nouveau
+  Then les JSON sont identiques
+
+Scenario: le miroir est accepté par la crate
+  Given le même @Toolset construit côté vanyline
+  When son JSON est lu comme `lymaille::Toolset`
+  Then la lecture réussit et l'aller-retour est identique
+
+Scenario: une version est un texte
+  Given un toolset de version 1.2.3
+  When le JSON du miroir est lu
+  Then `version` vaut `"1.2.3"` et le type TypeScript est une chaîne
+
+Depends on:
+  @serde, @ts_rs ; en tests : `lymaille`, `vynil-core` (`Semver`).
+
+Tasks:
+  [ ] `toolset.rs` : les miroirs et leurs trois tests de contrat.
+
+Done when:
+  Les trois Scenarios ont leurs tests.

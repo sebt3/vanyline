@@ -100,6 +100,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 |---|---|
 | `.claude/memory/reorientation-lymaille-dsd-2026-11.md` | **Réorientation du harnais LLM (2026-11-03), ouverte.** lymaille = cœur générique intégré dans `app`, vanyline = harnais dédié code ; contexte (Project/Sandbox) comme seul sélecteur de session, pas d'approbation en session ; modèle de menace de l'agent de code (effets bornés au niveau du pod) ; séparation stricte des rôles config/production. Spike lymaille×sandbox : le setup marche (données brutes non conservées, issues lymaille #1–#4 ouvertes). DSD installé, **ébauche `dsd/app.md` écrite (domaine `app` seul)**. **Domaine `cli` complet le 2026-11-07 : `dsd/cli.md` + 5 Solutions `dsd/cli/*` (hôte lymaille permanent, TUI conservé, `script`, `sync` de `.vanyline/`), inventaire dans `inventaire-vanyline-lymaille-2026-11.md`.** **Reste : discuter `dsd/app.md` puis écrire ses Solutions une à une**, session miryad-core (note de cadrage dans son dépôt), domaines sandbox (dont outillage SpecDD dans la toolbox JS)/controller/health plus tard, inventaire vanyline↔lymaille, tri de la branche état-final |
 | `.claude/memory/inventaire-vanyline-lymaille-2026-11.md` | **Inventaire vanyline↔lymaille (2026-11-07, à confirmer).** ~18 k lignes à retirer (lib sauf `k8s.rs`, cfgstore, agents système, ws/chat, conversations…), à conserver (sandbox, controller, crds, health, tools, mcp_domain), à réaligner (entités DB LLM, protocol, ui). **`lib` reste, allégée de sa partie LLM : c'est la librairie d'interface cluster/sandboxes (`k8s.rs`), décision du 2026-11-07 ; piste : y mettre aussi le client de la sandbox, partagé cli/app.** |
+| `.claude/memory/session-2026-11-13-specs-widgets-config-miryad.md` | **Session du 2026-11-13 — où reprendre.** Specs du cœur soldées, DSD `widgets` et `configuration`, specs `widgets` et `definitions` (miroirs ts-rs), 11 tickets miryad-core (#70-#83, livraison en cours côté développeur, contournements à retirer ensuite), fichiers non commités, règles de méthode confirmées (décisions dans les `.sdd`, chantier = pointeurs, spikes jetables). |
 | `.claude/memory/architecture-fondations.md` | Quatre composants, auth sandbox (JWT/SA TokenReview), toolchains K8s image volumes, kydah-code comme client |
 | `.claude/memory/harness-core.md` | Cœur LLM/MCP name-keyed de `vanyline-lib` (`ConfigStore`, `ChatEvent`, `SessionContext`) |
 | `.claude/memory/cli-harness.md` | Stockage CLI natif YAML deux couches (global + workspace) |
@@ -418,13 +419,14 @@ Stack posée : miryad-core **0.3.1** (features `lymaille` + `matrix`, `vynil-cor
 pas avec `vynil-core` 0.9.1 : viser 0.3.1. Le bump n'exige aucune migration `vanyline_*` (migrations `miryad_lymaille_*` dans le
 `Migrator` de miryad-core, table de suivi propre).
 
-Décisions prises avec le développeur : on construit **avec ce que livre la stack, sans autre aller-retour** vers miryad-core,
-lymaille ou vynil-core ; migration **destructive voulue**, aucune production, table propre (migrations d'origine retirées, bases
+Décisions prises avec le développeur : ~~on construit avec ce que livre la stack, sans autre aller-retour vers miryad-core~~
+(**abrogée le 2026-11-13** : le développeur corrige miryad-core d'abord, cadrage miryad-core#83 — voir
+`.claude/memory/session-2026-11-13-specs-widgets-config-miryad.md`) ; migration **destructive voulue**, aucune production, table propre (migrations d'origine retirées, bases
 de test à recréer) ; `app` mono-réplique pour les sessions ; contextes `H_` (Project/Sandbox) : `app` choisit l'agent par
 écran (`app/sessions#DEC-6`).
 
-- DSD écrits : `dsd/app/sessions.md`, `dsd/app/dashboards.md` (domaine `dsd/app.md`). Restent à écrire : `ui-actions`,
-  `widgets`, `artifacts`, `workflows`, `review`, `planning`, `configuration` (ordre proposé : `ui-actions`, `widgets`).
+- DSD écrits : `dsd/app/sessions.md`, `dsd/app/dashboards.md`, `dsd/app/widgets.md`, `dsd/app/configuration.md` (ce dernier **non
+  commité, à relire**) — domaine `dsd/app.md`. Restent à écrire : `ui-actions`, `artifacts`, `workflows`, `review`, `planning`.
 - **Tâches déléguées à Qwen : `docs/chantier-lymaille.md`** (40 tâches, vagues A à G). Qwen ne décide rien : ses questions
   sont des `[?]` dans les `Tasks` des specs concernées. **Première chose à faire à la reprise : relire ces `[?]`** (elles
   guident la suite), puis trancher.
@@ -433,17 +435,8 @@ de test à recréer) ; `app` mono-réplique pour les sessions ; contextes `H_` (
   20261023_00000{1,2}) ; entités restantes 6 ; `AppError` 25 variantes ; l'app ne dépend plus de
   cfgstore ni tools. OpenAPI des ressources lymaille = fragments manuels (ToSchema absent de
   miryad-core 0.3.1 — arbitré ; ticket amont dans `main.sdd` Tasks).
-- **[?] à ratifier (récap)** : index de garde des personnalisations en expressions
-  COALESCE (`migration/m20261113_000001_create_vanyline_dashboards.sdd`) ; doublon de
-  personnalisation rendu 500 par miryad-core et non 409 (`db/entities/dashboards.sdd`) ;
-  `VNL-APP-DSH-008` rendu 500 par le barème alors que Raises dit 400 (`dashboards/resolve.sdd`) ;
-  colonne `sandbox` ajoutée au trio de clés DEC-3 (`db/entities/dashboards.sdd`) ;
-  bornes `Layout.columns` [4,24] et `DashboardDef.id` Option<i32 (`dashboards/model.sdd`). encodage `H_` + frontière Denied/HostError (`host.sdd`) ; create-only SQL
-  + profil « default » (`sessions/catalog.sdd`) ; valeur `trigger` (`workflow/runtime.sdd`) ;
-  `spec.replicas` (`application.sdd`) ; dette passe-cluster step `subagent` (`steps/mod.sdd`) ;
-  sort de `default_model` d'app_settings (forme `{provider_id, model}` sans référent depuis C3 —
-  avant vague E écran paramètres) ; serveurs `forward` en batch step rhai (impl = énumérer + erreur
-  à l'appel, le `[?]` proposait écarter) ; tests orphelins hooks agents système (`agents.sdd`) ;
-  `[?]` WS-order et OIDC/any de `api/mod.sdd` ; dette allows `tooling.sdd`.
+- **Les `[?]` du cœur sont soldés** (2026-11-13) : réponses écrites dans les `.sdd` concernés (lots 1 à 3 de la session, commits
+  `9fad06d`, `60a68e2`, `29739c4`). Restent ouverts : 2 `[?]` de `sessions/catalog.sdd` (profil par défaut), `VNL-SBX-002`
+  (`error.sdd`), besoins du widget `chat` (`dashboards/registry.sdd`) — détail et suite dans la note de session ci-dessus.
 - Limites connues portées par le DSD : événements `Host` non rejoués, horodatage d'historique approximatif, tableaux non
   partagés entre utilisateurs (`dashboards#DEC-4`).

@@ -1,0 +1,55 @@
+Spec: Provider — miroir de la définition d'un fournisseur d'inférence
+
+Platform: Rust/vanyline-app — serde, ts-rs (feature `ts-rs`)
+
+Purpose:
+  Le miroir TypeScript de `lymaille::Provider`, pour l'écran des fournisseurs
+  (`dsd/app/configuration.md#FR-3`, `FR-4`). Un fournisseur porte des références seulement : un
+  nom, un type, une adresse et une **référence d'authentification** (nom de variable
+  d'environnement) — jamais de secret.
+
+Owns:
+  ./provider.rs
+
+References:
+  /dsd/app/configuration.md — `FR-3`, `FR-4`, `CON-4`, `DEC-4`
+  ./mod.sdd — règles communes des miroirs
+  lymaille 0.2.1 : `agents/provider.rs`
+
+Exposes:
+  @Provider — miroir de `lymaille::Provider` : `name`, `kind`, `address`, `auth` facultatif (la
+    référence), `level`.
+  @ProviderLevel — miroir du type homonyme (niveau du fournisseur).
+  Mêmes règles de dérivation et de sérialisation que `./agent.sdd`.
+
+Must:
+  Sérialiser exactement comme le type de la crate et accepter tout JSON que la crate accepte.
+  Ne porter aucun champ de clé d'API : le champ `auth` est une référence lisible, pas un secret.
+
+Must not:
+  Valider une adresse, un type ou une référence (la crate refuse une adresse qui porte des
+    identifiants ou une référence qui ressemble à un jeton).
+
+Scenario: un fournisseur de la crate passe par le miroir sans changement
+  Given un `lymaille::Provider` avec une référence d'authentification, puis un autre sans
+  When chacun est sérialisé, lu comme @Provider, sérialisé de nouveau
+  Then les JSON sont identiques, une référence absente reste absente
+
+Scenario: le miroir est accepté par la crate
+  Given un @Provider construit côté vanyline
+  When son JSON est lu par la crate
+  Then la lecture réussit et l'aller-retour est identique
+
+Scenario: aucun champ de secret
+  Given le fichier TypeScript exporté
+  When la déclaration de `Provider` est lue
+  Then elle ne contient aucun champ `api_key`, `key`, `token` ni `secret`
+
+Depends on:
+  @serde, @ts_rs ; en tests : `lymaille`.
+
+Tasks:
+  [ ] `provider.rs` : le miroir et ses trois tests.
+
+Done when:
+  Les trois Scenarios ont leurs tests.

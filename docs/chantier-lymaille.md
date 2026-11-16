@@ -173,6 +173,9 @@ Code, **séquentiel**, après A2 et la spec correspondante :
   `app/src/config.sdd`, `app/src/api/mod.sdd`, `app/src/main.sdd` et `app/src/sessions/catalog.sdd` ; les décisions vivent dans ces
   specs et dans `dsd/app/widgets.md`. Les écrans projet et sandbox attendent miryad-core#70 ; l'interruption réelle attend
   miryad-core#71.
+- [ ] **H2 — Miroirs ts-rs de la configuration lymaille** (avant les écrans de configuration). Source : les tâches `[ ]` de
+  `app/src/definitions/*.sdd` ; les décisions vivent dans ces specs et dans `dsd/app/configuration.md` (`DEC-5`). Chaque miroir est
+  gardé par un test de contrat contre le type de la crate ; le retrait des miroirs attend l'export amont (miryad-core#72).
 - [ ] **G6 — Moteur de rendu et widgets standard** (après G5 et G4b) : un widget à la fois, chacun avec ses tests.
 - [ ] **G7 — Écrans par défaut** : accueil, projet et vue d'ensemble de sandbox en définitions par défaut ; retrait de
   `HomeDashboard.vue`, `ProjectDashboard.vue` et des specs et tests associés (`DEC-7`). `FR-9` (tableau éphémère) attend B8.

@@ -1,0 +1,71 @@
+Spec: Agent — miroirs du profil de modèle et de la définition d'agent
+
+Platform: Rust/vanyline-app — serde, ts-rs (feature `ts-rs`)
+
+Purpose:
+  Les miroirs TypeScript de `lymaille::ModelProfile` et `lymaille::AgentDefinition`, avec les types
+  qu'ils embarquent (`SamplingParams`, `ReplayMode`, `AgentKind`, `SandboxLimits`), pour les écrans
+  de profils et d'agents (`dsd/app/configuration.md#FR-3`). Un profil nomme un fournisseur et ne
+  porte ni adresse ni secret ; un agent désigne son modèle par le nom d'un profil.
+
+Owns:
+  ./agent.rs
+
+References:
+  /dsd/app/configuration.md — `FR-3`, `DEC-5`
+  ./mod.sdd — règles communes des miroirs
+  lymaille 0.2.1 : `agents/definition.rs`, `agents/profile.rs` (types reflétés)
+
+Exposes:
+  @ModelProfile — miroir de `lymaille::ModelProfile` : `name`, `provider`, `model`, et les champs
+    facultatifs `context_size`, `max_response`, `tools`, `sampling`, `tokenization_hint`,
+    `concurrency`, `replay`.
+  @AgentDefinition — miroir de `lymaille::AgentDefinition` : `id`, `kind`, `prompt`, `profile`, et
+    les champs `sampling`, `modules`, `toolsets`, `sandbox`, `context_strategy`, `delegable`,
+    `output_schema`.
+  @AgentKind — énumération `snake_case` : `work` (l'alias lu `main` est accepté), `config`, `sub`.
+  @SamplingParams, @ReplayMode, @SandboxLimits — miroirs des types homonymes de la crate.
+  Chaque miroir : `pub` champs, derives `Debug`, `Clone`, `PartialEq`, `Serialize`, `Deserialize`,
+    `TS` (feature `ts-rs`) ; mêmes noms de champs, mêmes `rename`, `alias`, `default` et
+    `skip_serializing_if` que la crate (un champ facultatif absent reste absent du JSON).
+    Une durée (`SandboxLimits`) garde la forme sérialisée par la crate ; le type TypeScript la
+    reflète exactement, `#[ts(type = …)]` seulement si ts-rs ne la dérive pas.
+
+Must:
+  Sérialiser exactement comme le type de la crate : pour toute valeur construite par la crate, le
+    JSON du miroir est identique au JSON de la crate.
+  Accepter tout JSON que la crate accepte en lecture (alias compris).
+
+Must not:
+  Valider quoi que ce soit (nom, borne, existence d'un profil) : c'est le rôle des hooks.
+
+Scenario: un profil de la crate passe par le miroir sans changement
+  Given un `lymaille::ModelProfile` construit avec tous ses champs facultatifs, puis un autre
+    sans aucun
+  When chacun est sérialisé, lu comme @ModelProfile, sérialisé de nouveau
+  Then les deux JSON sont identiques, et un champ absent reste absent
+
+Scenario: une définition d'agent de la crate passe par le miroir sans changement
+  Given une `lymaille::AgentDefinition` de nature `config` avec `toolsets`, `delegable`, `sampling`,
+    `sandbox` et un `output_schema`
+  When le même aller-retour est fait
+  Then les JSON sont identiques
+
+Scenario: le miroir est accepté par la crate
+  Given un @AgentDefinition et un @ModelProfile construits côté vanyline
+  When leur JSON est lu comme `lymaille::AgentDefinition` et `lymaille::ModelProfile`
+  Then la lecture réussit et un nouvel aller-retour est identique
+
+Scenario: l'alias historique de nature est lu
+  Given le JSON d'une définition dont `kind` vaut `"main"`
+  When il est lu comme @AgentDefinition
+  Then `kind` vaut `work` et la ré-émission porte `"work"`
+
+Depends on:
+  @serde, @ts_rs ; en tests : `lymaille`.
+
+Tasks:
+  [ ] `agent.rs` : les miroirs et leurs quatre tests de contrat.
+
+Done when:
+  Les quatre Scenarios ont leurs tests.
