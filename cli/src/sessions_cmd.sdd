@@ -45,4 +45,4 @@ Scenario: suppression
   Then état et journal supprimés
 
 Tasks:
-  [ ] `sessions_cmd.rs` et ses tests — E7.
+  [x] `sessions_cmd.rs` et ses tests — E7.

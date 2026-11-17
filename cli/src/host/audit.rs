@@ -108,6 +108,16 @@ impl AuditLog {
     }
 
     /// Chemin du journal de `session`. Refuse un identifiant qui ne serait pas un nom de fichier.
+    /// Supprime le journal de `session` ; `false` s'il n'existait pas (`sessions_cmd.sdd`, `delete`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::Invalid`] when the identifier is not a file name, and [`HostError::Io`] when the removal
+    /// fails.
+    pub fn delete(&self, session: &SessionId) -> Result<bool, HostError> {
+        files::remove_file(&self.chemin(session)?)
+    }
+
     fn chemin(&self, session: &SessionId) -> Result<PathBuf, HostError> {
         if !files::est_un_nom_de_fichier(session.as_str()) {
             return Err(HostError::Invalid {

@@ -25,6 +25,8 @@ Exposes:
     `Result<Vec<AuditEntry>, HostError>` (une lecture en échec ne ressemble jamais à un journal vide ;
     une ligne complète invalide est @HostError::Format, une dernière ligne sans saut de ligne est
     ignorée).
+  @AuditLog::delete(id: &SessionId) -> `Result<bool, HostError>` : supprime le journal d'une session (appelée
+    par `../sessions_cmd.sdd`).
   @AuditSink — POSSÈDE son @AuditLog (`Clone`, aucun lifetime : lymaille impose `Arc<dyn EventSink>` `'static`) et implémente `lymaille::EventSink` (synchrone, ne peut pas échouer vers lymaille) : suit
     le tour courant par `EventKind::TurnStarted`, ne retient que `EventKind::Script`, les écrit par
     @AuditLog::record et laisse passer les autres événements au sink suivant. Les échecs d'écriture

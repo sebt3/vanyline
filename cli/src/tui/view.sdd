@@ -101,4 +101,4 @@ Scenario: saisie_adaptative
   Then la zone de saisie occupe 8 lignes au plus et fait défiler son contenu
 
 Tasks:
-  [ ] `view.rs` adapté (E7) : éléments `Script` et `Subagent`, barre d'état ; tests `TestBackend` de chaque Scenario.
+  [x] `view.rs` adapté (E7) : éléments `Script` et `Subagent`, barre d'état ; tests `TestBackend` de chaque Scenario.

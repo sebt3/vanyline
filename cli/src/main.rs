@@ -38,6 +38,7 @@ mod model_cmd;
 mod owner_cmd;
 mod project_cmd;
 mod sandbox_cmd;
+mod sessions_cmd;
 mod skill_cmd;
 mod toolset_cmd;
 
@@ -53,12 +54,9 @@ use vanyline_cfgstore::layers::{config_entry_source, file_entry_source, skill_en
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-    /// Agent name to use (REPL or `run`)
-    #[arg(short, long, global = true)]
-    agent: Option<String>,
-    /// Continue the active conversation instead of starting a new one
-    #[arg(short = 'c', long = "continue", global = true)]
-    continue_active: bool,
+    /// Dépôt dont le `.vanyline/` est le niveau partagé (`main.sdd`, `--repo`).
+    #[arg(long, global = true)]
+    repo: Option<std::path::PathBuf>,
     /// Namespace K8s target (owner/project/sandbox). Overrides `defaults.namespace`.
     /// Désigne le NAMESPACE D'APPLICATION (CR Owner/Application) ; le namespace
     /// de chaque Owner en est dérivé (`<app-ns>-<owner>`, UN OWNER = UN
@@ -70,16 +68,29 @@ struct Cli {
     /// par `--toolbox` (UN OWNER = UN NAMESPACE, 2026-10-04).
     #[arg(long, global = true)]
     owner: Option<String>,
-    /// Nom de la sandbox a utiliser comme toolbox d'inference (remplace les
-    /// `local_tools` par les tools MCP de la sandbox). Surcharge
-    /// `defaults.toolbox`.
-    #[arg(long, global = true)]
-    toolbox: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// One-shot message to an LLM agent
+    /// Chat interactif plein écran avec l'agent d'un projet
+    Chat {
+        /// Projet du contexte de travail
+        #[arg(long)]
+        context: String,
+        /// Sandbox de travail (worktree lu pour le compteur de fichiers modifiés)
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Reprendre la dernière session du projet
+        #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+        continue_: bool,
+        /// Reprendre une session précise
+        #[arg(long)]
+        resume: Option<String>,
+    },
+    /// Lister ou supprimer les sessions
+    #[command(subcommand)]
+    Sessions(sessions_cmd::Commands),
+    /// One-shot message to an LLM agent (provisoire : voir lot 3)
     Run {
         message: String,
         /// Override du modèle de l'agent pour ce run (sans toucher la config)
@@ -193,7 +204,7 @@ mod config_cmd {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -206,45 +217,42 @@ async fn main() {
 
     match cli.command {
         None => {
-            let toolbox = resolve_toolbox_target(
-                cli.toolbox.clone(),
-                cli.namespace.clone(),
-                cli.owner.clone(),
-            )
-            .await;
-            chat::run(
-                None,
-                cli.agent,
-                cli.continue_active,
-                toolbox,
-                None,
-                false,
-                None,
-            )
-            .await;
+            use clap::CommandFactory;
+            let _ = Cli::command().print_help();
+            return std::process::ExitCode::from(2);
         }
-        Some(Commands::Run {
-            message,
-            model,
-            timeout,
-            json,
+        Some(Commands::Chat {
+            context,
+            sandbox,
+            continue_,
+            resume,
         }) => {
-            let toolbox = resolve_toolbox_target(
-                cli.toolbox.clone(),
-                cli.namespace.clone(),
-                cli.owner.clone(),
-            )
-            .await;
-            chat::run(
-                Some(message),
-                cli.agent,
-                cli.continue_active,
-                toolbox,
-                timeout,
-                json,
-                model,
-            )
-            .await;
+            let args = chat::ChatArgs {
+                context,
+                sandbox,
+                continue_,
+                resume,
+            };
+            let global = chat::GlobalOptions {
+                owner: cli.owner.clone(),
+                repo: cli.repo.clone(),
+                namespace: cli.namespace.clone(),
+            };
+            return exit_code::from_outcome(chat::run_chat(args, global).await);
+        }
+        Some(Commands::Sessions(commande)) => {
+            return exit_code::from_outcome(sessions_cmd::run_sessions(
+                commande,
+                cli.repo.as_deref(),
+            ));
+        }
+        Some(Commands::Run { .. }) => {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "run : pas encore disponible dans cette version (voir lot 3)"
+            );
+            return std::process::ExitCode::from(1);
         }
         Some(Commands::Conversations(cmd)) => run_conversation(cmd),
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
@@ -270,6 +278,7 @@ async fn main() {
         Some(Commands::K8sProject(cmd)) => run_project_k8s(cmd, cli.namespace, cli.owner).await,
         Some(Commands::K8sSandbox(cmd)) => run_sandbox_k8s(cmd, cli.namespace, cli.owner).await,
     }
+    std::process::ExitCode::SUCCESS
 }
 
 // tooling.sdd D6b — canal rendu contracté : §Returns « Handlers de config »
@@ -686,55 +695,6 @@ async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8
             eprintln!("{e}");
             std::process::exit(1);
         })
-}
-
-/// Cible du chat toolbox : URL MCP résolue, Owner (nom requis par
-/// `require_owner` — le jeton de toolbox se demande à l'Owner, 2026-10-08)
-/// et client K8s DÉJÀ construit pour la résolution, partagé par le chat pour
-/// ses `owner_token` par tour (pas de seconde découverte, pas de second
-/// cache de jetons).
-pub struct ToolboxTarget {
-    /// URL MCP interne de la sandbox (`http://sandbox-{name}.{ns}.svc:3000/mcp`).
-    pub url: String,
-    /// Nom de l'Owner dont le namespace porte la sandbox — cible des
-    /// `owner_token` par tour.
-    pub owner: String,
-    /// Client K8s partagé avec la résolution (le cache de jetons est le sien).
-    pub client: vanyline_lib::k8s::VnlK8sClient,
-}
-
-/// Resout la cible toolbox du chat, ou `None` si aucune toolbox n'est
-/// demandée (ni `--toolbox`, ni `defaults.toolbox`) — dans ce cas, PAS
-/// d'appel K8s du tout (coherent avec "les commandes non-K8s continuent de
-/// fonctionner", meme principe que `discover_k8s_client` mais applique ici au
-/// chemin chat par defaut).
-///
-/// Quand une toolbox est demandee, `--owner` est requis : l'URL MCP se resout
-/// dans le namespace de l'Owner (`<app-ns>-<owner>`, UN OWNER = UN NAMESPACE
-/// 2026-10-04) et le jeton presente a la sandbox se demande a cet Owner
-/// (2026-10-08). Le client construit ici est PARTAGE dans la cible : le chat
-/// l'utilise pour ses `owner_token` par tour, sans seconde decouverte.
-async fn resolve_toolbox_target(
-    toolbox_flag: Option<String>,
-    namespace: Option<String>,
-    owner_flag: Option<String>,
-) -> Option<ToolboxTarget> {
-    let store = discover_fs_store();
-    let name = toolbox_flag.or_else(|| config::configured_toolbox(store.layers()))?;
-    let owner = require_owner(owner_flag);
-    let client = discover_k8s_client(namespace).await;
-    // tooling.sdd D6b — terminaison contractée : §Handles @resolve_toolbox_target
-    // « @client.sandbox_mcp_url(&owner, &name) — échec → stderr + exit 1 » et
-    // §Raises (VNL-K8S-001, message @Display sans reformatage local).
-    #[allow(clippy::print_stderr)]
-    let url = client
-        .sandbox_mcp_url(&owner, &name)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(1);
-        });
-    Some(ToolboxTarget { url, owner, client })
 }
 
 /// Nom d'Owner requis par les commandes project/sandbox et la toolbox : sans

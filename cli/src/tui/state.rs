@@ -1,74 +1,100 @@
 //! Modèle du chat interactif et mise à jour pure — contrat complet : `./state.sdd`.
 //!
-//! Architecture « Elm » : `update(state, action) -> (state, Vec<Effect>)`,
-//! sans aucune I/O, horloge ni aléa. La transcription, l'état d'attente, le
-//! défilement, le panneau de tâches, l'historique et la politique des touches
-//! vivent ici ; tout contact terminal/disque/réseau est un [`Effect`] exécuté
-//! par `./mod.rs`.
+//! Architecture « Elm » : `update(state, action) -> (state, Vec<Effect>)`, sans
+//! aucune I/O, horloge ni aléa. La transcription, l'état d'attente, le défilement,
+//! le panneau de tâches, l'historique et la politique des touches vivent ici ;
+//! tout contact terminal/disque/réseau est un [`Effect`] exécuté par `./mod.rs`.
+//! Les événements de session sont les [`Event`] de lymaille (`dsd/cli/chat.md#DEC-1`).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use vanyline_lib::VnyError;
-use vanyline_lib::event::{ChatEvent, ChatTurnResult};
+use lymaille::{Event, EventKind, Outcome, SessionId};
+
+use crate::host::session_index::SessionEntry;
 
 use crate::tui::editor::{self, EditCommand, EditorState};
+
+/// Période, en ticks de 100 ms, du sondage des sous-agents (`Tick` émet `PollRuns`).
+const POLL_EVERY_TICKS: u64 = 10;
 
 /// Niveau d'une `Notice` dans la transcription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeLevel {
     /// Information.
     Info,
-    /// Avertissement (ex. serveur MCP indisponible).
+    /// Avertissement (ex. reconnexion MCP, nouvelle tentative).
     Warn,
     /// Erreur (jamais silencieuse).
     Error,
 }
 
+/// État d'une ligne de sous-agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStatus {
+    /// Le run est en cours.
+    // Construit par le sondage des runs, branché quand session_open exposera le registre (`tui/mod.sdd`, [?]).
+    #[allow(dead_code)]
+    Running,
+    /// Le run est terminé avec cette issue.
+    Ended(Outcome),
+    /// Le run a été interrompu à la restauration de la session principale.
+    Interrupted,
+}
+
+/// Une ligne de sous-agent telle que le sondage des runs la rapporte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLine {
+    /// Identifiant du run.
+    pub run: String,
+    /// Nom du sous-agent.
+    pub agent: String,
+    /// Statut courant du run.
+    pub status: SubagentStatus,
+}
+
 /// Élément de la transcription du chat.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
-    /// Message de l'utilisateur.
-    User(String),
+    /// Message de l'utilisateur ; `during_turn` s'il a été envoyé pendant un tour.
+    User {
+        /// Texte du message.
+        text: String,
+        /// Envoyé pendant un tour (injecté dans le tour en cours).
+        during_turn: bool,
+    },
     /// Bloc assistant (texte markdown en cours ou terminé).
     Assistant {
         /// Texte accumulé.
         text: String,
-        /// `true` après `Done` (le bloc est fermé).
+        /// `true` après `TurnEnded` (le bloc est fermé).
         done: bool,
     },
-    /// Raisonnement du modèle (replié par défaut).
-    Reasoning {
-        /// Texte accumulé.
-        text: String,
-        /// Replié/déplié.
+    /// Une exécution de script, repliée en une ligne (`dsd/cli.md#DEC-8`).
+    Script {
+        /// Rang de l'exécution dans le tour, à partir de 1.
+        seq: u64,
+        /// Fonctions MCP appelées par le script.
+        functions: Vec<String>,
+        /// Durée en millisecondes.
+        duration_ms: u64,
+        /// Succès (sans erreur).
+        ok: bool,
+        /// Erreur du script, masquée, s'il y en a une.
+        error: Option<String>,
+        /// Texte complet du script.
+        script: String,
+        /// Sortie (résultat) du script, masquée et bornée par lymaille.
+        output: String,
+        /// Déplié.
         expanded: bool,
     },
-    /// Appel d'outil et son résultat (replié par défaut).
-    ToolCall {
-        /// `internal_call_id` de corrélation.
-        id: String,
-        /// Nom de l'outil.
-        name: String,
-        /// Arguments (JSON compact).
-        args: String,
-        /// Résultat, une fois reçu.
-        result: Option<String>,
-        /// Le résultat portait `is_error`.
-        is_error: bool,
-        /// Replié/déplié.
-        expanded: bool,
-    },
-    /// Tour d'un sous-agent, éléments imbriqués.
+    /// Ligne de statut d'un sous-agent, rafraîchie par sondage.
     Subagent {
-        /// Identifiant du sous-agent.
-        id: String,
-        /// Nom de l'agent invoqué.
+        /// Identifiant du run.
+        run: String,
+        /// Nom du sous-agent.
         agent: String,
-        /// Tâme confiée.
-        task: String,
-        /// Événements imbriqués du sous-agent.
-        items: Vec<TranscriptItem>,
-        /// Terminé (`SubagentEnd` reçu).
-        done: bool,
+        /// Statut.
+        status: SubagentStatus,
     },
     /// Notification info/avertissement/erreur (visible, jamais avalée).
     Notice {
@@ -77,7 +103,7 @@ pub enum TranscriptItem {
         /// Texte.
         text: String,
     },
-    /// Tour interrompu par l'utilisateur.
+    /// Tour interrompu par l'utilisateur ; le texte déjà reçu est conservé.
     Interrupted,
 }
 
@@ -115,22 +141,31 @@ impl Default for Scroll {
     }
 }
 
-/// Entrée du panneau des tâches (relue des appels d'outil de tâches).
+/// Entrée du panneau des tâches, telle que lue depuis la todo de la session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoItem {
     /// Description de la tâche.
     pub content: String,
-    /// Statut (`pending`/`in_progress`/`done`…).
+    /// Statut (`pending`, `in_progress`, `done`).
     pub status: String,
 }
 
 /// Cumul des jetons d'usage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
-    /// Jetons d'entrée cumulés.
-    pub input: u64,
-    /// Jetons de sortie cumulés.
-    pub output: u64,
+    /// Jetons du prompt cumulés.
+    pub prompt: u64,
+    /// Jetons de la complétion cumulés.
+    pub completion: u64,
+}
+
+/// Sélecteur de session ouvert par `/sessions`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Picker {
+    /// Sessions du contexte, la plus récente d'abord.
+    pub entries: Vec<SessionEntry>,
+    /// Entrée sélectionnée.
+    pub selected: usize,
 }
 
 /// État complet du chat (modèle pur).
@@ -140,9 +175,9 @@ pub struct AppState {
     pub transcript: Vec<TranscriptItem>,
     /// Attente d'un tour.
     pub status: Status,
-    /// Zone de saisie.
+    /// Zone de saisie (et son historique).
     pub input: EditorState,
-    /// Historique de défilement.
+    /// Défilement de la transcription.
     pub scroll: Scroll,
     /// Tâches du panneau.
     pub todo: Vec<TodoItem>,
@@ -150,58 +185,49 @@ pub struct AppState {
     pub todo_visible: bool,
     /// Jetons cumulés.
     pub usage: Usage,
-    /// Agent courant (le changement prend effet au tour suivant).
+    /// Agent du contexte.
     pub agent: String,
-    /// Identifiant de conversation affiché.
-    pub conversation_id: String,
-    /// Titre de conversation.
+    /// Identifiant de la session affiché.
+    pub session_id: String,
+    /// Titre de la session.
     pub title: Option<String>,
-    /// Résumé `git diff` de la barre d'état.
-    pub git_summary: Option<String>,
+    /// Nombre de fichiers modifiés du worktree (`None` sans sandbox).
+    pub dirty_files: Option<usize>,
     /// Premier Ctrl+C au repos armé : le second quitte.
     pub quit_armed: bool,
-    /// Taille du terminal (lignes colonnes).
+    /// Taille du terminal (colonnes, lignes).
     pub size: (u16, u16),
-    /// Horloge interne avancée par `Action::Tick` (animation d'attente).
+    /// Horloge interne avancée par `Action::Tick` (animation, sondage).
     pub tick: u64,
     /// Index (transcription) de l'élément repliable sélectionné par Tab.
-    pub selected: Option<usize>,
+    pub selection: Option<usize>,
     /// Version de la transcription (clé du cache de lignes de la vue).
     pub revision: u64,
+    /// Appels MCP du script en cours, rattachés au prochain `Script`.
+    pub pending_functions: Vec<String>,
+    /// Sélecteur de session ouvert, s'il y en a un.
+    pub picker: Option<Picker>,
 }
 
 impl AppState {
-    /// État initial : transcription vide, agent et conversation donnés.
+    /// État initial : transcription vide, agent et session donnés.
     #[must_use]
     pub fn new(
         agent: impl Into<String>,
-        conversation_id: String,
+        session_id: String,
         title: Option<String>,
         size: (u16, u16),
     ) -> Self {
         Self {
-            transcript: Vec::new(),
-            status: Status::Idle,
-            input: EditorState::new(),
-            scroll: Scroll::default(),
-            todo: Vec::new(),
-            todo_visible: false,
-            usage: Usage::default(),
             agent: agent.into(),
-            conversation_id,
+            session_id,
             title,
-            git_summary: None,
-            quit_armed: false,
             size,
-            tick: 0,
-            selected: None,
-            revision: 0,
+            ..Self::default()
         }
     }
 }
 
-/// Valeurs par défaut (agent et conversation vides) — pratique pour déplacer
-/// un état hors d'une variable (`std::mem::take`) dans la boucle et les tests.
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -213,21 +239,22 @@ impl Default for AppState {
             todo_visible: false,
             usage: Usage::default(),
             agent: String::new(),
-            conversation_id: String::new(),
+            session_id: String::new(),
             title: None,
-            git_summary: None,
+            dirty_files: None,
             quit_armed: false,
             size: (80, 24),
             tick: 0,
-            selected: None,
+            selection: None,
             revision: 0,
+            pending_functions: Vec::new(),
+            picker: None,
         }
     }
 }
 
-/// Action appliquée par [`update`] — tout événement extérieur devient une
-/// action (clavier, collage, redimension, souris, jeton d'agent, horloge).
-/// Pas de derive : `ChatTurnResult`/`VnyError` ne sont ni `Clone` ni `Debug`.
+/// Action appliquée par [`update`] : tout événement extérieur devient une action.
+#[derive(Debug)]
 pub enum Action {
     /// Touche du clavier.
     Key(KeyEvent),
@@ -236,15 +263,25 @@ pub enum Action {
     /// Redimensionnement (colonnes, lignes).
     Resize(u16, u16),
     /// Souris (molette).
-    Mouse(crossterm::event::MouseEventKind),
+    Mouse(MouseEventKind),
     /// Horloge de rafraîchissement (100 ms).
     Tick,
-    /// Événement de l'agent reçu du [`TuiSink`](crate::tui::TuiSink).
-    Agent(ChatEvent),
-    /// Fin de la tâche de tour (succès ou erreur).
-    TurnFinished(Result<ChatTurnResult, VnyError>),
-    /// Résumé `git diff` rafraîchi (barre d'état).
-    GitSummary(Option<String>),
+    /// Événement de la session reçu du [`TuiSink`](crate::tui::TuiSink).
+    Session(Event),
+    /// Fin du tour : issue de lymaille, ou erreur de la tâche (`VNL-INT-001`…).
+    TurnFinished(Result<Outcome, String>),
+    /// Liste de tâches relue depuis la session.
+    Todo(Vec<TodoItem>),
+    /// Nombre de fichiers modifiés du worktree, `None` sans sandbox ou en cas d'échec.
+    DirtyFiles(Option<usize>),
+    /// Sondage des sous-agents.
+    // Produit par le sondage des runs, branché avec le registre (`tui/mod.sdd`, [?]).
+    #[allow(dead_code)]
+    Runs(Vec<RunLine>),
+    /// Sessions du contexte, pour le sélecteur de `/sessions`.
+    SessionList(Vec<SessionEntry>),
+    /// Erreur asynchrone non bloquante (worktree, todo, sessions) : notice d'avertissement.
+    Warning(String),
 }
 
 /// Commande produite par [`update`] et exécutée par la boucle de `./mod.rs`.
@@ -252,18 +289,24 @@ pub enum Action {
 pub enum Effect {
     /// Lancer un tour avec ce message.
     StartTurn(String),
+    /// Injecter ce message dans le tour en cours (entrée utilisateur de lymaille).
+    InjectInput(String),
     /// Annuler le tour en cours.
     CancelTurn,
-    /// Persister la conversation (uniquement après un tour réussi).
-    Save,
     /// Quitter le TUI.
     Quit,
-    /// Rafraîchir le résumé `git diff`.
-    RefreshGit,
-    /// Nouvelle conversation.
-    NewConversation,
-    /// Changer d'agent au tour suivant.
-    SwitchAgent(String),
+    /// Relire la liste de tâches de la session.
+    RefreshTodo,
+    /// Rafraîchir le nombre de fichiers modifiés du worktree.
+    RefreshDirtyFiles,
+    /// Sonder les runs des sous-agents.
+    PollRuns,
+    /// Nouvelle session neuve du contexte.
+    NewSession,
+    /// Lister les sessions du contexte.
+    ListSessions,
+    /// Reprendre cette session.
+    ResumeSession(SessionId),
 }
 
 /// Mise à jour pure et TOTALE : toute séquence d'actions laisse un état valide.
@@ -290,28 +333,81 @@ pub fn update(mut state: AppState, action: Action) -> (AppState, Vec<Effect>) {
         }
         Action::Tick => {
             state.tick = state.tick.wrapping_add(1);
-            (state, Vec::new())
-        }
-        Action::Agent(event) => {
-            agent_update(&mut state, event);
-            (state, Vec::new())
-        }
-        Action::TurnFinished(result) => {
-            state.status = Status::Idle;
-            let effects = match result {
-                Ok(_) => vec![Effect::Save, Effect::RefreshGit],
-                Err(e) => {
-                    push_notice(&mut state, NoticeLevel::Error, e.to_string());
-                    Vec::new()
-                }
+            let effects = if state.tick.is_multiple_of(POLL_EVERY_TICKS)
+                && any_subagent_running(&state.transcript)
+            {
+                vec![Effect::PollRuns]
+            } else {
+                Vec::new()
             };
             (state, effects)
         }
-        Action::GitSummary(summary) => {
-            state.git_summary = summary;
+        Action::Session(event) => {
+            let effects = session_update(&mut state, event.kind);
+            (state, effects)
+        }
+        Action::TurnFinished(result) => turn_finished(state, result),
+        Action::Todo(items) => {
+            state.todo = items;
+            (state, Vec::new())
+        }
+        Action::DirtyFiles(count) => {
+            state.dirty_files = count;
+            (state, Vec::new())
+        }
+        Action::Runs(lines) => {
+            for line in lines {
+                apply_run_line(&mut state, line);
+            }
+            (state, Vec::new())
+        }
+        Action::Warning(text) => {
+            push_notice(&mut state, NoticeLevel::Warn, text);
+            (state, Vec::new())
+        }
+        Action::SessionList(entries) => {
+            if entries.is_empty() {
+                push_notice(
+                    &mut state,
+                    NoticeLevel::Info,
+                    "aucune session pour ce contexte".to_string(),
+                );
+            } else {
+                state.picker = Some(Picker {
+                    entries,
+                    selected: 0,
+                });
+            }
             (state, Vec::new())
         }
     }
+}
+
+/// Fin du tour : l'état repasse au repos ; une erreur est une notice visible.
+fn turn_finished(mut state: AppState, result: Result<Outcome, String>) -> (AppState, Vec<Effect>) {
+    state.status = Status::Idle;
+    match result {
+        Ok(Outcome::Cancelled) => {
+            if !matches!(state.transcript.last(), Some(TranscriptItem::Interrupted)) {
+                state.transcript.push(TranscriptItem::Interrupted);
+            }
+            close_open_blocks(&mut state.transcript);
+        }
+        Ok(Outcome::Failed) => {
+            close_open_blocks(&mut state.transcript);
+            push_notice(
+                &mut state,
+                NoticeLevel::Error,
+                "le tour a échoué".to_string(),
+            );
+        }
+        Ok(_) => {}
+        Err(message) => {
+            push_notice(&mut state, NoticeLevel::Error, message);
+        }
+    }
+    state.revision = state.revision.wrapping_add(1);
+    (state, vec![Effect::RefreshTodo, Effect::RefreshDirtyFiles])
 }
 
 /// Pousse une `Notice` (jamais silencieuse).
@@ -339,13 +435,12 @@ fn scroll_by(state: &mut AppState, lines: usize, up: bool) {
     } else {
         state.scroll.offset = state.scroll.offset.saturating_sub(lines);
         if state.scroll.offset == 0 {
-            state.scroll.follow = true;
-            state.scroll.pending = false;
+            scroll_follow(state);
         }
     }
 }
 
-/// Gèle la position de défilement à `offset` lignes depuis le bas.
+/// Gèle la position de défilement à `lines` lignes depuis le bas (page).
 fn scroll_page(state: &mut AppState, page: usize, up: bool) {
     scroll_by(state, page.max(1), up);
 }
@@ -357,16 +452,12 @@ fn scroll_follow(state: &mut AppState) {
     state.scroll.pending = false;
 }
 
-/// Indices des éléments repliables (raisonnement et appels d'outils) au niveau
-/// racine de la transcription.
+/// Indices des éléments repliables (exécutions de script) de la transcription.
 fn collapsible_indices(transcript: &[TranscriptItem]) -> Vec<usize> {
     transcript
         .iter()
         .enumerate()
-        .filter_map(|(i, item)| match item {
-            TranscriptItem::Reasoning { .. } | TranscriptItem::ToolCall { .. } => Some(i),
-            _ => None,
-        })
+        .filter_map(|(i, item)| matches!(item, TranscriptItem::Script { .. }).then_some(i))
         .collect()
 }
 
@@ -374,11 +465,11 @@ fn collapsible_indices(transcript: &[TranscriptItem]) -> Vec<usize> {
 fn move_selection(state: &mut AppState, forward: bool) {
     let candidates = collapsible_indices(&state.transcript);
     if candidates.is_empty() {
-        state.selected = None;
+        state.selection = None;
         return;
     }
     let pos = state
-        .selected
+        .selection
         .and_then(|sel| candidates.iter().position(|i| *i == sel));
     let next = match (pos, forward) {
         (Some(p), true) => p.saturating_add(1).min(candidates.len().saturating_sub(1)),
@@ -386,43 +477,29 @@ fn move_selection(state: &mut AppState, forward: bool) {
         (None, true) => 0,
         (None, false) => candidates.len().saturating_sub(1),
     };
-    state.selected = candidates.get(next).copied();
+    state.selection = candidates.get(next).copied();
 }
 
-/// Bascule le repli de l'élément sélectionné.
+/// Bascule le repli de l'élément sélectionné (Espace).
 fn toggle_selected(state: &mut AppState) {
-    let Some(idx) = state.selected else {
+    let Some(idx) = state.selection else {
         return;
     };
-    if let Some(
-        TranscriptItem::Reasoning { expanded, .. } | TranscriptItem::ToolCall { expanded, .. },
-    ) = state.transcript.get_mut(idx)
-    {
+    if let Some(TranscriptItem::Script { expanded, .. }) = state.transcript.get_mut(idx) {
         *expanded = !*expanded;
         state.revision = state.revision.wrapping_add(1);
     }
 }
 
-/// Ctrl+R : si un raisonnement est déplié, replie tous ; sinon déplie tous.
-fn toggle_all_reasoning(state: &mut AppState) {
-    let any_open = state
-        .transcript
-        .iter()
-        .any(|i| matches!(i, TranscriptItem::Reasoning { expanded: true, .. }));
-    for item in &mut state.transcript {
-        if let TranscriptItem::Reasoning { expanded, .. } = item {
-            *expanded = !any_open;
-        }
-    }
-    state.revision = state.revision.wrapping_add(1);
-}
-
 /// Politique des touches (état `Idle` ou `Running`).
 ///
-/// Une table unique parce que c'est le contrat entier de `state.sdd`
-/// §Handles « Touches » — la découper éparpillerait la politique.
+/// Une table unique parce que c'est le contrat entier de `state.sdd` §Handles
+/// « Touches » — la découper éparpillerait la politique.
 #[allow(clippy::too_many_lines)] // table contractée par state.sdd §Handles
 fn key_update(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
+    if state.picker.is_some() {
+        return picker_key(state, key);
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
@@ -430,7 +507,6 @@ fn key_update(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
             if matches!(state.status, Status::Running { .. }) {
                 state.transcript.push(TranscriptItem::Interrupted);
                 state.revision = state.revision.wrapping_add(1);
-                state.status = Status::Idle;
                 return (state, vec![Effect::CancelTurn]);
             }
             if !editor::is_blank(&state.input) {
@@ -445,7 +521,7 @@ fn key_update(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
             (state, Vec::new())
         }
         KeyCode::Char('d') if ctrl => {
-            if state.input.lines.len() == 1 && state.input.lines[0].is_empty() {
+            if editor::is_blank(&state.input) {
                 (state, vec![Effect::Quit])
             } else {
                 state.input = editor::apply(state.input, EditCommand::Delete);
@@ -460,15 +536,8 @@ fn key_update(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
             state.input = editor::apply(state.input, EditCommand::Newline);
             (state, Vec::new())
         }
-        KeyCode::Enter => {
-            let (state, effects) = submit(state);
-            (state, effects)
-        }
+        KeyCode::Enter => submit(state),
         KeyCode::Char('l') if ctrl => (state, Vec::new()),
-        KeyCode::Char('r') if ctrl => {
-            toggle_all_reasoning(&mut state);
-            (state, Vec::new())
-        }
         KeyCode::Char('t') if ctrl => {
             state.todo_visible = !state.todo_visible;
             (state, Vec::new())
@@ -481,7 +550,7 @@ fn key_update(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
             move_selection(&mut state, false);
             (state, Vec::new())
         }
-        KeyCode::Char(' ') if state.selected.is_some() && editor::is_blank(&state.input) => {
+        KeyCode::Char(' ') if state.selection.is_some() && editor::is_blank(&state.input) => {
             toggle_selected(&mut state);
             (state, Vec::new())
         }
@@ -548,16 +617,38 @@ fn key_update(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
     }
 }
 
-/// Entrée : envoi de la saisie, commande slash, ou Notice « tour en cours ».
-fn submit(mut state: AppState) -> (AppState, Vec<Effect>) {
-    if matches!(state.status, Status::Running { .. }) {
-        push_notice(
-            &mut state,
-            NoticeLevel::Warn,
-            "tour en cours — patientez".to_string(),
-        );
+/// Touches du sélecteur de session ouvert : Haut/Bas, Entrée reprend, Échap ferme.
+fn picker_key(mut state: AppState, key: KeyEvent) -> (AppState, Vec<Effect>) {
+    let Some(picker) = state.picker.as_mut() else {
         return (state, Vec::new());
+    };
+    let last = picker.entries.len().saturating_sub(1);
+    match key.code {
+        KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+        KeyCode::Down => picker.selected = picker.selected.saturating_add(1).min(last),
+        KeyCode::Esc => state.picker = None,
+        KeyCode::Enter => {
+            let choisie = picker.entries.get(picker.selected).map(|s| s.id.clone());
+            state.picker = None;
+            if let Some(id) = choisie {
+                if matches!(state.status, Status::Running { .. }) {
+                    push_notice(
+                        &mut state,
+                        NoticeLevel::Warn,
+                        "tour en cours — patientez".to_string(),
+                    );
+                    return (state, Vec::new());
+                }
+                return (state, vec![Effect::ResumeSession(id)]);
+            }
+        }
+        _ => {}
     }
+    (state, Vec::new())
+}
+
+/// Entrée : envoi de la saisie, injection pendant un tour, ou commande slash.
+fn submit(state: AppState) -> (AppState, Vec<Effect>) {
     let raw = editor::text(&state.input);
     let trimmed = raw.trim().to_string();
     if trimmed.is_empty() {
@@ -571,14 +662,34 @@ fn submit(mut state: AppState) -> (AppState, Vec<Effect>) {
     } else {
         trimmed
     };
+    if matches!(state.status, Status::Running { .. }) {
+        return inject(state, &text);
+    }
     send_message(state, &text)
+}
+
+/// Pendant un tour : le message est injecté dans le tour en cours, sans second tour.
+fn inject(mut state: AppState, text: &str) -> (AppState, Vec<Effect>) {
+    state.transcript.push(TranscriptItem::User {
+        text: text.to_string(),
+        during_turn: true,
+    });
+    state.revision = state.revision.wrapping_add(1);
+    scroll_follow(&mut state);
+    state.input = editor::push_history(
+        editor::apply(std::mem::take(&mut state.input), EditCommand::Clear),
+        text,
+    );
+    state.quit_armed = false;
+    (state, vec![Effect::InjectInput(text.to_string())])
 }
 
 /// Envoie `text` comme message utilisateur : effet `StartTurn`, état Running.
 fn send_message(mut state: AppState, text: &str) -> (AppState, Vec<Effect>) {
-    state
-        .transcript
-        .push(TranscriptItem::User(text.to_string()));
+    state.transcript.push(TranscriptItem::User {
+        text: text.to_string(),
+        during_turn: false,
+    });
     state.revision = state.revision.wrapping_add(1);
     scroll_follow(&mut state);
     state.input = editor::push_history(
@@ -587,49 +698,46 @@ fn send_message(mut state: AppState, text: &str) -> (AppState, Vec<Effect>) {
     );
     state.status = Status::Running { since: state.tick };
     state.quit_armed = false;
-    state.selected = None;
+    state.selection = None;
     (state, vec![Effect::StartTurn(text.to_string())])
 }
 
 /// Interprète une commande slash (une ligne commençant par `/`).
 fn slash_command(mut state: AppState, line: &str) -> (AppState, Vec<Effect>) {
-    let (cmd, arg) = match line.split_once(' ') {
-        Some((c, a)) => (c, a.trim()),
-        None => (line, ""),
-    };
+    let cmd = line.split_once(' ').map_or(line, |(c, _)| c);
     let clear = |state: &mut AppState| {
-        state.input = editor::apply(state.input.clone(), EditCommand::Clear);
+        state.input = editor::apply(std::mem::take(&mut state.input), EditCommand::Clear);
     };
+    let running = matches!(state.status, Status::Running { .. });
     match cmd {
         "/help" => {
             clear(&mut state);
             push_notice(
                 &mut state,
                 NoticeLevel::Info,
-                "Entrée envoyer · Alt+Entrée/Ctrl+J nouvelle ligne · Ctrl+C annuler/vider \
-                 · Ctrl+D quitter · PgUp/PgDn/molette défiler · Fin suit la fin · Tab sélection \
-                 · Espace replier · Ctrl+R raisonnements · Ctrl+T tâches · /new /agent <nom> \
-                 /todo /quit"
+                "Entrée envoyer (ou injecter pendant un tour) · Alt+Entrée/Ctrl+J nouvelle ligne \
+                 · Ctrl+C annuler/vider · Ctrl+D quitter · PgUp/PgDn/molette défiler · Fin suit la fin \
+                 · Tab sélection · Espace replier · Ctrl+T tâches · /new /sessions /todo /quit"
                     .to_string(),
+            );
+            (state, Vec::new())
+        }
+        "/new" | "/sessions" if running => {
+            clear(&mut state);
+            push_notice(
+                &mut state,
+                NoticeLevel::Warn,
+                "tour en cours — patientez".to_string(),
             );
             (state, Vec::new())
         }
         "/new" => {
             clear(&mut state);
-            (state, vec![Effect::NewConversation])
+            (state, vec![Effect::NewSession])
         }
-        "/agent" => {
-            if arg.is_empty() {
-                push_notice(
-                    &mut state,
-                    NoticeLevel::Warn,
-                    "usage : /agent <nom>".to_string(),
-                );
-                return (state, Vec::new());
-            }
+        "/sessions" => {
             clear(&mut state);
-            state.agent = arg.to_string();
-            (state, vec![Effect::SwitchAgent(arg.to_string())])
+            (state, vec![Effect::ListSessions])
         }
         "/todo" => {
             clear(&mut state);
@@ -652,278 +760,248 @@ fn slash_command(mut state: AppState, line: &str) -> (AppState, Vec<Effect>) {
     }
 }
 
-/// Applique un événement de l'agent à la transcription (racine).
-fn agent_update(state: &mut AppState, event: ChatEvent) {
-    match event {
-        ChatEvent::Token { content } => {
-            push_token(&mut state.transcript, &content);
+/// Applique un événement de la session à la transcription, et rend les effets.
+// Une branche par variante d'`EventKind` pertinente : la longueur est la table de `state.sdd` §Handles.
+#[allow(clippy::too_many_lines)]
+fn session_update(state: &mut AppState, kind: EventKind) -> Vec<Effect> {
+    match kind {
+        EventKind::TextDelta { text, .. } => {
+            push_text(&mut state.transcript, &text);
             state.revision = state.revision.wrapping_add(1);
             mark_new_content(state);
+            Vec::new()
         }
-        ChatEvent::ReasoningDelta { content } => {
-            push_reasoning(&mut state.transcript, &content);
+        EventKind::TurnEnded { response, .. } => {
+            finish_assistant(&mut state.transcript, &response);
             state.revision = state.revision.wrapping_add(1);
-            mark_new_content(state);
+            Vec::new()
         }
-        ChatEvent::ToolCall { id, name, args } => {
-            if name == TODO_TOOL {
-                reload_todo(state, &args);
-            }
-            state.transcript.push(TranscriptItem::ToolCall {
-                id,
-                name,
-                args: args.to_string(),
-                result: None,
-                is_error: false,
+        EventKind::Script(record) => {
+            let seq = state
+                .transcript
+                .iter()
+                .filter(|item| matches!(item, TranscriptItem::Script { .. }))
+                .count()
+                .saturating_add(1);
+            let functions = std::mem::take(&mut state.pending_functions);
+            state.transcript.push(TranscriptItem::Script {
+                seq: u64::try_from(seq).unwrap_or(u64::MAX),
+                functions,
+                duration_ms: record.duration_ms,
+                ok: record.error.is_none(),
+                error: record.error,
+                script: record.script,
+                output: record.result,
                 expanded: false,
             });
             state.revision = state.revision.wrapping_add(1);
             mark_new_content(state);
+            Vec::new()
         }
-        ChatEvent::ToolResult {
-            id,
-            result,
-            is_error,
-            ..
+        EventKind::McpCall(record) => {
+            state.pending_functions.push(record.function);
+            Vec::new()
+        }
+        EventKind::TodoChanged => vec![Effect::RefreshTodo],
+        EventKind::MemoryChanged { level, id } => {
+            push_notice(
+                state,
+                NoticeLevel::Info,
+                format!("mémoire modifiée : {level}/{id}"),
+            );
+            Vec::new()
+        }
+        EventKind::TokenUsage { prompt, completion } => {
+            state.usage.prompt = state.usage.prompt.saturating_add(prompt);
+            state.usage.completion = state.usage.completion.saturating_add(completion);
+            Vec::new()
+        }
+        EventKind::InferenceRetry {
+            attempt,
+            delay_ms,
+            error_class,
         } => {
-            attach_result(&mut state.transcript, &id, result, is_error);
-            state.revision = state.revision.wrapping_add(1);
-        }
-        ChatEvent::SubagentStart { id, agent, task } => {
-            state.transcript.push(TranscriptItem::Subagent {
-                id,
-                agent,
-                task,
-                items: Vec::new(),
-                done: false,
-            });
-            state.revision = state.revision.wrapping_add(1);
-            mark_new_content(state);
-        }
-        ChatEvent::SubagentEvent { id, event } => {
-            if let Some(inner) = find_subagent_items(&mut state.transcript, &id) {
-                apply_nested(inner, *event);
-            }
-            state.revision = state.revision.wrapping_add(1);
-            mark_new_content(state);
-        }
-        ChatEvent::SubagentEnd { id, result } => {
-            mark_subagent_done(&mut state.transcript, &id, &result);
-            state.revision = state.revision.wrapping_add(1);
-        }
-        ChatEvent::Usage {
-            input_tokens,
-            output_tokens,
-        } => {
-            state.usage.input = state.usage.input.saturating_add(input_tokens);
-            state.usage.output = state.usage.output.saturating_add(output_tokens);
-        }
-        ChatEvent::ToolUnavailable { server, reason } => {
             push_notice(
                 state,
                 NoticeLevel::Warn,
-                format!("serveur MCP indisponible : {server} ({reason})"),
+                format!(
+                    "nouvelle tentative d'inférence n°{attempt} ({error_class}) dans {delay_ms} ms"
+                ),
             );
+            Vec::new()
         }
-        ChatEvent::Error { code, message } => {
-            push_notice(state, NoticeLevel::Error, format!("[{code}] {message}"));
+        EventKind::McpReconnect {
+            role,
+            attempt,
+            delay_ms,
+        } => {
+            push_notice(
+                state,
+                NoticeLevel::Warn,
+                format!("reconnexion MCP « {role} » n°{attempt} dans {delay_ms} ms"),
+            );
+            Vec::new()
         }
-        ChatEvent::Done => {
-            close_open_blocks(&mut state.transcript);
+        EventKind::Overrun { elapsed_ms } => {
+            push_notice(
+                state,
+                NoticeLevel::Warn,
+                format!("le tour dépasse son délai ({elapsed_ms} ms), il continue"),
+            );
+            Vec::new()
+        }
+        EventKind::EmptyResponse { will_retry } => {
+            let suite = if will_retry {
+                "le modèle est relancé"
+            } else {
+                "pas de relance"
+            };
+            push_notice(
+                state,
+                NoticeLevel::Warn,
+                format!("réponse vide écartée, {suite}"),
+            );
+            Vec::new()
+        }
+        EventKind::ResponseTruncated { .. } => {
+            push_notice(
+                state,
+                NoticeLevel::Warn,
+                "réponse coupée par la limite de sortie du modèle".to_string(),
+            );
+            Vec::new()
+        }
+        EventKind::TurnLeaseLost { .. } => {
+            push_notice(
+                state,
+                NoticeLevel::Warn,
+                "bail du tour perdu : le tour est annulé, rien n'est sauvegardé".to_string(),
+            );
+            Vec::new()
+        }
+        EventKind::TitleChanged { title } => {
+            state.title = Some(title);
+            Vec::new()
+        }
+        EventKind::RunEnded { run, outcome } => {
+            set_subagent_status(
+                &mut state.transcript,
+                run.as_str(),
+                SubagentStatus::Ended(outcome),
+            );
             state.revision = state.revision.wrapping_add(1);
+            Vec::new()
         }
-        ChatEvent::SkillLoaded { .. } => {}
+        EventKind::RunInterrupted { run, .. } => {
+            set_subagent_status(
+                &mut state.transcript,
+                run.as_str(),
+                SubagentStatus::Interrupted,
+            );
+            state.revision = state.revision.wrapping_add(1);
+            Vec::new()
+        }
+        // Raisonnement absent (`chat#DEC-2`) et autres variantes : ignorées sans erreur.
+        _ => Vec::new(),
     }
 }
 
 /// Prolonge le dernier bloc assistant ouvert, ou en ouvre un nouveau.
-fn push_token(items: &mut Vec<TranscriptItem>, content: &str) {
-    if let Some(TranscriptItem::Assistant { text, done: false }) = items.last_mut() {
-        text.push_str(content);
+fn push_text(items: &mut Vec<TranscriptItem>, text: &str) {
+    if let Some(TranscriptItem::Assistant {
+        text: bloc,
+        done: false,
+    }) = items.last_mut()
+    {
+        bloc.push_str(text);
         return;
     }
     items.push(TranscriptItem::Assistant {
-        text: content.to_string(),
+        text: text.to_string(),
         done: false,
     });
 }
 
-/// Prolonge le dernier bloc de raisonnement ouvert, ou en ouvre un nouveau.
-fn push_reasoning(items: &mut Vec<TranscriptItem>, content: &str) {
-    if let Some(TranscriptItem::Reasoning { text, .. }) = items.last_mut() {
-        text.push_str(content);
-        return;
-    }
-    items.push(TranscriptItem::Reasoning {
-        text: content.to_string(),
-        expanded: false,
-    });
-}
-
-/// Rattache un `ToolResult` à l'appel de même `id` (replié conservé) ; un id
-/// inconnu est ignoré sans perte ni panique (ordre inattendu toléré).
-fn attach_result(items: &mut [TranscriptItem], id: &str, result: String, is_error: bool) {
-    for item in items.iter_mut() {
-        match item {
-            TranscriptItem::ToolCall {
-                id: tid,
-                result: slot,
-                is_error: flag,
-                ..
-            } if tid == id => {
-                *slot = Some(result);
-                *flag = is_error;
-                return;
+/// Ferme le bloc assistant ouvert à `TurnEnded` ; le texte complet de `response`
+/// fait foi quand il n'est pas vide.
+fn finish_assistant(items: &mut Vec<TranscriptItem>, response: &str) {
+    match items.last_mut() {
+        Some(TranscriptItem::Assistant { text, done }) => {
+            if !response.is_empty() {
+                *text = response.to_string();
             }
-            TranscriptItem::Subagent { items, .. } => {
-                attach_result(items, id, result.clone(), is_error);
-            }
-            _ => {}
+            *done = true;
         }
-    }
-}
-
-/// Retrouve les éléments imbriqués du sous-agent d'`id` (récursif).
-fn find_subagent_items<'a>(
-    items: &'a mut [TranscriptItem],
-    id: &str,
-) -> Option<&'a mut Vec<TranscriptItem>> {
-    for item in items.iter_mut() {
-        if let TranscriptItem::Subagent {
-            id: sid,
-            items: inner,
-            ..
-        } = item
-        {
-            if sid == id {
-                return Some(inner);
-            }
-            if let Some(found) = find_subagent_items(inner, id) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-/// Marque le sous-agent d'`id` terminé (récursif) ; un résultat non vide est
-/// ajouté à ses éléments comme bloc assistant.
-fn mark_subagent_done(items: &mut [TranscriptItem], id: &str, result: &str) {
-    for item in items.iter_mut() {
-        if let TranscriptItem::Subagent {
-            id: sid,
-            items: inner,
-            done,
-            ..
-        } = item
-        {
-            if sid == id {
-                *done = true;
-                if !result.is_empty() {
-                    // Le résultat forme son propre bloc (les blocs ouverts sont
-                    // fermés d'abord) : rien de ce qui a été émis n'est fondu.
-                    close_open_blocks(inner);
-                    push_token(inner, result);
-                }
-            }
-            mark_subagent_done(inner, id, result);
-        }
-    }
-}
-
-/// Applique un événement imbriqué à la liste d'éléments d'un sous-agent
-/// (mêmes règles que la racine, sans effet sur le défilement).
-// `&mut Vec` requis : cette fonction pousse des éléments (ptr_arg non applicable ici).
-fn apply_nested(items: &mut Vec<TranscriptItem>, event: ChatEvent) {
-    match event {
-        ChatEvent::Token { content } => push_token(items, &content),
-        ChatEvent::ReasoningDelta { content } => push_reasoning(items, &content),
-        ChatEvent::ToolCall { id, name, args } => {
-            items.push(TranscriptItem::ToolCall {
-                id,
-                name,
-                args: args.to_string(),
-                result: None,
-                is_error: false,
-                expanded: false,
-            });
-        }
-        ChatEvent::ToolResult {
-            id,
-            result,
-            is_error,
-            ..
-        } => attach_result(items, &id, result, is_error),
-        ChatEvent::SubagentStart { id, agent, task } => items.push(TranscriptItem::Subagent {
-            id,
-            agent,
-            task,
-            items: Vec::new(),
-            done: false,
+        _ if !response.is_empty() => items.push(TranscriptItem::Assistant {
+            text: response.to_string(),
+            done: true,
         }),
-        ChatEvent::SubagentEvent { id, event } => {
-            if let Some(inner) = find_subagent_items(items, &id) {
-                apply_nested(inner, *event);
-            }
-        }
-        ChatEvent::SubagentEnd { id, .. } => {
-            for i in items.iter_mut() {
-                if let TranscriptItem::Subagent { id: sid, done, .. } = i
-                    && sid == &id
-                {
-                    *done = true;
-                }
-            }
-        }
-        ChatEvent::Done => close_open_blocks(items),
-        ChatEvent::Error { code, message } => items.push(TranscriptItem::Notice {
-            level: NoticeLevel::Error,
-            text: format!("[{code}] {message}"),
-        }),
-        ChatEvent::ToolUnavailable { server, reason } => items.push(TranscriptItem::Notice {
-            level: NoticeLevel::Warn,
-            text: format!("serveur MCP indisponible : {server} ({reason})"),
-        }),
-        ChatEvent::Usage { .. } | ChatEvent::SkillLoaded { .. } => {}
+        _ => {}
     }
 }
 
-/// Ferme le dernier bloc assistant ouvert (réception de `Done`).
+/// Ferme le dernier bloc assistant ouvert, sans changer son texte.
 fn close_open_blocks(items: &mut [TranscriptItem]) {
     if let Some(TranscriptItem::Assistant { done, .. }) = items.last_mut() {
         *done = true;
     }
 }
 
-/// Relit la liste de tâches depuis les arguments d'un `ToolCall` de
-/// l'outil de tâches (`todos`) — pure, sans accès au `Mutex` partagé.
-fn reload_todo(state: &mut AppState, args: &serde_json::Value) {
-    let Some(todos) = args.get("todos").and_then(|v| v.as_array()) else {
-        return;
-    };
-    state.todo = todos
-        .iter()
-        .filter_map(|t| {
-            let content = t.get("content")?.as_str()?.to_string();
-            let status = t
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("pending")
-                .to_string();
-            Some(TodoItem { content, status })
-        })
-        .collect();
+/// Tient vivant au moins un sous-agent de la transcription (sondage).
+fn any_subagent_running(items: &[TranscriptItem]) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            TranscriptItem::Subagent {
+                status: SubagentStatus::Running,
+                ..
+            }
+        )
+    })
 }
 
-/// Nom de l'outil de tâches dont le `ToolCall` porte la liste (`todos` en args).
-pub(crate) const TODO_TOOL: &str = "todowrite";
+/// Pose le statut de la ligne du run `run` (sans effet si elle n'existe pas).
+fn set_subagent_status(items: &mut [TranscriptItem], run: &str, status: SubagentStatus) {
+    for item in items.iter_mut() {
+        if let TranscriptItem::Subagent {
+            run: id,
+            status: slot,
+            ..
+        } = item
+            && id == run
+        {
+            *slot = status;
+        }
+    }
+}
+
+/// Crée ou met à jour la ligne de statut d'un sous-agent rapportée par le sondage.
+fn apply_run_line(state: &mut AppState, line: RunLine) {
+    let present = state
+        .transcript
+        .iter()
+        .any(|item| matches!(item, TranscriptItem::Subagent { run, .. } if *run == line.run));
+    if present {
+        set_subagent_status(&mut state.transcript, &line.run, line.status);
+    } else {
+        state.transcript.push(TranscriptItem::Subagent {
+            run: line.run,
+            agent: line.agent,
+            status: line.status,
+        });
+        mark_new_content(state);
+    }
+    state.revision = state.revision.wrapping_add(1);
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lymaille::{Redactor, ScriptInput, ScriptRecord, Timestamp, TurnId};
+    use std::time::Duration;
 
     fn idle() -> AppState {
-        AppState::new("a1", "conv-1".to_string(), None, (100, 30))
+        AppState::new("agent-x", "session-1".to_string(), None, (100, 30))
     }
 
     fn key(code: KeyCode, mods: KeyModifiers) -> Action {
@@ -936,56 +1014,80 @@ mod tests {
         st
     }
 
+    /// Évènement de la session `session-1` portant `kind`.
+    fn evt(kind: EventKind) -> Action {
+        Action::Session(Event::new(
+            SessionId::new("session-1").expect("un identifiant non vide"),
+            Timestamp::from_millis(0),
+            kind,
+        ))
+    }
+
+    fn texte(turn: u64, text: &str) -> EventKind {
+        EventKind::TextDelta {
+            turn: TurnId::new(turn),
+            text: text.to_string(),
+        }
+    }
+
+    fn fin(turn: u64, response: &str) -> EventKind {
+        EventKind::TurnEnded {
+            turn: TurnId::new(turn),
+            outcome: Outcome::Valid,
+            response: response.to_string(),
+        }
+    }
+
+    /// État au repos avec un tour lancé par « question », saisie vidée.
     fn running() -> AppState {
-        let st = with_input("question");
-        let (mut st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            effects.contains(&Effect::StartTurn("question".to_string())),
-            "préparation Running"
+        let (mut st, effects) = update(
+            with_input("question"),
+            key(KeyCode::Enter, KeyModifiers::NONE),
         );
+        assert_eq!(effects, vec![Effect::StartTurn("question".to_string())]);
         st.input = EditorState::new();
         st
     }
 
-    /// Scenario: `envoi_d_un_message` — Entrée sur « bonjour » au repos :
-    /// `StartTurn`, état Running, élément User, saisie vidée, historique.
-    #[test]
-    fn envoi_d_un_message() {
-        let st = with_input("bonjour");
-        let (st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(effects, vec![Effect::StartTurn("bonjour".to_string())]);
-        assert!(matches!(st.status, Status::Running { .. }));
-        assert!(
-            st.transcript
-                .iter()
-                .any(|i| *i == TranscriptItem::User("bonjour".to_string())),
-            "l'élément User('bonjour') est dans la transcription: {:?}",
-            st.transcript
-        );
-        assert!(editor::is_blank(&st.input), "la saisie est vidée");
-        assert_eq!(
-            st.input.history,
-            vec!["bonjour".to_string()],
-            "l'historique est mis à jour"
-        );
+    fn notices(st: &AppState) -> Vec<(NoticeLevel, String)> {
+        st.transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::Notice { level, text } => Some((*level, text.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
-    /// Scenario: `saisie_vide_n_envoie_rien` — Entrée sur saisie blanche :
-    /// aucun effet.
+    /// Scenario: envoi d'un message au repos.
+    #[test]
+    fn envoi_d_un_message() {
+        let (st, effects) = update(
+            with_input("bonjour"),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(effects, vec![Effect::StartTurn("bonjour".to_string())]);
+        assert!(matches!(st.status, Status::Running { .. }));
+        assert!(st.transcript.contains(&TranscriptItem::User {
+            text: "bonjour".to_string(),
+            during_turn: false,
+        }));
+        assert!(editor::is_blank(&st.input), "la saisie est vidée");
+        assert_eq!(st.input.history, vec!["bonjour".to_string()]);
+    }
+
+    /// Scenario: saisie vide n'envoie rien.
     #[test]
     fn saisie_vide_n_envoie_rien() {
-        let st = with_input("   ");
-        let (_st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
+        let (_st, effects) = update(with_input("   "), key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(effects.is_empty(), "aucun effet, obtenu: {effects:?}");
     }
 
-    /// Scenario: `entree_pendant_un_tour` — Entrée avec saisie pendant
-    /// `Running` : aucun `StartTurn`, une `Notice` « tour en cours ».
+    /// Scenario: message pendant un tour — injection, pas de second tour.
     #[test]
-    fn entree_pendant_un_tour() {
-        let st = running();
+    fn message_pendant_un_tour() {
         let st = {
-            let mut st = st;
+            let mut st = running();
             st.input = editor::apply(
                 EditorState::new(),
                 EditCommand::InsertStr("bis".to_string()),
@@ -993,324 +1095,392 @@ mod tests {
             st
         };
         let (st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            !effects.iter().any(|e| matches!(e, Effect::StartTurn(_))),
-            "aucun second tour: {effects:?}"
-        );
-        let indice = st.transcript.iter().any(|i| match i {
-            TranscriptItem::Notice { text, .. } => text.contains("tour en cours"),
-            _ => false,
-        });
-        assert!(indice, "une Notice « tour en cours » est affichée");
+        assert_eq!(effects, vec![Effect::InjectInput("bis".to_string())]);
+        assert!(st.transcript.contains(&TranscriptItem::User {
+            text: "bis".to_string(),
+            during_turn: true,
+        }));
+        assert!(matches!(st.status, Status::Running { .. }));
     }
 
-    /// Scenario: `ctrl_c_annule_le_tour` — Ctrl+C pendant `Running` :
-    /// effet `CancelTurn`, élément `Interrupted`, état `Idle`.
+    /// Scenario: Ctrl+C annule le tour, le texte reçu est conservé.
     #[test]
     fn ctrl_c_annule_le_tour() {
         let st = running();
+        let (st, _) = update(st, evt(texte(1, "déjà reçu")));
         let (st, effects) = update(st, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(
-            effects.contains(&Effect::CancelTurn),
-            "CancelTurn: {effects:?}"
-        );
-        assert_eq!(st.status, Status::Idle);
-        assert!(
-            st.transcript.contains(&TranscriptItem::Interrupted),
-            "la transcription marque le tour interrompu"
+        assert_eq!(effects, vec![Effect::CancelTurn]);
+        assert!(st.transcript.contains(&TranscriptItem::Interrupted));
+        assert!(st.transcript.contains(&TranscriptItem::Assistant {
+            text: "déjà reçu".to_string(),
+            done: false,
+        }));
+        let (st, _) = update(st, Action::TurnFinished(Ok(Outcome::Cancelled)));
+        assert_eq!(st.status, Status::Idle, "repos à la fin du tour annulé");
+        assert_eq!(
+            st.transcript
+                .iter()
+                .filter(|i| **i == TranscriptItem::Interrupted)
+                .count(),
+            1,
+            "une seule interruption dans la transcription"
         );
     }
 
-    /// Scenario: `double_ctrl_c_quitte` — deux Ctrl+C consécutifs au repos
-    /// sur saisie vide : Quit au second.
+    /// Scenario: double Ctrl+C quitte.
     #[test]
     fn double_ctrl_c_quitte() {
-        let (st, effects) = update(idle(), key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(
-            !effects.contains(&Effect::Quit),
-            "le premier Ctrl+C ne quitte pas"
-        );
-        let (_st, effects) = update(st, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(
-            effects.contains(&Effect::Quit),
-            "le second quitte: {effects:?}"
-        );
+        let st = idle();
+        let (st, e1) = update(st, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(e1.is_empty());
+        let (_st, e2) = update(st, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(e2, vec![Effect::Quit]);
     }
 
-    /// Scenario: `ctrl_d_quitte_sur_saisie_vide` — Ctrl+D sur saisie vide :
-    /// effet Quit.
+    /// Ctrl+D quitte sur saisie vide et supprime sinon.
     #[test]
     fn ctrl_d_quitte_sur_saisie_vide() {
         let (_st, effects) = update(idle(), key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(effects, vec![Effect::Quit]);
     }
 
-    /// Ctrl+D sur saisie non vide : supprime le caractère sous le curseur
-    /// (pas de Quit).
+    /// Scenario: fragments de texte prolongent le dernier bloc.
     #[test]
-    fn ctrl_d_sur_saisie_non_vide_supprime() {
-        let st = with_input("abc");
-        let (st, effects) = update(st, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert!(!effects.contains(&Effect::Quit));
-        assert_eq!(editor::text(&st.input), "abc");
-        let st = {
-            let mut st = st;
-            st.input.cursor = (0, 0);
-            st
-        };
-        let (st, _e) = update(st, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-        assert_eq!(
-            editor::text(&st.input),
-            "bc",
-            "le caractère sous le curseur saute"
-        );
-    }
-
-    /// Scenario: `jetons_prolongent_le_dernier_bloc` — trois `Token` sur un
-    /// bloc assistant en cours : un seul bloc, concaténation.
-    #[test]
-    fn jetons_prolongent_le_dernier_bloc() {
-        let mut st = idle();
-        for c in ["Bon", "jou", "r"] {
-            let (st2, _e) = update(st, Action::Agent(ChatEvent::Token { content: c.into() }));
-            st = st2;
-        }
-        let assistants: Vec<_> = st
+    fn fragments_prolongent_le_dernier_bloc() {
+        let st = running();
+        let (st, _) = update(st, evt(texte(1, "Bon")));
+        let (st, _) = update(st, evt(texte(1, "jour")));
+        let (st, _) = update(st, evt(texte(1, " !")));
+        let (st, _) = update(st, evt(fin(1, "Bonjour !")));
+        let blocs: Vec<&TranscriptItem> = st
             .transcript
             .iter()
             .filter(|i| matches!(i, TranscriptItem::Assistant { .. }))
             .collect();
-        assert_eq!(assistants.len(), 1, "un seul bloc assistant");
-        assert!(
-            matches!(
-                &st.transcript[0],
-                TranscriptItem::Assistant { text, .. } if text == "Bonjour"
-            ),
-            "concaténé: {:?}",
-            st.transcript[0]
+        assert_eq!(
+            blocs,
+            vec![&TranscriptItem::Assistant {
+                text: "Bonjour !".to_string(),
+                done: true,
+            }],
+            "un seul bloc, dont le texte final est response"
         );
     }
 
-    /// Scenario: `appel_d_outil_et_resultat` — `ToolCall` `t1` puis `ToolResult`
-    /// `t1` : l'élément porte le résultat, replié.
+    /// Scenario: exécution de script repliée, dépliable par Espace.
     #[test]
-    fn appel_d_outil_et_resultat() {
-        let mut st = idle();
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::ToolCall {
-                id: "t1".into(),
-                name: "read_file".into(),
-                args: serde_json::json!({"path": "f"}),
-            }),
+    fn script_replie_et_deplie() {
+        let record = ScriptRecord::new(
+            &Redactor::new(),
+            10,
+            ScriptInput::new("agent-x", "print(1)", "1", Duration::from_millis(4)),
         );
-        st = st2;
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::ToolResult {
-                id: "t1".into(),
-                name: "read_file".into(),
-                result: "contenu".into(),
-                is_error: false,
-            }),
+        let st = running();
+        let (st, _) = update(
+            st,
+            evt(EventKind::McpCall(lymaille::McpRecord::new(
+                &Redactor::new(),
+                lymaille::McpInput::new(
+                    "monitoring",
+                    "query",
+                    &serde_json::json!({}),
+                    "ok",
+                    Duration::from_millis(1),
+                ),
+            ))),
         );
-        st = st2;
-        let item = st
-            .transcript
-            .iter()
-            .find_map(|i| match i {
-                TranscriptItem::ToolCall { id, .. } if id == "t1" => Some(i.clone()),
-                _ => None,
-            })
-            .expect("l'élément ToolCall existe");
-        match item {
-            TranscriptItem::ToolCall {
-                result, expanded, ..
-            } => {
-                assert_eq!(result.as_deref(), Some("contenu"));
-                assert!(!expanded, "replié");
-            }
-            other => panic!("mauvais type: {other:?}"),
-        }
+        let (st, _) = update(st, evt(EventKind::Script(record)));
+        let TranscriptItem::Script {
+            functions,
+            script,
+            output,
+            expanded,
+            ok,
+            ..
+        } = st.transcript.last().cloned().expect("un élément")
+        else {
+            panic!("le dernier élément est un Script")
+        };
+        assert_eq!(functions, vec!["query".to_string()]);
+        assert_eq!(script, "print(1)");
+        assert_eq!(output, "1");
+        assert!(!expanded, "replié à l'arrivée");
+        assert!(ok);
+        let (st, _) = update(st, key(KeyCode::Tab, KeyModifiers::NONE));
+        let (st, _) = update(st, key(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(matches!(
+            st.transcript.last(),
+            Some(TranscriptItem::Script { expanded: true, .. })
+        ));
     }
 
-    /// Scenario: `suivi_de_la_fin` — jetons qui arrivent sans remontée : le
-    /// défilement reste en bas (follow) ; après un `PgUp` il ne bouge plus seul
-    /// (figé, indicateur « nouveau »).
+    /// Scenario: suivi de la fin — remonter fige, les fragments n'avancent plus seuls.
     #[test]
     fn suivi_de_la_fin() {
-        let mut st = idle();
-        for i in 0..5 {
-            let (st2, _e) = update(
-                st,
-                Action::Agent(ChatEvent::Token {
-                    content: format!("l{i}"),
-                }),
-            );
-            st = st2;
-        }
-        assert!(st.scroll.follow, "suit la fin par défaut");
-        let (st2, _e) = update(st, key(KeyCode::PageUp, KeyModifiers::NONE));
-        st = st2;
+        let st = idle();
+        let (st, _) = update(st, Action::Resize(100, 30));
+        let (st, _) = update(st, key(KeyCode::PageUp, KeyModifiers::NONE));
         assert!(!st.scroll.follow, "PgUp fige la position");
-        let frozen = st.scroll.offset;
-        let (st2, _e) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::Token {
-                content: "x".into(),
-            }),
-        );
-        st = st2;
-        assert_eq!(st.scroll.offset, frozen, "le décalage figé ne bouge plus");
-        assert!(st.scroll.pending, "indicateur de nouveau contenu");
-        let (_st, _e) = update(st, key(KeyCode::End, KeyModifiers::NONE));
-    }
-
-    /// Scenario: `commande_slash_inconnue` — `/inconnue` : une Notice, aucun tour.
-    #[test]
-    fn commande_slash_inconnue() {
-        let st = with_input("/inconnue");
-        let (st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(effects.is_empty(), "aucun tour: {effects:?}");
+        let (st, _) = update(st, evt(texte(1, "x")));
+        assert!(!st.scroll.follow);
         assert!(
-            st.transcript.iter().any(|i| matches!(
-                i,
-                TranscriptItem::Notice { text, .. } if text.contains("inconnue")
-            )),
-            "une Notice mentionne la commande: {:?}",
-            st.transcript
+            st.scroll.pending,
+            "du contenu est arrivé pendant le figement"
         );
+        let (st, _) = update(st, key(KeyCode::End, KeyModifiers::NONE));
+        assert!(st.scroll.follow, "Fin reprend le suivi");
     }
 
-    /// Scenario: `echappement_double_slash` — `//ls` envoie `/ls`.
+    /// Scenario: commande slash inconnue et /agent — notice, aucun tour.
+    #[test]
+    fn commande_slash_inconnue_et_agent() {
+        for saisie in ["/inconnue", "/agent x"] {
+            let (st, effects) = update(with_input(saisie), key(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(effects.is_empty(), "aucun tour pour {saisie}: {effects:?}");
+            assert!(
+                notices(&st)
+                    .iter()
+                    .any(|(l, t)| *l == NoticeLevel::Warn && t.contains("commande inconnue")),
+                "notice « commande inconnue » pour {saisie}"
+            );
+        }
+    }
+
+    /// Scenario: échappement double slash.
     #[test]
     fn echappement_double_slash() {
-        let st = with_input("//ls");
-        let (_st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(effects, vec![Effect::StartTurn("/ls".to_string())]);
+        let (_st, effects) = update(
+            with_input("//ceci"),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(effects, vec![Effect::StartTurn("/ceci".to_string())]);
     }
 
-    /// Scenario: `agent_indisponible_visible` — `ToolUnavailable` « grafana » :
-    /// Notice d'avertissement mentionnant « grafana ».
+    /// Scenario: avertissements de session visibles.
     #[test]
-    fn agent_indisponible_visible() {
-        let st = idle();
-        let (st, _e) = update(
+    fn avertissements_de_session_visibles() {
+        let st = running();
+        let (st, _) = update(
             st,
-            Action::Agent(ChatEvent::ToolUnavailable {
-                server: "grafana".into(),
-                reason: "injoignable".into(),
+            evt(EventKind::InferenceRetry {
+                attempt: 1,
+                delay_ms: 2000,
+                error_class: "timeout".into(),
             }),
         );
+        let (st, _) = update(
+            st,
+            evt(EventKind::McpReconnect {
+                role: "monitoring".into(),
+                attempt: 1,
+                delay_ms: 500,
+            }),
+        );
+        let (st, _) = update(st, evt(EventKind::Overrun { elapsed_ms: 90_000 }));
+        let warnings = notices(&st)
+            .into_iter()
+            .filter(|(l, _)| *l == NoticeLevel::Warn)
+            .count();
+        assert_eq!(warnings, 3, "trois notices d'avertissement");
+    }
+
+    /// Scenario: changement de mémoire sans corps.
+    #[test]
+    fn changement_de_memoire_sans_corps() {
+        let (st, _) = update(
+            idle(),
+            evt(EventKind::MemoryChanged {
+                level: "shared".into(),
+                id: "deploy-notes".into(),
+            }),
+        );
+        let textes: Vec<String> = notices(&st).into_iter().map(|(_, t)| t).collect();
         assert!(
-            st.transcript.iter().any(|i| matches!(
-                i,
-                TranscriptItem::Notice {
-                    level: NoticeLevel::Warn,
-                    text
-                } if text.contains("grafana")
-            )),
-            "Notice warn mentionnant grafana: {:?}",
-            st.transcript
+            textes
+                .iter()
+                .any(|t| t.contains("shared") && t.contains("deploy-notes"))
         );
     }
 
-    /// Scenario: `erreur_de_tour_visible` — `TurnFinished(Err)` : `Notice`
-    /// d'erreur et état `Idle`.
+    /// Scenario: erreur de tour visible, état au repos.
     #[test]
     fn erreur_de_tour_visible() {
-        let st = running();
-        let (st, _e) = update(
-            st,
-            Action::TurnFinished(Err(VnyError::LlmError("boom".into()))),
-        );
+        let (st, effects) = update(running(), Action::TurnFinished(Err("boum".into())));
         assert_eq!(st.status, Status::Idle);
         assert!(
-            st.transcript.iter().any(|i| matches!(
-                i,
-                TranscriptItem::Notice {
-                    level: NoticeLevel::Error,
-                    ..
-                }
-            )),
-            "une Notice d'erreur visible: {:?}",
-            st.transcript
+            notices(&st)
+                .iter()
+                .any(|(l, t)| *l == NoticeLevel::Error && t == "boum")
         );
+        assert!(effects.contains(&Effect::RefreshDirtyFiles));
     }
 
-    /// Scenario: `sequence_inattendue` — `ToolResult` d'id inconnu puis `Done`
-    /// sans bloc : aucun plantage, état valide.
-    #[test]
-    fn sequence_inattendue() {
-        let st = idle();
-        let (st, _e) = update(
-            st,
-            Action::Agent(ChatEvent::ToolResult {
-                id: "fantome".into(),
-                name: String::new(),
-                result: "?".into(),
-                is_error: false,
-            }),
-        );
-        let (_st, _e) = update(st, Action::Agent(ChatEvent::Done));
-    }
-
-    /// Scenario: `panneau_des_taches` — un `ToolCall` de l'outil de tâches
-    /// posant deux éléments, puis Ctrl+T : le panneau liste deux tâches et
-    /// devient visible.
+    /// Scenario: panneau des tâches — `TodoChanged` demande la relecture, Ctrl+T affiche.
     #[test]
     fn panneau_des_taches() {
-        let st = idle();
-        let (st, _e) = update(
+        let (st, effects) = update(idle(), evt(EventKind::TodoChanged));
+        assert_eq!(effects, vec![Effect::RefreshTodo]);
+        let (st, _) = update(
             st,
-            Action::Agent(ChatEvent::ToolCall {
-                id: "t1".into(),
-                name: TODO_TOOL.into(),
-                args: serde_json::json!({"todos": [
-                    {"content": "écrire les tests", "status": "pending"},
-                    {"content": "implémenter", "status": "pending"}
-                ]}),
+            Action::Todo(vec![
+                TodoItem {
+                    content: "a".into(),
+                    status: "pending".into(),
+                },
+                TodoItem {
+                    content: "b".into(),
+                    status: "done".into(),
+                },
+            ]),
+        );
+        assert_eq!(st.todo.len(), 2);
+        let (st, _) = update(st, key(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert!(st.todo_visible);
+    }
+
+    /// Scenario: ligne de sous-agent sondée — Running puis Ended.
+    #[test]
+    fn ligne_de_subagent_sondee() {
+        let (st, _) = update(
+            idle(),
+            Action::Runs(vec![RunLine {
+                run: "run-7".into(),
+                agent: "sub".into(),
+                status: SubagentStatus::Running,
+            }]),
+        );
+        let (st, _) = update(
+            st,
+            Action::Runs(vec![RunLine {
+                run: "run-7".into(),
+                agent: "sub".into(),
+                status: SubagentStatus::Ended(Outcome::Valid),
+            }]),
+        );
+        assert!(st.transcript.iter().any(|i| matches!(
+            i,
+            TranscriptItem::Subagent {
+                status: SubagentStatus::Ended(Outcome::Valid),
+                ..
+            }
+        )));
+    }
+
+    /// Le sondage ne se déclenche que pour un sous-agent en cours.
+    #[test]
+    fn tick_sonde_les_subagents_en_cours() {
+        let (st, _) = update(
+            idle(),
+            Action::Runs(vec![RunLine {
+                run: "run-7".into(),
+                agent: "sub".into(),
+                status: SubagentStatus::Running,
+            }]),
+        );
+        let mut effets = Vec::new();
+        let mut courant = st;
+        for _ in 0..POLL_EVERY_TICKS {
+            let (suivant, e) = update(courant, Action::Tick);
+            courant = suivant;
+            effets.extend(e);
+        }
+        assert_eq!(effets, vec![Effect::PollRuns]);
+    }
+
+    /// Scenario: séquence inattendue — aucun plantage, état valide.
+    #[test]
+    fn sequence_inattendue() {
+        let record = lymaille::McpRecord::new(
+            &Redactor::new(),
+            lymaille::McpInput::new(
+                "monitoring",
+                "query",
+                &serde_json::json!({}),
+                "ok",
+                Duration::from_millis(1),
+            ),
+        );
+        let (st, _) = update(idle(), evt(EventKind::McpCall(record)));
+        let (st, _) = update(st, evt(fin(1, "")));
+        assert_eq!(st.status, Status::Idle);
+    }
+
+    /// Les jetons s'additionnent, le titre suit `TitleChanged`.
+    #[test]
+    fn usage_et_titre() {
+        let (st, _) = update(
+            idle(),
+            evt(EventKind::TokenUsage {
+                prompt: 3,
+                completion: 4,
             }),
         );
-        assert_eq!(st.todo.len(), 2, "deux tâches relues du ToolCall");
-        let (st, _e) = update(st, key(KeyCode::Char('t'), KeyModifiers::CONTROL));
-        assert!(st.todo_visible, "Ctrl+T rend le panneau visible");
-        assert!(st.todo.iter().all(|t| !t.content.is_empty()));
-    }
-
-    /// Scenario: `un_seul_tour_a_la_fois` (volet politique) — Entrée avec une
-    /// saisie pendant `Running` ne produit AUCUN `StartTurn`.
-    #[test]
-    fn un_seul_tour_a_la_fois_politique() {
-        let mut st = running();
-        st.input = editor::apply(EditorState::new(), EditCommand::InsertStr("x".into()));
-        let (_st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            !effects.iter().any(|e| matches!(e, Effect::StartTurn(_))),
-            "aucun StartTurn pendant un tour: {effects:?}"
-        );
-    }
-
-    /// Scenario: `tour_reussi_persiste` (volet effets) — `TurnFinished(Ok)` :
-    /// effets `Save` + `RefreshGit`, état `Idle` ; `GitSummary` alimente la barre.
-    #[test]
-    fn tour_reussi_effets_save_et_git() {
-        let st = running();
-        let (st, effects) = update(
+        let (st, _) = update(
             st,
-            Action::TurnFinished(Ok(ChatTurnResult {
-                response_text: "ok".into(),
-                tool_calls: Vec::new(),
-            })),
+            evt(EventKind::TokenUsage {
+                prompt: 1,
+                completion: 1,
+            }),
         );
-        assert_eq!(st.status, Status::Idle);
-        assert!(effects.contains(&Effect::Save), "Save: {effects:?}");
+        assert_eq!(
+            st.usage,
+            Usage {
+                prompt: 4,
+                completion: 5
+            }
+        );
+        let (st, _) = update(
+            st,
+            evt(EventKind::TitleChanged {
+                title: "Migration Loki".into(),
+            }),
+        );
+        assert_eq!(st.title.as_deref(), Some("Migration Loki"));
+    }
+
+    /// `/sessions` demande la liste ; Entrée sur le sélecteur reprend la session choisie.
+    #[test]
+    fn sessions_selecteur_et_reprise() {
+        let (_st, effects) = update(
+            with_input("/sessions"),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(effects, vec![Effect::ListSessions]);
+        let (st, _) = update(idle(), Action::SessionList(Vec::new()));
+        assert!(st.picker.is_none(), "liste vide : pas de sélecteur");
         assert!(
-            effects.contains(&Effect::RefreshGit),
-            "RefreshGit: {effects:?}"
+            notices(&st)
+                .iter()
+                .any(|(_, t)| t.contains("aucune session"))
         );
-        let (st, _e) = update(st, Action::GitSummary(Some("2 files changed".into())));
-        assert_eq!(st.git_summary.as_deref(), Some("2 files changed"));
+    }
+
+    /// Une erreur asynchrone non bloquante devient une notice d'avertissement.
+    #[test]
+    fn avertissement_asynchrone_visible() {
+        let (st, _) = update(idle(), Action::Warning("worktree illisible".into()));
+        assert!(
+            notices(&st)
+                .iter()
+                .any(|(l, t)| *l == NoticeLevel::Warn && t == "worktree illisible")
+        );
+    }
+
+    /// Fin de tour réussie : repos, et relecture du worktree et des tâches.
+    #[test]
+    fn fin_de_tour_sans_resultat_reste_valide() {
+        let (st, effects) = update(idle(), Action::TurnFinished(Ok(Outcome::Valid)));
+        assert_eq!(st.status, Status::Idle);
+        assert!(effects.contains(&Effect::RefreshDirtyFiles));
+    }
+
+    /// Les totaux du worktree sont posés tels que lus.
+    #[test]
+    fn fichiers_modifies() {
+        let (st, _) = update(idle(), Action::DirtyFiles(Some(3)));
+        assert_eq!(st.dirty_files, Some(3));
+        let (st, _) = update(st, Action::DirtyFiles(None));
+        assert_eq!(st.dirty_files, None);
     }
 
     /// Alt+Entrée et Ctrl+J créent une nouvelle ligne sans envoyer.
@@ -1318,209 +1488,18 @@ mod tests {
     fn alt_entree_et_ctrl_j_nouvelle_ligne() {
         let st = with_input("ab");
         let (st, effects) = update(st, key(KeyCode::Enter, KeyModifiers::ALT));
-        assert_eq!(effects.len(), 0, "Alt+Entrée n'émet aucun effet");
-        assert_eq!(st.input.lines.len(), 2, "Alt+Entrée ajoute une ligne");
+        assert!(effects.is_empty());
+        assert_eq!(st.input.lines.len(), 2);
         let (st, effects) = update(st, key(KeyCode::Char('j'), KeyModifiers::CONTROL));
-        assert_eq!(effects.len(), 0, "Ctrl+J n'émet aucun effet");
-        assert_eq!(st.input.lines.len(), 3, "Ctrl+J ajoute une ligne");
+        assert!(effects.is_empty());
+        assert_eq!(st.input.lines.len(), 3);
     }
 
-    /// Tab sélectionne un élément repliable, Espace le déplie ; Ctrl+R
-    /// bascule tous les raisonnements.
+    /// Le collage ne déclenche jamais d'envoi.
     #[test]
-    fn tab_espace_et_ctrl_r() {
-        let mut st = idle();
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::ReasoningDelta {
-                content: "ligne1\nligne2".into(),
-            }),
-        );
-        st = st2;
-        let (st2, _) = update(st.clone(), key(KeyCode::Tab, KeyModifiers::NONE));
-        st = st2;
-        assert!(st.selected.is_some(), "Tab sélectionne le raisonnement");
-        let (st2, _) = update(st.clone(), key(KeyCode::Char(' '), KeyModifiers::NONE));
-        st = st2;
-        assert!(
-            matches!(
-                st.transcript[0],
-                TranscriptItem::Reasoning { expanded: true, .. }
-            ),
-            "Espace déplie la sélection: {:?}",
-            st.transcript[0]
-        );
-        let (st2, _) = update(st, key(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        assert!(
-            matches!(
-                st2.transcript[0],
-                TranscriptItem::Reasoning {
-                    expanded: false,
-                    ..
-                }
-            ),
-            "Ctrl+R replie tous les raisonnements"
-        );
-    }
-
-    /// Commandes slash `/new`, `/agent x`, `/todo`, `/quit`.
-    #[test]
-    fn commandes_slash_effets() {
-        let (_st, e) = update(with_input("/new"), key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(e.contains(&Effect::NewConversation), "/new: {e:?}");
-        let (st, e) = update(
-            with_input("/agent fortran"),
-            key(KeyCode::Enter, KeyModifiers::NONE),
-        );
-        assert!(
-            e.contains(&Effect::SwitchAgent("fortran".to_string())),
-            "/agent: {e:?}"
-        );
-        assert_eq!(st.agent, "fortran");
-        let (st0, e) = update(idle(), key(KeyCode::Char('t'), KeyModifiers::CONTROL));
-        assert!(
-            e.is_empty() && st0.todo_visible,
-            "Ctrl+T bascule le panneau"
-        );
-        let (_st, e) = update(with_input("/quit"), key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(e.contains(&Effect::Quit), "/quit: {e:?}");
-    }
-
-    /// Usage cumule ; Subagent start/event/end imbriquent et marquent done.
-    #[test]
-    fn usage_et_subagent() {
-        let mut st = idle();
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-            }),
-        );
-        st = st2;
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::Usage {
-                input_tokens: 3,
-                output_tokens: 1,
-            }),
-        );
-        st = st2;
-        assert_eq!(st.usage.input, 13);
-        assert_eq!(st.usage.output, 6);
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::SubagentStart {
-                id: "s1".into(),
-                agent: "explorateur".into(),
-                task: "chercher".into(),
-            }),
-        );
-        st = st2;
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::SubagentEvent {
-                id: "s1".into(),
-                event: Box::new(ChatEvent::Token {
-                    content: "trouvé".into(),
-                }),
-            }),
-        );
-        st = st2;
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::SubagentEnd {
-                id: "s1".into(),
-                result: "fini".into(),
-            }),
-        );
-        st = st2;
-        let sub = st.transcript.iter().find_map(|i| match i {
-            TranscriptItem::Subagent {
-                items, done, agent, ..
-            } if agent == "explorateur" => Some((items.clone(), *done)),
-            _ => None,
-        });
-        let (items, done) = sub.expect("le sous-agent est imbriqué");
-        assert!(done, "marqué terminé");
-        assert!(
-            items.iter().any(|i| matches!(i,
-                TranscriptItem::Assistant { text, .. } if text == "trouvé")),
-            "l'événement imbriqué est stocké: {items:?}"
-        );
-    }
-
-    /// La molette verso fige le suivi, la molette retour ramène en bas
-    /// (Fin reprend le suivi).
-    #[test]
-    fn molette_defile() {
-        let st = idle();
-        let (st, _e) = update(st, Action::Mouse(MouseEventKind::ScrollUp));
-        assert!(!st.scroll.follow);
-        let (st, _e) = update(st, Action::Mouse(MouseEventKind::ScrollDown));
-        assert!(st.scroll.follow, "retour en bas reprend le suivi");
-    }
-
-    /// Redimensionner met à jour la taille ; Tick avance l'horloge.
-    #[test]
-    fn resize_et_tick() {
-        let (st, _e) = update(idle(), Action::Resize(120, 40));
-        assert_eq!(st.size, (120, 40));
-        let (st, _e) = update(st, Action::Tick);
-        assert!(st.tick >= 1);
-    }
-
-    /// Toute insertion désarme `quit_armed` (le double Ctrl+C doit être consécutif).
-    #[test]
-    fn insertion_desarme_quit() {
-        let (st, _e) = update(idle(), key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(st.quit_armed);
-        let st = {
-            let mut st = st;
-            st.input = editor::apply(EditorState::new(), EditCommand::InsertStr("a".into()));
-            st
-        };
-        let (_st, e) = update(st, key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(
-            !e.contains(&Effect::Quit),
-            "Ctrl+C sur saisie non vide ne quitte pas"
-        );
-    }
-
-    /// Un `ToolResult` avec un préfixe d'ordre inattendu ne perd AUCUN texte
-    /// émis (« ne jamais perdre de texte »).
-    #[test]
-    fn texte_emis_survit_aux_evenements_inattendus() {
-        let mut st = idle();
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::Token {
-                content: "important".into(),
-            }),
-        );
-        st = st2;
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::Error {
-                code: "VNL-LLM-001".into(),
-                message: "boom".into(),
-            }),
-        );
-        st = st2;
-        let (st2, _) = update(
-            st.clone(),
-            Action::Agent(ChatEvent::ToolResult {
-                id: "x".into(),
-                name: String::new(),
-                result: "?".into(),
-                is_error: true,
-            }),
-        );
-        let _ = st2;
-        assert!(
-            st.transcript.iter().any(|i| matches!(i,
-                TranscriptItem::Assistant { text, .. } if text == "important")),
-            "le texte émis reste dans la transcription"
-        );
+    fn collage_multiligne_sans_envoi() {
+        let (st, effects) = update(idle(), Action::Paste("a\nb\nc".to_string()));
+        assert!(effects.is_empty());
+        assert_eq!(st.input.lines.len(), 3);
     }
 }

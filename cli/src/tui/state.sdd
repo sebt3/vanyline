@@ -168,4 +168,4 @@ Scenario: séquence inattendue
   Then aucun plantage, l'état reste valide
 
 Tasks:
-  [ ] `state.rs` adapté (E7) : `ChatEvent` → `Event` de lymaille ; tests purs de chaque Scenario.
+  [x] `state.rs` adapté (E7) : `ChatEvent` → `Event` de lymaille ; tests purs de chaque Scenario.

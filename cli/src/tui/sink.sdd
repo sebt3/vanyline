@@ -46,4 +46,4 @@ Scenario: tous les événements transmis
   Then les quatre arrivent (aucun filtrage)
 
 Tasks:
-  [ ] `sink.rs` adapté (E7) et ses tests.
+  [x] `sink.rs` adapté (E7) et ses tests.

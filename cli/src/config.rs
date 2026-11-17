@@ -12,19 +12,6 @@ pub fn data_dir() -> PathBuf {
     base.join("vanyline")
 }
 
-// tooling.sdd D6a — config.sdd §Raises/@Returns : échec de création ⇒ stderr
-// commençant par `Failed to create config dir: ` suivi de l'erreur d'I/O, puis
-// exit(1) (Scenario dédié). La question de la FORME (tracing/propagation,
-// survie du code 1) reste le [?] ouvert config.sdd Tasks l.205 — non tranchée
-// ici.
-#[allow(clippy::print_stderr)]
-pub fn ensure_config_dir() {
-    std::fs::create_dir_all(config_dir()).unwrap_or_else(|e| {
-        eprintln!("Failed to create config dir: {e}");
-        std::process::exit(1);
-    });
-}
-
 // tooling.sdd D6a — config.sdd §Raises : @ensure_data_dir en échec, même motif
 // avec le préfixe `Failed to create data dir: ` + exit(1) (Scenario dédié).
 // Cf. [?] config.sdd Tasks l.205 pour la forme.
@@ -69,16 +56,6 @@ pub fn configured_namespace(layers: &Layers) -> Option<String> {
     layers.load_merged_config().ok().and_then(|raw| {
         raw.defaults
             .get("namespace")
-            .and_then(|v| v.as_str().map(String::from))
-    })
-}
-
-/// Nom de la sandbox toolbox configuree par defaut (`defaults.toolbox`
-/// du `config.yaml` fusionne). Meme mecanique que `configured_namespace`.
-pub fn configured_toolbox(layers: &Layers) -> Option<String> {
-    layers.load_merged_config().ok().and_then(|raw| {
-        raw.defaults
-            .get("toolbox")
             .and_then(|v| v.as_str().map(String::from))
     })
 }
@@ -199,25 +176,10 @@ mod tests {
     }
 
     // Scenario: configured_toolbox applique la meme fusion que configured_namespace
-    #[test]
-    fn configured_toolbox_applique_la_meme_fusion_que_configured_namespace() {
-        let (_g, _w, layers) = layers_with(
-            Some("defaults:\n  toolbox: base\n"),
-            Some("defaults:\n  toolbox: labs\n"),
-        );
-        assert_eq!(configured_toolbox(&layers).as_deref(), Some("labs"));
-        let sans_workspace = Layers {
-            global_dir: layers.global_dir.clone(),
-            workspace_dir: None,
-        };
-        assert_eq!(configured_toolbox(&sans_workspace).as_deref(), Some("base"));
-    }
-
     // Scenario: defaults absents de toute couche donnent None
     #[test]
     fn defaults_absents_de_toute_couche_donnent_none() {
         let (_g, _w, layers) = layers_with(None, None);
         assert_eq!(configured_namespace(&layers), None);
-        assert_eq!(configured_toolbox(&layers), None);
     }
 }

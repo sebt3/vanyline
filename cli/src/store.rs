@@ -50,15 +50,6 @@ pub fn set_active_conversation(id: &Uuid) -> Result<(), std::io::Error> {
     save_json(&path, id)
 }
 
-pub fn get_active_conversation() -> Option<Uuid> {
-    let path = data_dir().join("active-conversation.json");
-    if path.exists() {
-        load_json(&path).ok()
-    } else {
-        None
-    }
-}
-
 fn load_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
     let val: T = serde_json::from_str(&content)

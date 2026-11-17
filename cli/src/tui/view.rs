@@ -16,7 +16,8 @@ use ratatui::widgets::Widget;
 
 use crate::tui::editor;
 use crate::tui::markdown;
-use crate::tui::state::{AppState, NoticeLevel, Status, TranscriptItem};
+use crate::tui::state::{AppState, NoticeLevel, Status, SubagentStatus, TranscriptItem};
+use lymaille::Outcome;
 
 /// Thème de rendu (styles sobres, lisibles à 16 couleurs ; les statuts portent
 /// un symbole, jamais une couleur seule).
@@ -225,7 +226,7 @@ fn header_spans(state: &AppState, theme: &Theme) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!("· {title} · "), theme.dim));
     }
     spans.push(Span::styled(
-        format!("· conv {} ", short_id(&state.conversation_id)),
+        format!("· session {} ", short_id(&state.session_id)),
         theme.dim,
     ));
     match state.status {
@@ -273,7 +274,7 @@ thread_local! {
 
 /// Lignes stylées de la transcription (cache : (révision, sélection, largeur)).
 fn cached_lines(state: &AppState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let key = (state.revision, state.selected, width);
+    let key = (state.revision, state.selection, width);
     let hit = LINES_CACHE.with(|c| {
         c.borrow()
             .as_ref()
@@ -285,7 +286,7 @@ fn cached_lines(state: &AppState, width: usize, theme: &Theme) -> Vec<Line<'stat
     }
     let lines = build_lines(state, width, theme);
     LINES_CACHE.with(|c| {
-        *c.borrow_mut() = Some((state.revision, state.selected, width, lines.clone()));
+        *c.borrow_mut() = Some((state.revision, state.selection, width, lines.clone()));
     });
     lines
 }
@@ -295,13 +296,13 @@ fn cached_lines(state: &AppState, width: usize, theme: &Theme) -> Vec<Line<'stat
 fn build_lines(state: &AppState, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for (idx, item) in state.transcript.iter().enumerate() {
-        let selected = state.selected == Some(idx);
+        let selected = state.selection == Some(idx);
         push_item_lines(&mut out, item, width, theme, selected, 0);
     }
     out
 }
 
-#[allow(clippy::too_many_lines)] // une branche par élément de transcription : view.sdd §Handles (User, Assistant, Reasoning, ToolCall, Subagent, Notice, Interrupted) — la longueur est le contrat
+#[allow(clippy::too_many_lines)] // une branche par élément de transcription : view.sdd §Handles — la longueur est le contrat
 fn push_item_lines(
     out: &mut Vec<Line<'static>>,
     item: &TranscriptItem,
@@ -315,12 +316,21 @@ fn push_item_lines(
         out.push(prefix_indent(line, indent));
     };
     match item {
-        TranscriptItem::User(text) => {
-            for chunk in wrap_plain(text, inner_width.saturating_sub(2).max(1)) {
+        TranscriptItem::User { text, during_turn } => {
+            let marque = if *during_turn {
+                "❯ (pendant le tour) "
+            } else {
+                "❯ "
+            };
+            let largeur = inner_width
+                .saturating_sub(editor::display_width(marque))
+                .max(1);
+            for (n, chunk) in wrap_plain(text, largeur).into_iter().enumerate() {
+                let prefixe = if n == 0 { marque } else { "  " };
                 emit(
                     out,
                     Line::from(vec![
-                        Span::styled("❯ ", theme.user),
+                        Span::styled(prefixe, theme.user),
                         Span::styled(
                             chunk,
                             if selected {
@@ -343,54 +353,25 @@ fn push_item_lines(
                 emit(out, line);
             }
         }
-        TranscriptItem::Reasoning { text, expanded } => {
-            let n = text.lines().count().max(1);
-            if *expanded {
-                emit(
-                    out,
-                    Line::from(Span::styled(
-                        format!("▾ raisonnement ({n} lignes)"),
-                        theme.dim,
-                    )),
-                );
-                for l in wrap_plain(text, inner_width) {
-                    emit(
-                        out,
-                        Line::from(Span::styled(
-                            l,
-                            if selected {
-                                base_selected(theme)
-                            } else {
-                                theme.dim
-                            },
-                        )),
-                    );
-                }
-            } else {
-                emit(
-                    out,
-                    Line::from(Span::styled(
-                        format!("▸ raisonnement ({n} lignes)"),
-                        theme.dim,
-                    )),
-                );
-            }
-        }
-        TranscriptItem::ToolCall {
-            name,
-            args,
-            result,
-            is_error,
+        TranscriptItem::Script {
+            seq,
+            functions,
+            duration_ms,
+            ok,
+            error,
+            script,
+            output,
             expanded,
-            ..
         } => {
-            let status = if result.is_some() {
-                if *is_error { " ✗" } else { " ✓" }
-            } else {
-                " …"
-            };
+            // Une seule ligne repliée : fonctions MCP, durée, statut (symbole, pas couleur).
             let arrow = if *expanded { "▾" } else { "▸" };
-            let head = format!("{arrow} {name}({})", truncate_mid(args, 40));
+            let fonctions = if functions.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", truncate_mid(&functions.join(", "), 40))
+            };
+            let statut = if *ok { " ✓" } else { " ✗" };
+            let head = format!("{arrow} script {seq}{fonctions} · {duration_ms} ms");
             emit(
                 out,
                 Line::from(vec![
@@ -402,52 +383,51 @@ fn push_item_lines(
                             theme.text
                         },
                     ),
-                    Span::styled(status, if *is_error { theme.error } else { theme.dim }),
+                    Span::styled(statut, if *ok { theme.dim } else { theme.error }),
                 ]),
             );
             if *expanded {
-                for l in wrap_plain(&format!("arguments : {args}"), inner_width) {
-                    emit(out, Line::from(Span::styled(l, theme.dim)));
+                let mut corps: Vec<(String, Style)> = Vec::new();
+                for l in script.lines() {
+                    corps.push((l.to_string(), theme.code_block));
                 }
-                if let Some(res) = result {
-                    for (n, l) in res.lines().enumerate() {
-                        if n >= TOOL_RESULT_MAX_LINES {
-                            let rest = res.lines().count().saturating_sub(n);
-                            emit(
-                                out,
-                                Line::from(Span::styled(
-                                    format!("… {rest} lignes supplémentaires tronquées"),
-                                    theme.dim,
-                                )),
-                            );
-                            break;
+                match error {
+                    Some(message) => corps.push((format!("erreur : {message}"), theme.error)),
+                    None => {
+                        for l in output.lines() {
+                            corps.push((l.to_string(), theme.dim));
                         }
+                    }
+                }
+                let total = corps.len();
+                for (n, (l, style)) in corps.into_iter().enumerate() {
+                    if n >= TOOL_RESULT_MAX_LINES {
+                        let rest = total.saturating_sub(n);
                         emit(
                             out,
-                            Line::from(Span::styled(l.to_string(), theme.code_block)),
+                            Line::from(Span::styled(
+                                format!("… {rest} lignes supplémentaires tronquées"),
+                                theme.dim,
+                            )),
                         );
+                        break;
+                    }
+                    for chunk in wrap_plain(&l, inner_width.max(1)) {
+                        emit(out, Line::from(Span::styled(chunk, style)));
                     }
                 }
             }
         }
-        TranscriptItem::Subagent {
-            agent,
-            task,
-            items,
-            done,
-            ..
-        } => {
-            let head = format!(
-                "◆ sous-agent {agent} — {}{}",
-                truncate_mid(task, 30),
-                if *done { " ✓" } else { " …" }
-            );
+        TranscriptItem::Subagent { run, agent, status } => {
+            let etat = match status {
+                SubagentStatus::Running => "…",
+                SubagentStatus::Ended(Outcome::Failed) => "✗",
+                SubagentStatus::Ended(Outcome::Cancelled) => "⊘ annulé",
+                SubagentStatus::Ended(_) => "✓",
+                SubagentStatus::Interrupted => "⊘ interrompu",
+            };
+            let head = format!("◆ sous-agent {agent} ({}) {etat}", truncate_mid(run, 24));
             emit(out, Line::from(Span::styled(head, theme.bullet)));
-            for sub in items {
-                let mut inner = Vec::new();
-                push_item_lines(&mut inner, sub, width, theme, false, 2);
-                out.append(&mut inner);
-            }
         }
         TranscriptItem::Notice { level, text } => {
             let (sym, style) = match level {
@@ -698,7 +678,7 @@ fn render_editor(buf: &mut Buffer, area: Rect, rows: &[String], theme: &Theme) {
     }
 }
 
-/// Barre d'état : animation, jetons, résumé git, aide minimale, « ↓ nouveau ».
+/// Barre d'état : animation, jetons, fichiers modifiés, aide minimale, « ↓ nouveau ».
 fn render_status(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) {
     if area.area() == 0 {
         return;
@@ -711,11 +691,16 @@ fn render_status(buf: &mut Buffer, area: Rect, state: &AppState, theme: &Theme) 
         spans.push(Span::styled(format!("{ch} "), theme.warn));
     }
     spans.push(Span::styled(
-        format!("↑{} ↓{}", state.usage.input, state.usage.output),
+        format!("↑{} ↓{}", state.usage.prompt, state.usage.completion),
         theme.dim,
     ));
-    if let Some(g) = &state.git_summary {
-        spans.push(Span::styled(format!(" · {g}"), theme.dim));
+    if let Some(n) = state.dirty_files {
+        let texte = if n == 1 {
+            " · 1 fichier modifié".to_string()
+        } else {
+            format!(" · {n} fichiers modifiés")
+        };
+        spans.push(Span::styled(texte, theme.dim));
     }
     if state.scroll.pending {
         spans.push(Span::styled(" ↓ nouveau", theme.warn));
@@ -808,7 +793,10 @@ mod tests {
     fn base_state(w: u16, h: u16) -> AppState {
         let mut s = AppState::new("agent-demo", "abcdef01-2345".to_string(), None, (w, h));
         s.transcript = vec![
-            TranscriptItem::User("question".to_string()),
+            TranscriptItem::User {
+                text: "question".to_string(),
+                during_turn: false,
+            },
             TranscriptItem::Assistant {
                 text: "réponse".to_string(),
                 done: true,
@@ -819,6 +807,19 @@ mod tests {
             },
         ];
         s
+    }
+
+    fn script(ok: bool, output: &str) -> TranscriptItem {
+        TranscriptItem::Script {
+            seq: 1,
+            functions: vec!["query".to_string()],
+            duration_ms: 12,
+            ok,
+            error: if ok { None } else { Some("échec".to_string()) },
+            script: "print(1)".to_string(),
+            output: output.to_string(),
+            expanded: false,
+        }
     }
 
     fn draw(s: &AppState) -> TestBackend {
@@ -850,6 +851,11 @@ mod tests {
             l[0]
         );
         assert!(
+            l[0].contains("session abcdef01"),
+            "session dans l'en-tête: {:?}",
+            l[0]
+        );
+        assert!(
             l[29].contains("Ctrl-D"),
             "barre d'état dernière ligne: {:?}",
             l[29]
@@ -859,6 +865,21 @@ mod tests {
         assert!(
             joined.contains("question") && joined.contains("réponse"),
             "transcription entre les deux: {joined}"
+        );
+    }
+
+    /// Un message envoyé pendant un tour porte son marqueur.
+    #[test]
+    fn message_pendant_le_tour_marque() {
+        let mut s = base_state(100, 30);
+        s.transcript.push(TranscriptItem::User {
+            text: "bis".to_string(),
+            during_turn: true,
+        });
+        let joined = lines_of(&s).join("\n");
+        assert!(
+            joined.contains("(pendant le tour) bis"),
+            "marque visible: {joined}"
         );
     }
 
@@ -876,7 +897,6 @@ mod tests {
                 status: "done".into(),
             },
         ];
-        // 140 colonnes → panneau à droite : les tâches apparaissent loin à droite.
         let mut wide = base_state(140, 30);
         wide.todo = todo.clone();
         wide.todo_visible = true;
@@ -887,8 +907,6 @@ mod tests {
             "à 140 colonnes, les tâches sont dans la colonne de droite"
         );
 
-        // 80 colonnes → pas de colonne droite : aucune tâche à droite de 79,
-        // et le panneau est listé au-dessus de la barre d'état.
         let mut narrow = base_state(80, 30);
         narrow.todo = todo;
         narrow.todo_visible = true;
@@ -906,7 +924,6 @@ mod tests {
     }
 
     fn starts_task_cell(b: &Buffer, x: u16, y: u16) -> bool {
-        // Détecte le début d'une ligne de tâche (« [ ] tâche-alpha ») à x donné.
         if let Some(cell) = b.cell((x, y))
             && cell.symbol() == "["
         {
@@ -926,57 +943,44 @@ mod tests {
         false
     }
 
-    /// Scenario: `appel_d_outil_replie_et_deplie` — une ligne
-    /// `▸ nom(args…)` repliée ; déplié : arguments et résultat bornés.
+    /// Scenario: `script_replie_puis_deplie` — une ligne `▸ script …` avec
+    /// durée et statut ; déplié : le script complet puis sa sortie.
     #[test]
-    fn appel_d_outil_replie_et_deplie() {
+    fn script_replie_puis_deplie() {
         let mut s = base_state(100, 30);
-        s.transcript.push(TranscriptItem::ToolCall {
-            id: "t1".into(),
-            name: "read_file".into(),
-            args: "{\"path\":\"longchemin/fichier.txt\"}".into(),
-            result: Some("le résultat".into()),
-            is_error: false,
-            expanded: false,
-        });
-        let l = lines_of(&s);
-        let joined = l.join("\n");
-        assert!(joined.contains("▸ read_file("), "ligne repliée: {joined}");
-        assert!(!joined.contains("le résultat"), "résultat masqué replié");
-        let expanded = {
-            let mut s2 = s.clone();
-            if let Some(TranscriptItem::ToolCall { expanded, .. }) = s2.transcript.last_mut() {
-                *expanded = true;
-            }
-            // le dépliage réel passe par `state::update` (Espace sur
-            // sélection), qui incrémente `revision` — la clé du cache de
-            // lignes de la vue ; le test reproduit ce mouvement.
-            s2.revision = s2.revision.wrapping_add(1);
-            s2
-        };
-        let l = lines_of(&expanded).join("\n");
-        assert!(l.contains("▾ read_file("), "ligne dépliée: {l}");
-        assert!(l.contains("le résultat"), "résultat visible déplié");
-        assert!(l.contains("path"), "arguments visibles déplié");
+        s.transcript.push(script(true, "le résultat"));
+        let joined = lines_of(&s).join("\n");
+        assert!(
+            joined.contains("▸ script 1 · query · 12 ms ✓"),
+            "ligne repliée: {joined}"
+        );
+        assert!(!joined.contains("le résultat"), "sortie masquée repliée");
+
+        let mut deplie = s.clone();
+        if let Some(TranscriptItem::Script { expanded, .. }) = deplie.transcript.last_mut() {
+            *expanded = true;
+        }
+        deplie.revision = deplie.revision.wrapping_add(1);
+        let joined = lines_of(&deplie).join("\n");
+        assert!(joined.contains("▾ script 1"), "ligne dépliée: {joined}");
+        assert!(joined.contains("print(1)"), "script complet visible");
+        assert!(joined.contains("le résultat"), "sortie visible");
     }
 
-    /// Scenario: `resultat_tronque` — un résultat de 500 lignes déplié : au
-    /// plus 40 lignes de résultat et un marqueur de troncature.
+    /// Scenario: `sortie_tronquee` — un résultat de 500 lignes déplié : au
+    /// plus 40 lignes et un marqueur de troncature.
     #[test]
-    fn resultat_tronque() {
+    fn sortie_tronquee() {
         let big = (0..500)
             .map(|i| format!("ligne {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let mut s = AppState::new("a", "c".into(), None, (100, 30));
-        s.transcript.push(TranscriptItem::ToolCall {
-            id: "t".into(),
-            name: "x".into(),
-            args: "{}".into(),
-            result: Some(big),
-            is_error: false,
-            expanded: true,
-        });
+        let mut item = script(true, &big);
+        if let TranscriptItem::Script { expanded, .. } = &mut item {
+            *expanded = true;
+        }
+        s.transcript.push(item);
         let joined = lines_of(&s).join("\n");
         assert!(!joined.contains("ligne 499"), "au plus 40 lignes rendues");
         assert!(joined.contains("tronquées"), "marqueur de troncature");
@@ -998,27 +1002,13 @@ mod tests {
         }
     }
 
-    /// Scenario: `statut_sans_couleur` — un appel qui réussit (`✓`) et un qui
-    /// échoue (`✗`) sont distingués par leurs symboles.
+    /// Scenario: `statut_sans_couleur` — un script qui réussit (`✓`) et un
+    /// qui échoue (`✗`) sont distingués par leurs symboles.
     #[test]
     fn statut_sans_couleur() {
         let mut s = AppState::new("a", "c".into(), None, (100, 30));
-        s.transcript.push(TranscriptItem::ToolCall {
-            id: "ok".into(),
-            name: "un".into(),
-            args: "{}".into(),
-            result: Some("bien".into()),
-            is_error: false,
-            expanded: false,
-        });
-        s.transcript.push(TranscriptItem::ToolCall {
-            id: "ko".into(),
-            name: "deux".into(),
-            args: "{}".into(),
-            result: Some("mal".into()),
-            is_error: true,
-            expanded: false,
-        });
+        s.transcript.push(script(true, "bien"));
+        s.transcript.push(script(false, ""));
         let joined = lines_of(&s).join("\n");
         assert!(
             joined.contains('✓') && joined.contains('✗'),
@@ -1038,10 +1028,40 @@ mod tests {
         assert!(joined.contains("↓ nouveau"), "indicateur visible: {joined}");
     }
 
-    /// Scenario: `curseur_dans_la_saisie` — saisie de deux lignes avec du
-    /// texte Unicode large : le curseur terminal est sur la bonne colonne
-    /// d'affichage (ligne courante « abé » → 3 colonnes ; ligne large « 日本 »
-    /// → 4 colonnes).
+    /// Scenario: `nombre_de_fichiers_modifies` — `Some(3)` puis `None`.
+    #[test]
+    fn nombre_de_fichiers_modifies() {
+        let mut s = base_state(100, 30);
+        s.dirty_files = Some(3);
+        let l = lines_of(&s);
+        assert!(
+            l[29].contains("3 fichiers modifiés"),
+            "barre d'état: {:?}",
+            l[29]
+        );
+        s.dirty_files = None;
+        let l = lines_of(&s);
+        assert!(!l[29].contains("modifié"), "rien sans sandbox: {:?}", l[29]);
+    }
+
+    /// Une ligne de sous-agent montre son agent et son statut.
+    #[test]
+    fn ligne_de_subagent() {
+        let mut s = base_state(100, 30);
+        s.transcript.push(TranscriptItem::Subagent {
+            run: "run-7".into(),
+            agent: "sub".into(),
+            status: st::SubagentStatus::Ended(Outcome::Valid),
+        });
+        let joined = lines_of(&s).join("\n");
+        assert!(
+            joined.contains("sous-agent sub (run-7) ✓"),
+            "ligne de statut: {joined}"
+        );
+    }
+
+    /// Scenario: `curseur_dans_la_saisie` — texte Unicode large : le curseur
+    /// terminal est sur la bonne colonne d'affichage.
     #[test]
     fn curseur_dans_la_saisie() {
         let mut s = AppState::new("a", "c".into(), None, (100, 30));
@@ -1050,8 +1070,7 @@ mod tests {
             cursor: (1, 3),
             ..editor::EditorState::new()
         };
-        let backend = draw(&s);
-        let pos = backend.cursor_position();
+        let pos = draw(&s).cursor_position();
         assert_eq!(
             pos.x, 3,
             "curseur en fin de « abé » (3 colonnes d'affichage)"
@@ -1059,8 +1078,7 @@ mod tests {
 
         let mut s2 = s.clone();
         s2.input.cursor = (0, 2);
-        let backend = draw(&s2);
-        let pos = backend.cursor_position();
+        let pos = draw(&s2).cursor_position();
         assert_eq!(
             pos.x, 4,
             "curseur en fin de « 日本 » (4 colonnes d'affichage)"
@@ -1078,7 +1096,6 @@ mod tests {
             ..editor::EditorState::new()
         };
         let l = lines_of(&s);
-        // la zone saisie fait 8 lignes : les lignes 20..27 en bas de l'écran
         assert!(
             !l.join("\n").contains("zz0"),
             "les premières lignes ont défilé"
@@ -1089,13 +1106,15 @@ mod tests {
         );
     }
 
-    /// Cas additionnel : rendu 100×30 avec transcription plus haute que
-    /// l'écran et suivi de la fin ⇒ les dernières lignes sont affichées.
+    /// Transcription plus haute que l'écran et suivi de la fin : le bas est visible.
     #[test]
     fn suivi_affiche_le_bas() {
         let mut s = AppState::new("a", "c".into(), None, (100, 20));
         s.transcript = (0..200)
-            .map(|i| TranscriptItem::User(format!("u{i}")))
+            .map(|i| TranscriptItem::User {
+                text: format!("u{i}"),
+                during_turn: false,
+            })
             .collect();
         let joined = lines_of(&s).join("\n");
         assert!(
