@@ -218,6 +218,26 @@ mod tests {
         assert!(evt.contains("export type HostEvent"), "{evt}");
         assert!(evt.contains("payload: any"), "{evt}");
     }
+
+    // ── Scenario « export TypeScript de la configuration lymaille » (#72) ──
+
+    /// Régénère `packages/protocol/src/generated/lymaille/` par l'export de miryad-core ; les
+    /// fichiers sont commités, le job CI `tsrs` vérifie `git diff --exit-code`.
+    #[cfg(feature = "ts-rs")]
+    #[test]
+    fn export_lymaille_types_ts() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../packages/protocol/src/generated/lymaille");
+        let ecrits = miryad_core::lymaille::interactive::event::export_typescript(&dir)
+            .expect("l'export de miryad-core s'écrit");
+        assert!(!ecrits.is_empty());
+        for attendu in ["agent.ts", "AgentDefinition.ts", "SessionEvent.ts"] {
+            assert!(
+                ecrits.iter().any(|p| p.ends_with(attendu)),
+                "{attendu} absent de l'export"
+            );
+        }
+    }
 }
 
 /// Support de test (aucun contrat) : capture des messages `tracing` émis pendant une

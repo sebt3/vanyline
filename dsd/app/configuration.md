@@ -79,9 +79,9 @@ Hors périmètre :
   transite par l'application ni l'interface.
     - **Source:** miryad-core `lymaille#DEC-16`
 - **CON-5:** Les colonnes de définition (agent, profil, toolset, fournisseur) sont du JSON que l'IR de miryad-core présente comme un
-  objet opaque ; leur forme interne est celle des types de lymaille. L'export ts-rs de miryad-core 0.3.1 ne couvre aujourd'hui que les
-  événements de session (`SessionEvent`, `SessionEventKind`, `SessionOutcome`, par `export_typescript`) ; lymaille 0.2.1 n'en a aucun. Les
-  définitions, les lignes de ressource et les corps de requête de session ne sont pas exportés.
+  objet opaque ; leur forme interne est celle des types de lymaille. L'export ts-rs de miryad-core 0.4.0
+  (`interactive::event::export_typescript(dir)`, #72) couvre les événements de session, les types de définition de lymaille, les `Model`
+  des dix ressources et les corps de requête de session.
     - **Source:** miryad-core `frontend.md` (IR), `src/lymaille/interactive/event.rs` ; lymaille `agents/`, `toolsets/` (vérifié le 2026-11-13)
 
 ## Exigences fonctionnelles
@@ -170,23 +170,22 @@ Hors périmètre :
     - **Decision:** voir `FR-4`.
     - **Source:** miryad-core `lymaille#DEC-16`
 
-- **DEC-5 - On s'arrime au tooling de miryad-core ; les types des définitions viennent d'un export amont, en attendant des miroirs gardés**
+- **DEC-5 - On s'arrime au tooling de miryad-core ; les types des définitions viennent de son export TypeScript**
     - **Decision:** l'application produit l'IR de ses ressources (`resource_ir`, fichier `ir.json` par un binaire de `app`) ; les écrans de
       liste et les types des colonnes plates en sont dérivés. Les formes des colonnes de définition (`AgentDefinition`, `ModelProfile`,
-      `Toolset`, fournisseur) devraient venir d'un export ts-rs de lymaille et de miryad-core, comme les événements de session : cet export
-      est une **demande amont** (`OI-3`, miryad-core#72). Tant qu'il n'existe pas, vanyline écrit des miroirs Rust qui dérivent `TS`
-      (`app/src/definitions/`), gardés par un test de contrat qui compare le JSON d'une valeur construite par la crate à celui du miroir, dans
-      les deux sens ; les miroirs sont retirés quand l'export amont existe.
-    - **Alternatives:** miroirs sans garde (écarté : dérive silencieuse) ; attendre l'export avant d'écrire les écrans (écarté : le frontend
-      n'attend pas) ; JSON brut sans types fins (écarté : formulaires peu guidés).
-    - **Consequences:** voir `OI-1` pour l'écart de bibliothèque de composants du générateur, `OI-3` pour la demande amont.
+      `Toolset`, fournisseur) et les lignes des ressources viennent de l'export ts-rs de miryad-core (`export_typescript`, miryad-core 0.4.0,
+      #72), appelé par un test de l'application qui écrit `packages/protocol/src/generated/lymaille/` (`app/sessions/events.sdd`) ; la CI
+      vérifie la fraîcheur. Aucun miroir Rust n'est écrit par vanyline.
+    - **Alternatives:** miroirs gardés par des tests de contrat (écartés dès que l'export amont existe) ; JSON brut sans types fins (écarté :
+      formulaires peu guidés).
+    - **Consequences:** voir `OI-1` pour l'écart de bibliothèque de composants du générateur.
     - **Source:** décision du développeur principal, 2026-11-13 (« miryad-core fournit le tooling, on doit arrimer »), précisée par la vérification de `CON-5`
 
 ## Réalisation SpecDD
 
 - `app/src/` : binaire de production de l'IR (`ir`) listant les ressources montées ; amendement de `main.sdd`.
-- `app/src/definitions/` : miroirs ts-rs des définitions et des lignes de ressource, exportés vers
-  `packages/protocol/src/generated/definition-domain.ts` (remplace le `config-domain.ts` de l'ancien modèle).
+- `app/src/sessions/events.rs` : le test d'export de `export_typescript` vers `packages/protocol/src/generated/lymaille/` (remplace le
+  `config-domain.ts` de l'ancien modèle).
 - `packages/ui/src/config/` : un écran par ressource et la coque `ConfigShell` (les écrans retirés par D3 sont remplacés) ; spec par
   composant.
 - `frontend/src/api/` : le client de ressources qui remplace `httpConfigRepo.ts` ; `SettingsView` amendée.
@@ -214,11 +213,6 @@ Hors périmètre :
 - **OI-2 - Essais de connexion.** Les écrans actuels testent un fournisseur (liste des modèles) et un serveur MCP (liste des outils) par des
   routes propres de l'ancien backend, retirées. **TBD :** une route de `app` qui fait cet essai sous les droits de l'utilisateur, ou s'en
   passer (l'échec se voit à l'usage).
-- **OI-3 - Export TypeScript des définitions.** Les types de lymaille (`AgentDefinition`, `ModelProfile`, `Toolset`, fournisseur), les lignes
-  des ressources de miryad-core et les corps de requête de session ne sont pas exportés vers TypeScript (`CON-5`). **Décision :** vanyline écrit des
-  miroirs Rust dérivant `TS` (`app/src/definitions/`) et la demande amont est ouverte, [miryad-core#72](https://github.com/sebt3/miryad-core/issues/72)
-  (feature `ts-rs` étendue de miryad-core et de lymaille, sur le modèle de `export_typescript` des événements). À préciser en spec : lesquels
-  de leurs champs les formulaires exposent en première version.
 - **OI-4 - Contextes et types de contexte.** Ces objets n'ont jamais eu d'écran. **TBD :** ce qu'un utilisateur ordinaire en fait (créer un
   contexte privé, lier un rôle MCP) et ce qui reste réservé à l'administrateur, à partir de `lymaille#DEC-20`.
 

@@ -52,6 +52,14 @@ Scenario: export TypeScript vérifié (`AC-6`)
   When les types générés diffèrent de `packages/protocol/src/generated/`
   Then la CI échoue — @HostEvent.ts est produit par le même harnais que les types de miryad-core
 
+Scenario: export TypeScript de la configuration lymaille (#72)
+  Given le crate compilé avec la feature `ts-rs`
+  When le test `export_lymaille_types_ts` s'exécute
+  Then `export_typescript` de miryad-core écrit ses fichiers dans
+    `packages/protocol/src/generated/lymaille/` (dont `agent.ts`, `AgentDefinition.ts`,
+    `SessionEvent.ts`), la liste rendue est non vide, et la régénération est identique
+    (`git diff` vide au job CI `tsrs`)
+
 Scenario: charge refusée sans casse (`AC-6`)
   Given un @HostEvent au `payload` sérialisé de plus de 65 536 octets
   When la publication est tentée
@@ -59,5 +67,12 @@ Scenario: charge refusée sans casse (`AC-6`)
     aucun événement partiel n'est diffusé
 
 Tasks:
+  [?] Les fichiers de l'export amont `Provider.ts`/`provider.ts` et `Toolset.ts`/`toolset.ts` ne
+    diffèrent que par la casse (type de lymaille et `Model` de la ressource) : `tsc` refuse le
+    répertoire (TS1149/1261) et un système de fichiers insensible à la casse en perdrait un.
+    `packages/protocol/tsconfig.json` exclut `src/generated/lymaille` en attendant un nommage
+    distinct amont ; le frontend ne l'importera qu'après.
+  [x] Lot 3 (#72) : test `export_lymaille_types_ts` (feature `ts-rs`) ; les miroirs
+    `app/src/definitions/` sont supprimés (jamais codés).
   [x] B8 du chantier lymaille : code + export + extension du job CI `tsrs` (amendement
     ./.github/workflows.sdd alors).

@@ -4,5 +4,6 @@
     "types": [],
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["src/**/*.ts", "src/**/*.spec.ts"]
+  "include": ["src/**/*.ts", "src/**/*.spec.ts"],
+  "exclude": ["src/generated/lymaille"]
 }
