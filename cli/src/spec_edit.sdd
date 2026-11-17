@@ -1,0 +1,79 @@
+Spec: Spec edit — `apply -f` et `edit` des spécifications complètes
+
+Platform: Rust/vanyline-cli — vanyline-crds, vanyline-lib (feature `k8s`)
+
+Purpose:
+  Le moteur commun des commandes `project|sandbox apply -f <fichier>` et `project|sandbox edit
+  <nom>` (`dsd/cli/objets.md#FR-3` à `FR-5`, `DEC-1`) : lire une spécification complète de CRD,
+  refuser avant tout appel au cluster toute modification d'un champ immuable ou un nommage invalide,
+  puis créer ou mettre à jour l'objet de façon idempotente. `edit` passe par `$EDITOR`.
+
+Owns:
+  ./spec_edit.rs
+
+References:
+  /dsd/cli/objets.md — `FR-3`, `FR-4`, `FR-5`, `CON-2`, `DEC-1`, `AC-3`, `AC-4`, `AC-5`
+  /dsd/workspaces.md — `BR-3`, `BR-5`, `FR-3`
+  ./target.sdd
+  /crds/src/lib.sdd
+
+Exposes:
+  @Kind — `Project` | `Sandbox`.
+  @parse_spec(kind: @Kind, texte: &str) -> `Result<ObjectSpec, SpecError>` : YAML ou JSON de la
+    spécification complète du CRD (`ProjectSpec`, `SandboxSpec` de `vanyline-crds`, champs inconnus
+    refusés).
+  @check_immutable(kind: @Kind, existant: &ObjectSpec, voulu: &ObjectSpec) -> `Result<(), SpecError>` :
+    nom, projet et propriétaire d'une sandbox (`CON-2`), et tout autre champ immuable du CRD ;
+    l'erreur nomme le champ.
+  @apply(client: &VnlK8sClient, kind, owner, nom, voulu) -> `Result<ApplyOutcome, SpecError>` (async) :
+    `Created` | `Updated` | `Unchanged` ; rejouer le même fichier est `Unchanged` (idempotence).
+  @edit(client, kind, owner, nom, éditeur: impl Editor) -> `Result<ApplyOutcome, SpecError>` (async) :
+    lit la spécification existante, l'ouvre dans `$EDITOR` (variable absente ⇒ `SpecError::Usage`),
+    valide puis applique. En cas d'erreur de validation, le fichier temporaire est CONSERVÉ et son
+    chemin est rendu dans l'erreur pour ne pas perdre la saisie.
+
+Handles:
+  Un @apply sur un champ immuable modifié est refusé AVANT tout appel au cluster, avec le nom du
+    champ (`FR-4`, `AC-4`) ; le nommage `<projet>-<nom>` vient de `vanyline-crds`.
+  Après @apply/@edit, la commande lit l'état de la sandbox et affiche « redémarrage requis » quand
+    il le porte (`FR-5`, `AC-5`) ; le pod n'est JAMAIS redémarré par la CLI.
+  Un `edit` sans changement est `Unchanged` (aucune écriture).
+
+Must:
+  Valider (immuabilité, nommage, spécification) avant la première écriture.
+  Ne jamais écrire de valeur de secret dans une spécification : les champs de secret ne portent que
+    des références (`objets` « Sécurité »).
+
+Must not:
+  Redémarrer un pod ; supprimer puis recréer pour « modifier » (le worktree serait perdu,
+    `workspaces#FR-3`).
+
+Scenario: apply crée puis met à jour
+  Given une spécification de sandbox puis la même avec `egress` modifié
+  When @apply deux fois
+  Then `Created` puis `Updated` sans recréation ; un troisième @apply identique est `Unchanged` (`AC-3`)
+
+Scenario: champ immuable refusé
+  Given une sandbox existante et un fichier qui change son projet
+  When @apply
+  Then `SpecError` nommant `project`, aucune requête d'écriture (`AC-4`)
+
+Scenario: redémarrage requis signalé
+  Given une modification des toolchains d'une sandbox en cours
+  When @apply
+  Then le signalement « redémarrage requis » est rendu, le pod n'est pas redémarré (`AC-5`)
+
+Scenario: edit conserve la saisie invalide
+  Given un éditeur simulé qui écrit une spécification invalide
+  When @edit
+  Then `SpecError` avec le chemin du fichier temporaire conservé
+
+Scenario: edit sans EDITOR
+  Given `$EDITOR` absent
+  When @edit
+  Then `SpecError::Usage`
+
+Tasks:
+  [ ] `spec_edit.rs` et ses tests (client K8s simulé) — E9.
+  [?] `edit` d'un Owner (`dsd/cli/objets.md#OI-1`) : pas d'`apply`/`edit` pour les Owners (réservés à
+    l'administrateur), à ajouter si un besoin apparaît.

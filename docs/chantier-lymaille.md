@@ -123,16 +123,16 @@ Specs (parallélisables après B9), puis code séquentiel :
 
 La CLI ne dépend que de lymaille 0.2.1. Specs d'abord (parallélisables) :
 
-- [ ] **E1 — Specs `cli/src/host/`** (`dsd/cli/hote.md`, section « Réalisation SpecDD ») : stores de session et d'index, de
+- [ ] **E1 — Specs `cli/src/host/`** *(rédigée le 2026-11-17, en attente de relecture)* (`dsd/cli/hote.md`, section « Réalisation SpecDD ») : stores de session et d'index, de
   catalogue, de toolsets et de contextes, de mémoires, secrets, contexte dérivé du cluster, jeton d'Owner, journal d'audit.
   Les `OI-1`, `OI-2`, `OI-4` de ce DSD (disposition d'une mémoire, format de `secrets.yaml`, version du format) restent des
   `[?]` dans ces specs.
-- [ ] **E2 — Specs TUI** (`dsd/cli/chat.md`) : adapter `tui/{state,view,sink,mod}.sdd` ; remplacer `chat.sdd`, la partie chat de
+- [ ] **E2 — Specs TUI** *(rédigée le 2026-11-17, en attente de relecture)* (`dsd/cli/chat.md`) : adapter `tui/{state,view,sink,mod}.sdd` ; remplacer `chat.sdd`, la partie chat de
   `main.sdd` et `tools.sdd`.
-- [ ] **E3 — Specs `run` et `script`** (`dsd/cli/batch.md`) : une spec pour `run`, une pour `script`, une pour les codes de sortie ;
+- [ ] **E3 — Specs `run` et `script`** *(rédigée le 2026-11-17, en attente de relecture)* (`dsd/cli/batch.md`) : une spec pour `run`, une pour `script`, une pour les codes de sortie ;
   réduire `chat.sdd` et la grammaire de `run` dans `main.sdd`.
-- [ ] **E4 — Specs objets** (`dsd/cli/objets.md`) : `owner_cmd.sdd`, `project_cmd.sdd`, `sandbox_cmd.sdd` avec `apply` et `edit`.
-- [ ] **E5 — Specs `sync`** (`dsd/cli/sync.md`) : client `/ws/fs` et ticket, comparaison à trois, liste des empreintes, `sync push`
+- [ ] **E4 — Specs objets** *(rédigée le 2026-11-17, en attente de relecture)* (`dsd/cli/objets.md`) : `owner_cmd.sdd`, `project_cmd.sdd`, `sandbox_cmd.sdd` avec `apply` et `edit`.
+- [ ] **E5 — Specs `sync`** *(rédigée le 2026-11-17, en attente de relecture)* (`dsd/cli/sync.md`) : client `/ws/fs` et ticket, comparaison à trois, liste des empreintes, `sync push`
   et `sync pull`.
 
 Code, **séquentiel**, dans cet ordre (chaque étape après sa spec) :

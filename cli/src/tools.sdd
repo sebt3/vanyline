@@ -255,6 +255,7 @@ Scenario: local_tools_absent_du_mode_toolbox
   And les tools locaux du CLI ne sont pas joints au tour (la toolbox MCP les remplace)
 
 Tasks:
+  [ ] Retiré en E7 avec `cli/src/tools.rs` : les outils nommés (`read_file`, …) n'existent plus, l'agent agit par scripts Rhai via le MCP de la sandbox (`dsd/cli/chat.md`).
   [x] DÉCIDÉ 2026-10-18 (recommandation validée : assumer — le CLI s'exécute avec les droits de l'utilisateur sur sa propre machine, comme un shell ; aucun confinement partiel qui donnerait une fausse garantie ; le mode `--toolbox` reste la voie confinée) — Aucun confinement côté CLI : @ExecuteCommandTool exécute toute commande
     dans `sh -c` au bénéfice du processus utilisateur, et read/write/delete
     acceptent tout chemin absolu ou `../` (preuve : Scenario

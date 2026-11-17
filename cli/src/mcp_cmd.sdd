@@ -92,6 +92,7 @@ Scenario: l'aide de mcp list affiche la description déclarée
   Then le parsing échoue avec l'aide rendue, contenant `List configured MCP servers`
 
 Tasks:
+  [ ] Retiré en E11 avec `cli/src/mcp_cmd.rs` (lecture `cfgstore`), voir `[?]` de `./toolset_cmd.sdd`.
   [!] Les quatre `Scenario` ci-dessus ne sont couverts par aucun test existant : les
     tests de parsing de ./main.rs ne couvrent que la sous-famille `run`. À écrire via
     `Cli::try_parse_from` avant de considérer ce contrat verrouillé.

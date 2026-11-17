@@ -1,0 +1,67 @@
+Spec: Target — Owner, namespace et réglages utilisateur des commandes d'objets
+
+Platform: Rust/vanyline-cli — vanyline-crds
+
+Purpose:
+  Résout, pour les commandes `owner`, `project` et `sandbox`, l'Owner et son namespace, le namespace
+  d'application et le client Kubernetes (`dsd/cli/objets.md#FR-7`, `FR-8`, `DEC-2`). Porte aussi le
+  petit fichier de réglages utilisateur `$HOME/.config/vanyline/config.yaml` (`defaults.owner`,
+  `defaults.namespace`), qui remplace le `config.yaml` à deux couches de `cfgstore`.
+
+Owns:
+  ./target.rs
+
+References:
+  /dsd/cli/objets.md — `FR-7`, `FR-8`, `DEC-2`, `AC-7`, « Compatibilité et migration »
+  /dsd/cli.md — `BR-2`
+  ./host/layers.sdd ./host/files.sdd
+  /crds/src/lib.sdd — nommage du namespace d'Owner
+
+Exposes:
+  @Settings — { @owner: `Option<String>` (`defaults.owner`), @namespace: `Option<String>`
+    (`defaults.namespace`) } ; @Settings::load(layers: &Layers) -> `Result<Settings, TargetError>`
+    (fichier absent ⇒ vide).
+  @resolve_owner(option: `Option<&str>`, settings: &Settings) -> `Result<String, TargetError>` :
+    `--owner`, puis `defaults.owner`, puis `TargetError::Usage` dont le message nomme les deux moyens
+    de le fournir (`AC-7`).
+  @resolve_namespace(option: `Option<&str>`, settings: &Settings, kubeconfig: Option<&str>) -> `String` :
+    `--namespace`, puis `defaults.namespace`, puis le namespace du contexte kubeconfig (`FR-8`).
+  @owner_namespace(app_namespace: &str, owner: &str) -> `Result<String, TargetError>` : le nommage de
+    `vanyline-crds` (jamais recopié), refus d'un nom qui produit un namespace invalide avant tout
+    appel au cluster (`BR-2`).
+
+Handles:
+  Aucune déduction de l'Owner depuis le kubeconfig, aucune recherche dans tous les namespaces
+    (`DEC-2`).
+  Fichier de réglages illisible ou invalide : `TargetError::Settings` avec chemin et cause.
+
+Must:
+  Lire seulement le niveau utilisateur (`$HOME/.config/vanyline/config.yaml`) : les réglages ne sont
+    jamais dans `.vanyline/`.
+  Ne contenir aucun secret.
+
+Must not:
+  Écrire le fichier de réglages (édition à la main).
+
+Scenario: owner par l'option puis par le réglage
+  Given `--owner a` et `defaults.owner: b`, puis aucune option
+  When @resolve_owner
+  Then `a`, puis `b`
+
+Scenario: aucun owner
+  Given ni option ni réglage
+  When @resolve_owner
+  Then `TargetError::Usage` nommant `--owner` et `defaults.owner` (`AC-7`)
+
+Scenario: namespace par ordre de priorité
+  Given `--namespace x`, puis `defaults.namespace: y`, puis le seul kubeconfig `z`
+  When @resolve_namespace
+  Then `x`, puis `y`, puis `z`
+
+Scenario: nom d'owner invalide
+  Given un nom d'owner qui produit un namespace trop long
+  When @owner_namespace
+  Then `TargetError`, avant tout appel au cluster
+
+Tasks:
+  [ ] `target.rs` et ses tests — E9.

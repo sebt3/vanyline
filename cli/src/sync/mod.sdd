@@ -1,0 +1,24 @@
+Spec: Sync — module de synchronisation de `.vanyline/`
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Le module `cli/src/sync/` (`dsd/cli/sync.md`) : copie explicite de `.vanyline/` entre le dépôt local
+  et le worktree d'une sandbox, dans deux sens séparés, avec détection de divergence. Ce fichier ne
+  déclare que les sous-modules.
+
+Owns:
+  ./mod.rs
+
+References:
+  /dsd/cli/sync.md
+  ./command.sdd ./plan.sdd ./manifest.sdd ./tree.sdd — enfants
+
+Exposes:
+  Déclarations `pub mod command; pub mod manifest; pub mod plan; pub mod tree;` (ordre alphabétique).
+
+Must:
+  N'être qu'un point de déclaration.
+
+Tasks:
+  [ ] `mod.rs`.

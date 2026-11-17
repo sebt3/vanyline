@@ -171,6 +171,7 @@ Depends on:
     ./main.rs.
 
 Tasks:
+  [ ] Retiré en E11 avec `cli/src/config_check.rs` : remplacé par `./config_cmd.sdd` (`config check` sur les stores de l'hôte).
   [ ] Relecture complète par Sébastien requise avant usage comme contrat (reverse du 2026-09-26).
   [?] Cascades de lectures en erreur : la liste en erreur traitée comme vide produit des faux positifs
     (skills existants référencés en @Named signalés @UnknownReference quand @list_skills échoue ;

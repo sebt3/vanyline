@@ -1,0 +1,46 @@
+Spec: Sync manifest — liste des empreintes de la dernière synchronisation
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Garde, par couple dépôt et sandbox, la liste des empreintes à la dernière synchronisation réussie
+  (`sync#FR-3`, `FR-9`). Cette liste est la troisième branche de la comparaison à trois : elle dit si
+  une copie a changé depuis.
+
+Owns:
+  ./manifest.rs
+
+References:
+  /dsd/cli/sync.md — `FR-3`, `FR-9`, `AC-7`, « Conception »
+  ../host/layers.sdd ../host/files.sdd
+
+Exposes:
+  @Manifest — `BTreeMap<RelPath, [u8; 32]>` ; @Manifest::load(layers, dépôt: &Path, sandbox: &str) ->
+    `Result<Manifest, HostError>` (absent ⇒ vide) ; @save(&self, …) ; @record(chemin, empreinte) ;
+    @forget(chemin).
+
+Handles:
+  Un fichier par couple dépôt et sandbox : `<state>/sync/<empreinte-du-dépôt>-<sandbox>.json`
+    (ASSUMPTION du DSD). Écriture atomique (`../host/files.sdd`).
+  La liste ne mentionne que les fichiers RÉELLEMENT copiés : elle est mise à jour fichier par fichier
+    après chaque copie réussie, donc une coupure laisse une liste cohérente avec ce qui a été écrit
+    (`FR-9`).
+  Aucun contenu de fichier n'y figure, seulement des chemins et des empreintes.
+
+Must:
+  Ne jamais mentionner un fichier non copié.
+  Ne rien écrire hors de `<state>/sync/`.
+
+Scenario: aller-retour
+  Given un manifeste enregistré puis rechargé
+  When @load
+  Then identique
+
+Scenario: coupure en cours de copie
+  Given trois copies dont la deuxième échoue
+  When le manifeste est sauvegardé après chaque copie réussie
+  Then il ne mentionne que la première
+
+Tasks:
+  [ ] `manifest.rs` et ses tests — E10.
+  [?] Disposition `<state>/sync/<empreinte-du-dépôt>-<sandbox>.json` : ASSUMPTION du DSD à confirmer.

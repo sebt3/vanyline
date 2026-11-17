@@ -55,6 +55,7 @@ Depends on:
     format d'affichage, codes de sortie applicatifs : sous contrat ./main.rs ).
 
 Tasks:
+  [ ] Retiré en E11 avec `cli/src/skill_cmd.rs` (lecture `cfgstore`), voir `[?]` de `./toolset_cmd.sdd`.
   [ ] Relecture complète par Sébastien requise avant usage comme contrat (reverse du 2026-09-26).
   [?] Asymétrie CLI/RPC en écriture : le CLI est en lecture seule sur les skills alors que
     l'extension VS Code crée/modifie/supprime via RPC. Choix délibéré (le CLI reste un outil de

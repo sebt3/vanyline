@@ -1,0 +1,60 @@
+Spec: Sync tree — arbres local et distant et empreintes
+
+Platform: Rust/vanyline-cli — vanyline-lib (`SandboxFs`), sha2
+
+Purpose:
+  Lit un arbre `.vanyline/` local ou distant en une liste `(chemin relatif → octets, empreinte
+  SHA-256)`, en refusant tout ce qui sort du dossier ou n'est pas du texte (`sync#FR-2`, `FR-7`,
+  `FR-8`). L'empreinte est calculée par la CLI sur les octets reçus.
+
+Owns:
+  ./tree.rs
+
+References:
+  /dsd/cli/sync.md — `FR-2`, `FR-7`, `FR-8`, `CON-2`, `AC-5`, `AC-6`
+  /lib/src/sandbox_fs.sdd
+  ../host/files.sdd
+
+Exposes:
+  @Tree — `BTreeMap<RelPath, Entry>` ; @Entry { octets: `Vec<u8>`, sha256: `[u8; 32]` }.
+  @read_local(racine: &Path) -> `Result<Tree, TreeError>` ; @read_remote(fs: &mut SandboxFs) ->
+    `Result<Tree, TreeError>` (async).
+  @RelPath — chemin relatif validé : composantes normales seulement.
+
+Handles:
+  Un chemin rendu par la sandbox ou lu localement qui sort de `.vanyline/` (composante `..`, chemin
+    absolu, lien symbolique) est refusé avant toute écriture, et nommé (`FR-7`, `AC-5`).
+  Un fichier qui n'est pas du texte UTF-8, ou qui dépasse 256 Kio, est refusé et nommé.
+  Un listage distant tronqué (`SandboxFs::list` → `tronqué`) fait échouer la lecture : jamais un arbre
+    partiel (`FR-8`, `AC-6`). Le listage se fait récursivement, répertoire par répertoire.
+  Un `.vanyline/` absent (local ou distant) est un arbre vide, sans erreur.
+
+Must:
+  Ne rien écrire.
+  Calculer l'empreinte sur les octets exacts (saut de ligne final compris).
+
+Must not:
+  Suivre un lien symbolique.
+
+Scenario: chemin hostile
+  Given un listage distant contenant `../x`
+  When @read_remote
+  Then `TreeError` nommant le chemin, aucune écriture (`AC-5`)
+
+Scenario: fichier non texte ou trop gros
+  Given un fichier binaire puis un fichier de 300 Kio
+  When @read_local
+  Then refus nommé dans les deux cas
+
+Scenario: listage tronqué
+  Given un listage distant marqué tronqué
+  When @read_remote
+  Then `TreeError::Truncated` (`AC-6`)
+
+Scenario: arbre absent
+  Given aucun `.vanyline/`
+  When @read_local
+  Then un arbre vide
+
+Tasks:
+  [ ] `tree.rs` et ses tests — E10.

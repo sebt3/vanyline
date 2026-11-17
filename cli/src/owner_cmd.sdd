@@ -131,6 +131,11 @@ Handles:
     (tests existants de ./rpc/handlers.rs).
 
 Must:
+  Amendement E4 (`dsd/cli/objets.md`) : le dispatch (`run_*_k8s`) quitte `./main.rs` pour ce module
+    (`main.sdd` ne porte plus d'orchestration) ; l'Owner se résout par `--owner`, puis `defaults.owner`
+    (`./target.sdd`), sans déduction ; le namespace par `--namespace`, `defaults.namespace`, puis le
+    kubeconfig ; le nommage vient de `vanyline-crds`, jamais recopié (`dsd/cli.md#BR-2`).
+  Les Owners n'ont ni `apply` ni `edit` (`dsd/cli/objets.md#OI-1`).
   Garder les quatre mots de commande `list`, `show`, `create`, `delete` sous la commande
     `owner` et les six longs kebab-case de `Create` (`--home-size`,
     `--home-storage-class`, `--home-access-mode`, `--project-default-storage-size`,
@@ -162,6 +167,7 @@ Must not:
     flag (kebab-case implicite clap), renommer un champ renomme le flag.
 
 Tasks:
+  [ ] Dispatch `run_owner` dans ce module, résolution par `./target.sdd` (E9).
   [ ] Créer le module de tests de ./owner_cmd.rs (aucun aujourd'hui) : parse via le @Cli de
     ./main.rs ou @clap::Subcommand::command, un test par Scenario taggé par son titre.
   [?] `Show` n'affiche JAMAIS `homeAccessMode` ni `projectDefaults.storageAccessMode` alors

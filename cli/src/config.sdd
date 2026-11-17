@@ -192,6 +192,7 @@ Handles:
     avertissement.
 
 Tasks:
+  [ ] Retiré en E11 avec `cli/src/config.rs` : le stockage à deux couches de `cfgstore` est remplacé par `./host/` ; les réglages `defaults.*` par `./target.sdd`.
   [ ] Compléter les tests depuis les Scenario de cette spec : `mod tests`
     existant ne couvre que @discover_workspace_root (5 tests) — la résolution
     des répertoires, les `ensure_*`, @discover_layers et les `configured_*`

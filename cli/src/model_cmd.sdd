@@ -52,6 +52,7 @@ Must not:
     rejet par clap, comme le reste du CLI.
 
 Tasks:
+  [ ] Retiré en E11 avec `cli/src/model_cmd.rs` (lecture `cfgstore`) : la configuration s'édite dans les fichiers, `config check` la vérifie (`[?]` de `./toolset_cmd.sdd`).
   [?] Aucun test de parsing ne couvre `models list` (les tests de ./main.rs ne couvrent que
     `run`) : trancher avec Sébastien si le contrat de parsing (`vanyline models list` →
     `Commands::Models(List)`, rejet de `models` nu et de sous-commandes inconnues) doit

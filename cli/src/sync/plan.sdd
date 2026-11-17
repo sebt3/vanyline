@@ -1,0 +1,72 @@
+Spec: Sync plan — comparaison à trois et plan d'actions
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Pure : à partir de la copie locale, de la copie distante et du manifeste, calcule pour chaque chemin
+  l'action à faire (`sync#FR-3` à `FR-5`, `FR-10`) : rien, copier, supprimer ou diverger. Les
+  divergences arrêtent tout avant la première écriture.
+
+Owns:
+  ./plan.rs
+
+References:
+  /dsd/cli/sync.md — `FR-3` à `FR-6`, `FR-10`, `AC-2`, `AC-3`, `AC-4`, `AC-8`
+  ./tree.sdd ./manifest.sdd
+
+Exposes:
+  @Direction — `Push` (local → sandbox) | `Pull` (sandbox → local).
+  @Action — `Nothing` | `Create` | `Update` | `Delete` | `Diverged`.
+  @PlanOptions — { @force: `bool` (`--force-local` en `Push`, `--force-remote` en `Pull`), @no_delete: `bool` }.
+  @build_plan(direction, source: &Tree, destination: &Tree, manifest: &Manifest, options) -> `Plan`
+    où `Plan { actions: BTreeMap<RelPath, Action>, secrets: Vec<RelPath> }` ;
+  @Plan::has_divergence(), @Plan::is_empty(), @Plan::summary() -> texte listant les fichiers à créer,
+    modifier ou supprimer.
+  @find_secrets(source: &Tree, detector: &impl SecretDetector) -> `Vec<RelPath>`.
+
+Handles:
+  Un fichier a DIVERGÉ quand ses deux copies diffèrent ET que la copie de destination n'est plus celle
+    du manifeste (`FR-3`). Divergence ⇒ `Diverged` ; sans `force`, le plan ne peut pas s'exécuter ; avec
+    `force`, l'action devient `Update` en faveur de la source.
+  Une suppression depuis la dernière synchronisation (présent au manifeste, absent côté source) se
+    propage comme une modification, après le même contrôle de divergence (`FR-5`) ; `no_delete` la
+    désactive (le fichier reste dans la destination).
+  Un fichier de la source contenant une valeur que le détecteur de secrets reconnaît fait échouer
+    l'ensemble : `find_secrets` non vide ⇒ aucune écriture (`FR-6`, `AC-4`).
+
+Must:
+  Être pure et déterministe (ordre des chemins stable).
+  Ne jamais proposer d'écriture sur un chemin hors de l'arbre.
+
+Scenario: divergence
+  Given un fichier modifié des deux côtés depuis la dernière synchronisation
+  When @build_plan sans force
+  Then `Diverged`, `has_divergence` vrai (`AC-2`)
+
+Scenario: force en faveur de la source
+  Given la même divergence avec `force`
+  When @build_plan
+  Then `Update`
+
+Scenario: suppression propagée ou non
+  Given un fichier supprimé en local depuis la dernière synchronisation
+  When @build_plan en `Push`, puis avec `no_delete`
+  Then `Delete`, puis `Nothing` (`AC-3`)
+
+Scenario: première synchronisation
+  Given un manifeste vide et une destination sans le fichier
+  When @build_plan
+  Then `Create`
+
+Scenario: secret détecté
+  Given un fichier de la source ressemblant à une clé d'API
+  When @find_secrets
+  Then le chemin est rendu ; le plan n'est pas exécutable (`AC-4`)
+
+Scenario: rien à faire
+  Given deux copies identiques
+  When @build_plan
+  Then `Nothing` partout, `is_empty` vrai
+
+Tasks:
+  [ ] `plan.rs` et ses tests — E10.

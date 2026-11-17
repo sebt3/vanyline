@@ -175,6 +175,14 @@ Handles:
     ⇒ PARSE_ERROR/MALFORMED_REQUEST (tests existants de ./rpc/handlers.rs).
 
 Must:
+  Amendement E4 (`dsd/cli/objets.md`) : le dispatch (`run_*_k8s`) quitte `./main.rs` pour ce module
+    (`main.sdd` ne porte plus d'orchestration) ; l'Owner se résout par `--owner`, puis `defaults.owner`
+    (`./target.sdd`), sans déduction ; le namespace par `--namespace`, `defaults.namespace`, puis le
+    kubeconfig ; le nommage vient de `vanyline-crds`, jamais recopié (`dsd/cli.md#BR-2`).
+  `apply -f <fichier>` et `edit <nom>` (variants ajoutés) manipulent la spécification COMPLÈTE par
+    `./spec_edit.sdd` (champs `resources`, `egress`, `env`/`lsp` par toolchain inclus, inatteignables par
+    les flags de `create`) ; `show` affiche « redémarrage requis » quand l'état le porte ; le flag
+    déprécié `--git-secret` est retiré.
   Garder les six mots de commande `list`, `show`, `create`, `delete`, `stop`, `start` sous
     la commande `sandbox`, le renommage du variant parent en `sandbox` par ./main.rs étant
     verrouillé, et les quatre longs de Create (`--project`, `--branch`, `--toolchain`,
@@ -223,6 +231,9 @@ Depends on:
     laquelle `env` vide / `lsp` @None sont le comportement voulu et non une lacune.
 
 Tasks:
+  [ ] Variants `apply` et `edit`, dispatch `run_sandbox` dans ce module, `show` avec signalement de
+    redémarrage (E9). Les `[?]` sur `--image`, `Toolchain.env`/`lsp`, `resources`/`egress`/`suspended` sont
+    soldés par `apply -f` (DEC-1 de `dsd/cli/objets.md`).
   [ ] Étendre le module de tests de ./sandbox_cmd.rs (les quatre tests existants ne
     couvrent que @parse_toolchain) : parse de surface via @Cli de ./main.rs, un test par
     Scenario taggé par son titre.

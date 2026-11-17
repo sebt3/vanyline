@@ -70,6 +70,12 @@ Handles:
   runtime (réponses K8s, erreurs API, stdout) sont du contrat de @run_project_k8s.
 
 Must:
+  Amendement E4 (`dsd/cli/objets.md`) : le dispatch (`run_*_k8s`) quitte `./main.rs` pour ce module
+    (`main.sdd` ne porte plus d'orchestration) ; l'Owner se résout par `--owner`, puis `defaults.owner`
+    (`./target.sdd`), sans déduction ; le namespace par `--namespace`, `defaults.namespace`, puis le
+    kubeconfig ; le nommage vient de `vanyline-crds`, jamais recopié (`dsd/cli.md#BR-2`).
+  `apply -f <fichier>` et `edit <nom>` (variants ajoutés) manipulent la spécification COMPLÈTE par
+    `./spec_edit.sdd` ; `create` garde ses flags pour le cas simple.
   Exposer exactement quatre sous-commandes : `list`, `show`, `create`, `delete` — noms
     kebab-case dérivés des variants, aucun alias supplémentaire.
   Exiger sur `create` : le positionnel `name`, `--owner` et `--repo-url` (le refus est
@@ -180,6 +186,8 @@ Scenario: une sous-commande inconnue est rejetée
   Then le parse retourne un Err clap (aucune suggestion de substitution implicite vers `list`)
 
 Tasks:
+  [ ] Variants `apply` et `edit`, dispatch `run_project` dans ce module, résolution de l'Owner par
+    `./target.sdd` ; Scenarios de parse et d'intégration (E9).
   [?] `#[allow(clippy::large_enum_variant)]` sans commentaire de justification d'une
     ligne citant la spec : `tooling.sdd` (`Must not`) l'exige — trancher : ajouter la
     ligne de justification ou boxer `Create` avec Sébastien.

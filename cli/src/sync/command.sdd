@@ -1,0 +1,82 @@
+Spec: Sync command — `vanyline sync push|pull`
+
+Platform: Rust/vanyline-cli/clap-derive
+
+Purpose:
+  Les commandes `sync push` et `sync pull` (`dsd/cli.md#FR-6`, `dsd/cli/sync.md`) : lisent les deux
+  arbres, construisent le plan, l'impriment, puis l'exécutent fichier par fichier si rien ne diverge.
+  Jamais de réconciliation automatique ; la revue est un geste explicite sans interaction (`DEC-2`).
+
+Owns:
+  ./command.rs
+
+References:
+  /dsd/cli/sync.md — `FR-1` à `FR-10`, `DEC-2`, `AC-1` à `AC-8`
+  /dsd/cli.md — `FR-6`, `DEC-4`, `DEC-11`, `AC-5`
+  ./tree.sdd ./manifest.sdd ./plan.sdd /lib/src/sandbox_fs.sdd ../host/owner_auth.sdd ../exit_code.sdd
+
+Exposes:
+  @Commands — `push` et `pull`, chacune : `--context <projet> --sandbox <nom>` (requis), `--force-local`
+    (`push`) ou `--force-remote` (`pull`), `--no-delete`, `--dry-run`, `--diff`.
+  @run_sync(commande, global) -> `Outcome` (async).
+
+Handles:
+  Dossier local : `.vanyline/` du dépôt courant, ou celui de `--repo` (`dsd/cli.md#DEC-10`). Sandbox :
+    `--context`/`--sandbox` (jeton d'Owner par `OwnerAuth`, ticket par `SandboxFs::connect`).
+  Séquence : lire local et distant (`tree`) → détection de secrets (`find_secrets`, échec ⇒ aucune écriture)
+    → plan → IMPRESSION de la liste des fichiers qui seront créés, modifiés ou supprimés (toujours, avant
+    toute écriture) → divergence sans `--force-*` : AUCUNE écriture d'aucun côté, diff de chaque
+    fichier divergent, code 1 → `--dry-run` : s'arrête à la liste (code 0) ; `--diff` ajoute le diff de
+    chaque fichier → exécution : écritures atomiques fichier par fichier, mise à jour du manifeste après
+    chaque copie réussie.
+  Aucune confirmation interactive (`FR-10`).
+  `sync` ne lance aucun commit ni push git et n'active aucun brouillon de toolset (`hote#DEC-1`).
+
+Must:
+  N'écrire qu'après un plan sans divergence (ou forcé) et sans secret.
+  Laisser chaque fichier entier, ancien ou nouveau, en cas de coupure (`AC-7`) : un `push` suivant reprend
+    sans signaler de divergence sur les fichiers déjà copiés.
+  Ne jamais journaliser le ticket (`SandboxFs`).
+
+Must not:
+  Écrire autre chose que dans `.vanyline/` (local ou distant).
+  Réconcilier automatiquement.
+
+Scenario: push sur une sandbox vierge
+  Given un `.vanyline/` local et une sandbox sans `.vanyline/`
+  When `sync push`
+  Then chaque fichier existe dans le worktree, octet pour octet identique, saut de ligne final compris (`AC-1`)
+
+Scenario: divergence
+  Given un fichier modifié des deux côtés depuis la dernière synchronisation
+  When `sync push`
+  Then aucune écriture, diff affiché, code 1 ; avec `--force-local` la copie de la sandbox est remplacée (`AC-2`)
+
+Scenario: suppression et `--no-delete`
+  Given un fichier supprimé en local
+  When `sync push` puis `sync push --no-delete`
+  Then supprimé dans la sandbox, puis conservé (`AC-3`)
+
+Scenario: secret détecté
+  Given un fichier ressemblant à une clé d'API
+  When `sync push`
+  Then aucune écriture, code 1 (`AC-4`)
+
+Scenario: chemin hostile au pull
+  Given un listage distant avec `../x`
+  When `sync pull`
+  Then refus avant toute écriture locale (`AC-5`)
+
+Scenario: dry-run
+  Given des changements à faire
+  When `sync pull --dry-run`
+  Then la liste est imprimée, aucun fichier écrit, code 0 ; sans `--dry-run`, la même liste est imprimée avant l'écriture (`AC-8`)
+
+Scenario: coupure
+  Given un `push` interrompu après deux fichiers
+  When un nouveau `sync push`
+  Then les fichiers copiés sont entiers, aucune divergence signalée sur eux (`AC-7`)
+
+Tasks:
+  [ ] `command.rs` et ses tests (sandbox simulée, dépôt temporaire) — E10.
+  [?] Option de dépôt `--repo` : nom fixé par `host/layers.sdd`.

@@ -1,0 +1,70 @@
+Spec: Sandbox fs — client Rust du ticket et du WebSocket fichier de la sandbox
+
+Platform: Rust/vanyline-lib (feature `k8s`) — tokio-tungstenite
+
+Purpose:
+  Le client commun à la CLI et à `app` pour parler à la sandbox par son accès fichier (`dsd/cli.md#DEC-12`,
+  `dsd/cli/sync.md#DEC-1`) : obtenir un ticket par `POST /ws/ticket` avec le jeton d'Owner, ouvrir
+  `/ws/fs`, puis lire, écrire, supprimer et lister des fichiers. Seul le client vit ici ; l'orchestration
+  d'une commande (`sync`) reste dans la crate appelante. Le protocole est celui de `sandbox/src/ws/fs.sdd`
+  (non modifié).
+
+Owns:
+  ./sandbox_fs.rs
+
+References:
+  /dsd/cli/sync.md — `CON-1` à `CON-4`, `FR-2`, `DEC-1`
+  /sandbox/src/ws/fs.sdd — protocole (ops `read`, `write`, `delete`, `mkdir`, `list`, `root`)
+  /sandbox/src/ws/ticket.sdd — `POST /ws/ticket`, ticket à usage unique valable 30 s
+  ./k8s.sdd — jeton d'Owner
+
+Exposes:
+  @SandboxFs — `pub struct` : @SandboxFs::connect(base_url: &str, jeton_owner: &SecretString, http:
+    &reqwest::Client) -> `Result<SandboxFs, FsError>` (async) : mine le ticket, ouvre `/ws/fs?ticket=…`.
+    Une requête à la fois (le client sérialise ; `sandbox/src/ws/fs.sdd`).
+  @read_raw(chemin) -> `Result<Vec<u8>, FsError>` : `read` avec `raw: true` (contenu intégral, jamais
+    numéroté ni tronqué) ; @write(chemin, octets) ; @delete(chemin) -> `Result<bool, FsError>` ;
+    @mkdir(chemin) ; @list(chemin) -> `Result<Listing, FsError>` où `Listing { entrées, tronqué: bool }`
+    (un listage borné à 200 entrées porte le marqueur de troncature, `sync#CON-2`).
+  @FsError — `Auth` (ticket refusé), `Transport`, `Protocol { op, message }`, `Path` (chemin refusé par
+    la sandbox), `NotText`, sans jeton ni ticket dans aucun message.
+
+Handles:
+  Le ticket est mis dans l'URL de connexion : il n'est JAMAIS journalisé, ni dans `Debug`, ni dans une
+    erreur (`sync` « Sécurité »). Ticket expiré ou déjà consommé : `FsError::Auth` ; l'appelant en
+    mine un nouveau.
+  Un chemin est relatif à la racine de la sandbox ; le client ne le normalise pas (la sandbox
+    confine) mais refuse localement un chemin vide ou contenant un octet nul.
+  Un `read` brut n'a aucune limite de taille côté sandbox (`sync#CON-4`) : le client plafonne ce
+    qu'il accepte de recevoir (paramètre de l'appelant, défaut 1 Mio) et rend `FsError::Protocol` au-delà.
+
+Must:
+  Sérialiser les requêtes d'une connexion (une en vol à la fois).
+  Ne jamais écrire le jeton ni le ticket dans un log.
+
+Must not:
+  Contourner l'authentification de la sandbox : seul le jeton d'Owner mine le ticket (`cli#BR-1`).
+
+Scenario: ticket puis lecture brute
+  Given une sandbox simulée qui émet un ticket et sert `/ws/fs`
+  When @connect puis @read_raw d'un fichier terminant par un saut de ligne
+  Then les octets exacts, saut de ligne final compris
+
+Scenario: ticket refusé
+  Given un jeton d'Owner refusé par `POST /ws/ticket`
+  When @connect
+  Then `FsError::Auth`, sans jeton dans le message
+
+Scenario: listage tronqué
+  Given un répertoire de plus de 200 entrées
+  When @list
+  Then `tronqué` est vrai
+
+Scenario: ticket jamais journalisé
+  Given une connexion avec capture des journaux
+  When des opérations s'exécutent
+  Then ni le ticket ni le jeton n'apparaissent
+
+Tasks:
+  [ ] `sandbox_fs.rs` et ses tests (serveur WebSocket simulé) — E10. Dépendance `tokio-tungstenite` (ou
+    équivalent déjà dans le graphe) à valider.

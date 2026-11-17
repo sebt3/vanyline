@@ -290,6 +290,7 @@ Depends on:
   @std::fs — @read_dir, @read_to_string, @write, @remove_file, @create_dir_all (via ./config.rs).
 
 Tasks:
+  [ ] Retiré en E11 avec `cli/src/store.rs` : remplacé par `./host/session_store.sdd` et `./host/session_index.sdd` (`dsd/cli/hote.md`).
   [?] Périmètre : ./store.rs ne couvre que la persistance des conversations dans le
     répertoire de données global — il n'a aucun lien avec la découverte du FsConfigStore
     (@discover_fs_store, ./main.rs, contrat ../../cfgstore/src/fs_store.sdd) ni avec la
