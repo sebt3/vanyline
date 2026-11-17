@@ -9028,6 +9028,7 @@ dependencies = [
  "vanyline-crds",
  "vanyline-health",
  "vanyline-lib",
+ "vynil-core",
  "zeroize",
 ]
 

@@ -77,6 +77,9 @@ pub fn api_router() -> Router<AppState> {
             "/dashboards/resolve",
             get(crate::dashboards::resolve::handler_resolve),
         )
+        // Exécution d'un widget scripté (`dsd/app/widgets.md` FR-2) — le handler vit hors du
+        // module `api` (`../widgets/run.sdd`), même exception que la résolution.
+        .route("/widgets/run", post(crate::widgets::run::handler_run))
 }
 
 #[cfg(test)]
@@ -124,6 +127,7 @@ mod tests {
             auth: crate::auth::test_support::test_auth_state(),
             shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
             workflow: None,
+            widgets: crate::widgets::runtime::WidgetService::pour_tests(),
         }
     }
 
@@ -185,6 +189,17 @@ mod tests {
             ask("GET", "/api/dashboards/resolve?scope=home").await,
             StatusCode::NOT_FOUND,
             "GET /api/dashboards/resolve doit être monté"
+        );
+    }
+
+    /// Scenario: `api_router expose la route d'exécution des widgets` — route branchée (le refus
+    /// d'authentification en aval est le contrat de `../widgets/run.sdd` et de l'`@AuthUser`).
+    #[tokio::test]
+    async fn api_router_expose_la_route_d_execution_des_widgets() {
+        assert_ne!(
+            ask("POST", "/api/widgets/run").await,
+            StatusCode::NOT_FOUND,
+            "POST /api/widgets/run doit être monté"
         );
     }
 

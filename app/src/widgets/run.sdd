@@ -53,14 +53,14 @@ Handles:
     `../sessions/host.sdd`. Les droits des écrans `H_…` sont ceux des types `G_project` /
     `G_sandbox` (`../sessions/catalog.sdd`) que l'hôte rend (`script_grants`, miryad-core#70) ;
     l'hôte revérifie la visibilité du contexte pour l'appelant (lien d'owner, entité K8s).
-  Clé de cache : (sujet authentifié, contexte, tableau, widget, empreinte du texte du script). `ttl_secs` de
+  Clé de cache : @CacheKey (sujet authentifié, contexte, tableau, widget, empreinte du texte du script). `ttl_secs` de
     la `config` du widget, `3600` par défaut.
   Une définition stockée illisible ou dont la `config` du widget n'a pas de script →
     `Failed` `010` journalisé ; jamais un défaut silencieux.
-  Abandon du client (connexion fermée, bouton d'interruption) : le jeton d'annulation de
-    l'exécution est annulé (`ScriptRunner::run_cancellable`, miryad-core#71) — le script s'arrête
-    entre deux opérations, aucun résultat n'est rendu, aucune entrée de cache n'est écrite ; la
-    gestion du cache est celle de `./cache.sdd`.
+  Abandon du client (connexion fermée, bouton d'interruption) : l'attente
+    prend fin ; le jeton d'annulation de l'exécution (`ScriptRunner::run_cancellable`,
+    miryad-core#71) appartient au cache, qui l'annule quand le DERNIER demandeur a abandonné —
+    le script s'arrête alors entre deux opérations, aucune entrée n'est écrite (`./cache.sdd`).
 
 Must:
   Relire le script dans la définition de l'utilisateur authentifié, jamais dans la requête.
@@ -107,10 +107,15 @@ Scenario: un contexte d'écran impossible à nommer est refusé
   When la route est appelée pour chacun
   Then 422 `VNL-APP-WDG-002` à chaque fois
 
-Scenario: l'abandon du client annule l'exécution
+Scenario: l'abandon du seul client annule l'exécution
   Given un exécuteur factice lent qui observe son jeton d'annulation
   When le client abandonne la requête pendant l'exécution
   Then le jeton est annulé, l'exécuteur s'arrête, et le cache ne contient aucune entrée
+
+Scenario: deux contextes d'un même tableau ne partagent pas le cache
+  Given un tableau d'écran `sandbox` ouvert avec `sandbox: "dev"` puis `"web"`
+  When la route est appelée pour chacun
+  Then l'exécuteur est appelé deux fois, avec deux contextes distincts
 
 Scenario: un script en échec et une sortie hors contrat sont rendus en échec, sans cache
   Given un exécuteur qui rend l'erreur `003`, puis un autre qui rend `{type: "markdown", config: {}}`
@@ -122,9 +127,9 @@ Depends on:
   ../db/entities/dashboards.rs, ../dashboards/model.rs, ../../error.sdd.
 
 Tasks:
-  [ ] `run.rs` : @handler_run et ses tests (exécuteur factice ; base réelle `real_db`).
-  [ ] Lot 2 (miryad-core 0.4.0, #70/#71) : les écrans projet et sandbox s'exécutent dans leur
+  [x] `run.rs` : @handler_run et ses tests (exécuteur factice ; base réelle `real_db`).
+  [x] Lot 2 (miryad-core 0.4.0, #70/#71) : les écrans projet et sandbox s'exécutent dans leur
     `H_…`, l'abandon annule le jeton ; Scenarios ci-dessus.
 
 Done when:
-  Les huit Scenarios ont leurs tests ; la route ne lit jamais le script dans la requête (grep).
+  Les neuf Scenarios ont leurs tests ; la route ne lit jamais le script dans la requête (grep).

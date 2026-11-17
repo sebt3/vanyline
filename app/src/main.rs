@@ -22,7 +22,6 @@ mod mcp_domain;
 mod migration;
 mod naming;
 mod sessions;
-#[allow(dead_code)] // widgets/mod.sdd : module consommé par widgets/run.sdd (tâche suivante)
 mod widgets;
 mod workflow;
 mod ws;
@@ -59,6 +58,9 @@ pub struct AppState {
     pub auth: MiryadAuthState,
     /// Hub de push des phases de sandbox (`ws/sandbox_state.sdd`).
     pub shared_sandbox_state: ws::sandbox_state::SharedState,
+    /// Exécution des widgets scriptés (`widgets/runtime.sdd`) : `ScriptRunner` de production et
+    /// cache, construits au démarrage sur l'hôte lymaille partagé (`main.sdd` étape 10ter).
+    pub widgets: widgets::runtime::WidgetService,
     /// Handle du moteur de workflow (`workflow/runtime.sdd`) — `None` quand l'app n'est
     /// pas configurée pour un moteur (aucune `VNL_RESTATE_*`) : aucun port d'endpoint
     /// ouvert, les routes de workflow répondent `503` (W4, `api/workflows.sdd`).
@@ -173,12 +175,23 @@ async fn main() {
     };
 
     let static_dir = config.static_dir.clone();
+    let k8s: Arc<tokio::sync::Mutex<Option<vanyline_lib::k8s::VnlK8sClient>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    // L'hôte lymaille est construit avant l'état (il ne le lit pas) et partagé avec le
+    // `WidgetService`, comme avec les sessions (`main.sdd` étape 10ter).
+    let hote: miryad_core::lymaille::SharedHost = sessions::lymaille_shared_host_des(
+        auth_state.db.clone(),
+        Arc::clone(&k8s),
+        config.k8s_namespace.clone(),
+    );
+    let widgets = widgets::runtime::WidgetService::new(auth_state.db.clone(), Some(hote), &config);
     let mut state = AppState {
         config,
         cookie_key,
-        k8s: Arc::new(tokio::sync::Mutex::new(None)),
+        k8s,
         auth: auth_state,
         shared_sandbox_state: ws::sandbox_state::SharedState::new(),
+        widgets,
         workflow: None,
     };
 
@@ -501,6 +514,7 @@ mod tests {
             auth: crate::auth::test_support::test_auth_state_with_db(db),
             shared_sandbox_state: ws::sandbox_state::SharedState::new(),
             workflow: None,
+            widgets: crate::widgets::runtime::WidgetService::pour_tests(),
         }
     }
 

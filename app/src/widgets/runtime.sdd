@@ -22,7 +22,7 @@ References:
 
 Exposes:
   @ScriptExecutor — `pub trait` (`Send + Sync`, méthode asynchrone) : @execute(@context: `&str`,
-    @subject: `&str`, @source: `&str`, @cancel: `&CancelToken`) ->
+    @subject: `&str`, @source: `&str`, @cancel: `&CancelToken`, jeton fourni par le cache) ->
     `Result<serde_json::Value, @RunError>`. La couture
     d'exécution : l'implémentation de production est @CrateExecutor ci-dessous, les tests de
     `./run.sdd` injectent un exécuteur factice.
@@ -83,10 +83,16 @@ Depends on:
   miryad-core (feature `lymaille`) : `ScriptRunner`, `ScriptLimits`, `ScriptDeps`,
     `ResourceRegistry`, `HostModules`, `EnvSecretResolver`, `SharedHost`, `LymailleError`.
   ./cache.rs, ./model.rs.
+  vynil-core (`vynil_core::cancel::CancelToken`, `default-features = false`) : type du jeton
+    de `run_cancellable`, dépendance directe ajoutée à `app/Cargo.toml` (même version résolue que
+    miryad-core 0.4.0).
 
 Tasks:
-  [ ] `runtime.rs` : @WidgetService, la traduction d'erreurs et ses tests. Le troisième Scenario
-    s'appuie sur une base réelle (`real_db`) et un type de contexte semé en test.
+  [?] `runtime.rs` : @WidgetService, la traduction d'erreurs et ses tests. Le troisième Scenario
+    s'appuie sur une base réelle (`real_db`) : il est réalisé en identité seulement (`ana` obtient
+    son résultat, `ben` sans compte est refusé en `008`). Il NE teste PAS des droits différents
+    par toolset : la fixture de type de contexte accordant un toolset et de serveur MCP est absente.
+    Non coché tant que cette fixture n'existe pas.
   [x] Décidé 2026-11-13 : le jeton de l'utilisateur n'est pas transmis en première version
     (`dsd/app/widgets.md#OI-4`) ; un serveur MCP en mode `forward` est inutilisable dans un
     widget, comme dans un workflow batch.

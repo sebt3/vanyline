@@ -54,6 +54,10 @@ miryad-core = { version = "0.4.0", default-features = false, features = [
 # via miryad-core.
 lymaille = "0.3"
 zeroize = "1"
+# W1 `app/src/widgets/runtime.sdd` : le jeton d'annulation de `ScriptRunner::run_cancellable`
+# est `vynil_core::cancel::CancelToken` (miryad-core 0.4.0 le désigne par ce chemin). Crate déjà
+# résolue via miryad-core (0.9.1, `Cargo.lock`) : ajout direct sans feature, module `cancel` seul.
+vynil-core = { version = "0.9.1", default-features = false }
 # W3 `app/src/workflow/runtime.rs` (runtime.sdd, Platform `restate-sdk`) : liaison des services
 # `DagInterpreter`/`StepDispatcher` à l'`Endpoint` et serveur HTTP/2 interne. Version identique à
 # celle déclarée par miryad-core 0.4.0 (`"0.12"`, résolu 0.12.1 dans `Cargo.lock`) et feature

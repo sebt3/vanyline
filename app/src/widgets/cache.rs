@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use tokio::sync::Notify;
+use vynil_core::cancel::CancelToken;
 
 use super::model::WidgetOutput;
 
@@ -28,6 +29,9 @@ pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 pub struct CacheKey {
     /// Sujet authentifié : une entrée n'est jamais partagée entre sujets.
     pub subject: String,
+    /// Contexte d'exécution (`G_home`, `H_project_…`, `H_sandbox_…`) : un même tableau ouvert sur
+    /// deux sandboxes ne partage rien (`run.sdd`, `Handles`).
+    pub context: String,
     /// Identifiant de ligne du tableau.
     pub dashboard: i32,
     /// Identifiant du widget dans le tableau.
@@ -73,14 +77,26 @@ struct Flight<E> {
     slot: Arc<Slot<E>>,
     /// Nombre de demandeurs encore en attente (décrémenté à l'abandon par `Waiter`).
     waiters: Arc<AtomicUsize>,
+    /// Jeton de l'exécution partagée : annulé quand le dernier demandeur abandonne.
+    cancel: CancelToken,
 }
 
 /// Compte un demandeur vivant : son abandon (drop) le retire de l'exécution partagée.
-struct Waiter(Arc<AtomicUsize>);
+struct Waiter {
+    /// État du cache : le décompte se fait sous ce verrou, pour qu'un demandeur qui rejoint ne
+    /// trouve pas une exécution déjà en cours d'annulation.
+    inner: Arc<Mutex<State>>,
+    waiters: Arc<AtomicUsize>,
+    cancel: CancelToken,
+}
 
 impl Drop for Waiter {
+    /// Abandon d'un demandeur : le dernier annule le jeton (`cache.sdd`, `Must`, `FR-10`).
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        let _etat = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.waiters.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.cancel.cancel();
+        }
     }
 }
 
@@ -123,7 +139,7 @@ impl WidgetCache {
         compute: F,
     ) -> Result<Fetched, E>
     where
-        F: FnOnce() -> Fut + Send + 'static,
+        F: FnOnce(CancelToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Entry, E>> + Send + 'static,
         E: Clone + Send + 'static + From<ComputeAborted>,
     {
@@ -151,20 +167,33 @@ impl WidgetCache {
                 .and_then(|boxed| boxed.downcast_ref::<Flight<E>>())
             {
                 flight.waiters.fetch_add(1, Ordering::SeqCst);
-                (Arc::clone(&flight.slot), Waiter(flight.waiters.clone()))
+                (
+                    Arc::clone(&flight.slot),
+                    Waiter {
+                        inner: Arc::clone(&self.inner),
+                        waiters: flight.waiters.clone(),
+                        cancel: flight.cancel.clone(),
+                    },
+                )
             } else {
                 let slot = Arc::new(Slot {
                     outcome: Mutex::new(Outcome::Pending),
                     done: Notify::new(),
                 });
                 let waiters = Arc::new(AtomicUsize::new(1));
-                let waiter = Waiter(waiters.clone());
+                let cancel = CancelToken::new();
+                let waiter = Waiter {
+                    inner: Arc::clone(&self.inner),
+                    waiters: waiters.clone(),
+                    cancel: cancel.clone(),
+                };
                 if !state.flights.contains_key(&key) {
                     state.flights.insert(
                         key.clone(),
                         Box::new(Flight {
                             slot: Arc::clone(&slot),
                             waiters,
+                            cancel: cancel.clone(),
                         }),
                     );
                 }
@@ -172,7 +201,7 @@ impl WidgetCache {
                 let task_key = key.clone();
                 let task_slot = Arc::clone(&slot);
                 tokio::spawn(async move {
-                    match AssertUnwindSafe(compute()).catch_unwind().await {
+                    match AssertUnwindSafe(compute(cancel)).catch_unwind().await {
                         Ok(result) => cache.finish(&task_key, ttl_secs, &task_slot, result),
                         Err(_) => cache.abandon::<E>(&task_key, &task_slot),
                     }
@@ -295,8 +324,19 @@ mod tests {
     }
 
     fn key(subject: &str, dashboard: i32, widget: &str, script_hash: u64) -> CacheKey {
+        key_ctx(subject, "G_home", dashboard, widget, script_hash)
+    }
+
+    fn key_ctx(
+        subject: &str,
+        context: &str,
+        dashboard: i32,
+        widget: &str,
+        script_hash: u64,
+    ) -> CacheKey {
         CacheKey {
             subject: subject.to_string(),
+            context: context.to_string(),
             dashboard,
             widget: widget.to_string(),
             script_hash,
@@ -331,12 +371,14 @@ mod tests {
     fn counted(
         calls: &Arc<AtomicUsize>,
         delay: StdDuration,
-    ) -> impl FnOnce() -> std::pin::Pin<
+    ) -> impl FnOnce(
+        CancelToken,
+    ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Entry, TestErr>> + Send>,
     > + Send
     + 'static {
         let calls = calls.clone();
-        move || {
+        move |_jeton: CancelToken| {
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(delay).await;
@@ -398,6 +440,92 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 2, "compute appelé pour ben");
         assert!(!ben.cached);
+    }
+
+    /// Clé de contexte (`run.sdd`, `Handles`) : un autre contexte d'un même tableau ne partage
+    /// rien, même sujet, même tableau, même widget, même script.
+    #[tokio::test(start_paused = true)]
+    async fn un_autre_contexte_ne_partage_rien() {
+        let cache = WidgetCache::new(TestClock::new().clock());
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        cache
+            .get_or_compute(
+                key_ctx("ana", "H_sandbox_ana_dev", 7, "w", 1),
+                3600,
+                false,
+                counted(&calls, StdDuration::ZERO),
+            )
+            .await
+            .expect("contexte dev");
+        cache
+            .get_or_compute(
+                key_ctx("ana", "H_sandbox_ana_web", 7, "w", 1),
+                3600,
+                false,
+                counted(&calls, StdDuration::ZERO),
+            )
+            .await
+            .expect("contexte web");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "un contexte autre recalcule"
+        );
+    }
+
+    /// Scenario: le jeton n'est annulé que par le dernier abandon (`cache.sdd`, `Must`).
+    #[tokio::test(start_paused = true)]
+    async fn le_jeton_n_est_annule_que_par_le_dernier_abandon() {
+        let cache = WidgetCache::new(TestClock::new().clock());
+        let k = key("ana", 7, "w", 1);
+        let (jeton_tx, mut jeton_rx) = tokio::sync::mpsc::unbounded_channel::<CancelToken>();
+        // Jamais notifiée : l'exécution reste en cours pendant toute la scène.
+        let porte = Arc::new(Notify::new());
+
+        let premier = {
+            let cache = cache.clone();
+            let k = k.clone();
+            let porte = porte.clone();
+            tokio::spawn(async move {
+                cache
+                    .get_or_compute(k, 3600, false, move |jeton: CancelToken| async move {
+                        let _ = jeton_tx.send(jeton);
+                        porte.notified().await;
+                        Ok::<Entry, TestErr>(entry())
+                    })
+                    .await
+            })
+        };
+        let jeton = jeton_rx.recv().await.expect("le calcul a reçu son jeton");
+        let second = {
+            let cache = cache.clone();
+            let k = k.clone();
+            tokio::spawn(async move {
+                cache
+                    .get_or_compute(k, 3600, false, |_jeton: CancelToken| async move {
+                        Err::<Entry, TestErr>(TestErr::Other("non partagé".to_string()))
+                    })
+                    .await
+            })
+        };
+        // Laisse le second demandeur rejoindre l'exécution en cours.
+        tokio::time::sleep(StdDuration::from_secs(1)).await;
+
+        premier.abort();
+        let _ = premier.await;
+        assert!(
+            !jeton.is_cancelled(),
+            "le second demandeur attend encore : le jeton reste actif"
+        );
+
+        second.abort();
+        let _ = second.await;
+        assert!(
+            jeton.is_cancelled(),
+            "le dernier abandon annule le jeton de l'exécution"
+        );
     }
 
     /// Scenario: modifier le script ou actualiser relance.
@@ -513,7 +641,7 @@ mod tests {
 
         let echec = {
             let calls = calls.clone();
-            move || async move {
+            move |_jeton: CancelToken| async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err::<Entry, TestErr>(TestErr::Other("script en échec".to_string()))
             }
@@ -543,7 +671,7 @@ mod tests {
         let k = key("ana", 7, "w", 1);
         let panique = {
             let calls = calls.clone();
-            move || async move {
+            move |_jeton: CancelToken| async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 panic!("calcul en panne");
                 #[allow(unreachable_code)]

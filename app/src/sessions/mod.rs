@@ -12,6 +12,9 @@ pub(crate) mod catalog;
 mod events;
 mod host;
 
+/// Formes des identifiants de contexte `H_…` (`./host.sdd`), consommées par `widgets/run.rs`.
+pub(crate) use host::{h_project_id, h_sandbox_id};
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -25,6 +28,8 @@ use miryad_core::lymaille::conversations_router;
 use miryad_core::lymaille::interactive::assemble::AssembleDeps;
 use miryad_core::lymaille::interactive::manager::{Limits, ManagerDeps, SessionManager};
 use miryad_core::lymaille::resource_module::ResourceRegistry;
+
+use vanyline_lib::k8s::VnlK8sClient;
 
 use crate::AppState;
 use crate::error::AppError;
@@ -41,12 +46,25 @@ const CAPACITE_HUB: usize = 256;
 /// sans I/O ni échec : la panne de l'hôte est fermée à l'usage, dans ./host.rs.
 #[must_use]
 pub(crate) fn lymaille_shared_host(state: &AppState) -> Arc<VnlLymailleHost> {
-    Arc::new(VnlLymailleHost::new(
+    lymaille_shared_host_des(
         state.auth.db.clone(),
-        Arc::new(K8sHostGateway::new(
-            Arc::clone(&state.k8s),
-            state.config.k8s_namespace.clone(),
-        )),
+        Arc::clone(&state.k8s),
+        state.config.k8s_namespace.clone(),
+    )
+}
+
+/// Même hôte, construit sur ses parties (connexion, slot K8s lazy, namespace) : le démarrage
+/// (`../main.rs`) le construit AVANT l'`AppState`, qui porte le `WidgetService` partageant cet
+/// hôte (`main.sdd` étape 10ter). Sans I/O ni échec.
+#[must_use]
+pub(crate) fn lymaille_shared_host_des(
+    db: DatabaseConnection,
+    k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
+    namespace: Option<String>,
+) -> Arc<VnlLymailleHost> {
+    Arc::new(VnlLymailleHost::new(
+        db,
+        Arc::new(K8sHostGateway::new(k8s, namespace)),
     ))
 }
 

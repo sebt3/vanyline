@@ -56,16 +56,13 @@ pub struct Config {
     /// Plafond de durée d'exécution d'un script de widget (`VNL_WIDGET_MAX_DURATION_SECS`,
     /// u64 de secondes, défaut `300` = 5 min — `dsd/app/widgets.md#FR-5`, `OI-6`) ; même
     /// contrat de parse et de repli que `subagent_max_secs`.
-    #[allow(dead_code)] // config.sdd : consommé par widgets/runtime.sdd (tâche suivante)
     pub widget_max_duration: std::time::Duration,
     /// Plafond d'opérations Rhai d'un script de widget (`VNL_WIDGET_MAX_OPERATIONS`, u64,
     /// défaut `0` = illimité — `dsd/app/widgets.md#OI-6`) ; même contrat de parse et de repli.
-    #[allow(dead_code)] // config.sdd : consommé par widgets/runtime.sdd (tâche suivante)
     pub widget_max_operations: u64,
     /// Plafond de taille du résultat d'un script de widget (`VNL_WIDGET_MAX_RESULT_BYTES`,
     /// usize en octets, défaut `1048576` = 1 Mio — `dsd/app/widgets.md#OI-6`) ; même contrat
     /// de parse et de repli.
-    #[allow(dead_code)] // config.sdd : consommé par widgets/runtime.sdd (tâche suivante)
     pub widget_max_result_bytes: usize,
 }
 

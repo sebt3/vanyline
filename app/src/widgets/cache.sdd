@@ -21,10 +21,10 @@ Exposes:
     @get_or_compute(@key: @CacheKey, @ttl_secs: `u64`, @refresh: `bool`, @compute) ->
     `Result<@Fetched, E>`. @clock : `Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>` (horloge
     injectée, seule source de `computed_at` et de l'âge d'une entrée ; la production passe
-    `Utc::now`, les tests une horloge réglable). @compute : `FnOnce() -> Fut` avec `Fut: Future<Output
+    `Utc::now`, les tests une horloge réglable). @compute : `FnOnce(@CancelToken) -> Fut` (`vynil_core::cancel::CancelToken`, créé par le cache pour chaque exécution partagée et ANNULÉ quand le dernier demandeur abandonne — jamais avant : l'abandon du lanceur n'interrompt pas les autres demandeurs) avec `Fut: Future<Output
     = Result<@Entry, E>> + Send + 'static` et `E: Clone + Send + 'static + From<@ComputeAborted>` ; il s'exécute dans une
     tâche `tokio::spawn` pour que l'abandon d'un demandeur n'interrompe pas l'exécution partagée.
-  @CacheKey — { @subject: `String`, @dashboard: `i32`, @widget: `String`, @script_hash: `u64` }.
+  @CacheKey — { @subject: `String`, @context: `String` (contexte d'exécution : `G_home`, `H_project_…`, `H_sandbox_…` — un même tableau de sandbox ouvert pour deux sandboxes ne partage rien), @dashboard: `i32`, @widget: `String`, @script_hash: `u64` }.
   @Entry — { @output: @WidgetOutput, @computed_at: `DateTime<Utc>` (rendu en RFC 3339 par la
     route), @duration_ms: `u64` }.
   @ComputeAborted — type unité exposé par le module : la tâche de calcul s'est arrêtée sans
@@ -44,6 +44,7 @@ Must:
     @compute qu'une fois et reçoivent le même résultat (y compris avec @refresh vrai).
   Ne mettre en cache que les succès : un échec n'est jamais conservé, la requête suivante
     relance.
+  Annuler le jeton de l'exécution quand TOUS les demandeurs ont abandonné (le script s'arrête entre deux opérations, `dsd/app/widgets.md` `FR-10`).
   Laisser un demandeur abandonner son attente (interruption par l'utilisateur) sans effet sur les
     autres : l'exécution partagée continue pour eux. Quand TOUS les demandeurs ont abandonné,
     l'exécution qui s'achève ensuite ne laisse aucune entrée (`FR-10` : l'interruption ne laisse
@@ -82,6 +83,11 @@ Scenario: un calcul qui panique rend une erreur, sans entrée
   Given un @compute qui panique
   When @get_or_compute est appelé, puis de nouveau
   Then les deux appels rendent `E::from(ComputeAborted)` et @compute est appelé les deux fois
+
+Scenario: le jeton n'est annulé que par le dernier abandon
+  Given une exécution lente observée par deux demandeurs
+  When le premier abandonne, puis le second
+  Then le jeton reste actif après le premier abandon et est annulé après le second
 
 Scenario: un échec n'est pas conservé
   Given un @compute qui échoue
