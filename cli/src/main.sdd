@@ -19,7 +19,7 @@ References:
   /dsd/cli.md — « Périmètre », `FR-1` à `FR-6`, `DEC-2`, `DEC-10`
   ./exit_code.sdd — codes de sortie
   ./chat.sdd ./run.sdd ./script.sdd ./owner_cmd.sdd ./project_cmd.sdd ./sandbox_cmd.sdd
-  ./sync/command.sdd ./toolset_cmd.sdd ./config_cmd.sdd ./sessions_cmd.sdd ./rpc/mod.sdd — modules
+  ./sync/command.sdd ./toolset_cmd.sdd ./config_cmd.sdd ./secret_cmd.sdd ./sessions_cmd.sdd — modules
 
 Exposes:
   @Cli — @clap::Parser, nom `vanyline`, `version`. Options globales (`global = true`, acceptées avant
@@ -36,8 +36,8 @@ Exposes:
     `owner …`, `project …`, `sandbox …` — grammaires de leurs `*_cmd.sdd` ;
     `sync push|pull` — `./sync/command.sdd` ;
     `toolset list|promote` — `./toolset_cmd.sdd` ;
-    `config check` — `./config_cmd.sdd` ;
-    `serve [--stdio]` — `./rpc/mod.sdd` (suspendu, `dsd/cli.md#OI-2`).
+    `secret set <nom>` — `./secret_cmd.sdd` ;
+    `config check` — `./config_cmd.sdd`.
   @main — `#[tokio::main] async fn main() -> ExitCode` : parse, dispatche, traduit l'issue en code de
     sortie par @exit_code::from_outcome.
 
@@ -59,7 +59,8 @@ Must not:
   Lire un fichier de configuration, parler au cluster ou à une sandbox elle-même (les modules le
     font).
   Garder les anciennes commandes `conversations`, `agents`, `providers`, `models`, `skills`, `mcp`,
-    l'option `--toolbox`, le mode REPL sans sous-commande et les options `-a/--agent` du chat.
+    `serve` (serveur RPC retiré, `dsd/cli.md#DEC-1`), l'option `--toolbox`, le mode REPL sans
+    sous-commande et les options `-a/--agent` du chat.
 
 Scenario: sans sous-commande
   Given `vanyline` seul
@@ -77,7 +78,7 @@ Scenario: grammaire de chat
   Then `context` `p`, `sandbox` `s`, `continue` vrai
 
 Scenario: commandes retirées
-  Given `vanyline conversations list` et `vanyline chat --toolbox s`
+  Given `vanyline conversations list`, `vanyline serve --stdio` et `vanyline chat --toolbox s`
   When elles sont parsées
   Then clap les rejette (code 2)
 
@@ -87,10 +88,4 @@ Scenario: version et aide
   Then les valeurs de clap, code 0
 
 Tasks:
-  [ ] `main.rs` réduit à ce contrat (E7 à E11 : retirer les handlers de lecture, `--toolbox`, le REPL).
-  [?] Sans sous-commande : aide + code 2 (proposition), ou ouvrir le chat comme aujourd'hui ? `chat`
-    exige `--context`, donc le défaut implicite n'a plus de sens (`dsd/cli.md#FR-2`).
-  [?] `serve --stdio` (`dsd/cli.md#OI-2`) : ses handlers (`rpc/handlers.rs`, 5 364 lignes) dépendent
-    de `vanyline-lib` (chat, cfgstore) que le chantier retire. Retirer `serve` avec la lib (aucun
-    consommateur connu : l'extension VS Code est supprimée, kydah-code parle MCP), ou le réécrire
-    sur lymaille ?
+  [ ] `main.rs` réduit à ce contrat (E7 à E11 : retirer les handlers de lecture, `serve`, `--toolbox`, le REPL).

@@ -68,5 +68,4 @@ Scenario: projet introuvable
 
 Tasks:
   [ ] `context_derive.rs` et ses tests (client K8s simulé par le seam de la lib si disponible).
-  [?] Nom et prompt de l'agent par défaut livré avec la CLI (`vanyline-cli`) : à rédiger avec le
-    développeur ; contenu minimal au départ.
+  [x] Décidé 2026-11-17 : type et agent `vanyline-cli` MINIMAUX (prompt d'une phrase, agent de développement sur la sandbox), à enrichir par fichiers ; la CLI n'a pas de workflows (ils relèvent d'`app`).

@@ -141,8 +141,7 @@ Tasks:
     `unicode-width`, `pulldown-cmark` ; vérifier le harnais clippy sur ces usages.
   [?] Écran alternatif contre vue « inline » (`Viewport::Inline`) : départ écran alternatif (perd le
     défilement natif à la sortie, compensé par la ligne finale et `--resume`).
-  [?] Souris : molette activée en dur ; la capture empêche la sélection native du terminal (Maj+clic la
-    rétablit). Ajouter un flag global `--no-mouse` ou assumer ?
+  [x] Décidé 2026-11-17 : molette toujours active, aucun `--no-mouse`.
   [?] Hook de panique × panique de la tâche de tour : le hook global restaure le terminal en pleine
     session avant que le tick n'injecte « tour interrompu ». Circonscrire la restauration au thread
     principal et aux paniques de rendu, ou assumer ?

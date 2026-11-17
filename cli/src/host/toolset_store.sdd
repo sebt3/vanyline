@@ -65,5 +65,4 @@ Scenario: brouillon invalide
 
 Tasks:
   [ ] `toolset_store.rs` et ses tests.
-  [?] Le brouillon comme répertoire frère `toolsets-drafts/<nom>/` est une ASSUMPTION du DSD
-    (`hote` « Structure ») : à confirmer.
+  [x] Décidé 2026-11-17 : brouillons dans le répertoire frère `toolsets-drafts/<nom>/`.

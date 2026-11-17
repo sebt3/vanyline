@@ -76,4 +76,3 @@ Scenario: cluster injoignable
 
 Tasks:
   [ ] `session_open.rs` et ses tests (hôte simulé par les seams des stores ; cluster simulé).
-  [?] Nom du ContextType et de l'agent par défaut livrés avec la CLI : voir `./host/context_derive.sdd`.

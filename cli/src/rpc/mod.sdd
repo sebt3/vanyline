@@ -224,6 +224,7 @@ Must not:
     ../main.rs attend `()` en `.await`).
 
 Tasks:
+  [ ] Retiré en E11 avec le serveur RPC `serve --stdio` (décision du 2026-11-17 : aucun consommateur, l'extension VS Code est supprimée ; `dsd/cli.md#OI-2`). Spec et code partent ensemble.
   [ ] Dériver les Scenario non couverts en tests d'intégration dans
     ../../tests/rpc_stdio_smoke.rs (harness `Client` existant, process réel),
     taggés par leur titre : EOF sans shutdown, stdin fermé immédiatement,

@@ -48,7 +48,4 @@ Scenario: brouillon invalide
 
 Tasks:
   [ ] `toolset_cmd.rs` et ses tests — E9.
-  [?] Les anciennes commandes `models`, `skills`, `mcp` (`model_cmd.sdd`, `skill_cmd.sdd`,
-    `mcp_cmd.sdd`) lisaient `cfgstore` : retirées avec lui (E11), la configuration s'édite à la main
-    dans les fichiers des niveaux et `config check` la vérifie. Confirmer ce retrait ou garder des
-    commandes de lecture `agent|profile|provider list|show` ?
+  [x] Décidé 2026-11-17 : les commandes `models`, `skills`, `mcp`, `agents`, `providers` sont retirées (E11) ; la configuration s'édite dans les fichiers des niveaux et `config check` la vérifie.

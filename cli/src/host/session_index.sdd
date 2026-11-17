@@ -55,6 +55,4 @@ Scenario: erreurs de script
 
 Tasks:
   [ ] `session_index.rs` et ses tests.
-  [?] Index léger : relire chaque fichier d'état pour en extraire titre et compteurs, ou tenir un
-    fichier d'index `sessions/index.json` mis à jour à la sauvegarde ? Départ : relecture (pas
-    d'état dérivé à tenir cohérent), à revoir si le listage devient lent.
+  [x] Décidé 2026-11-17 : index par relecture des fichiers d'état (pas de fichier d'index à tenir cohérent) ; à revoir si le listage devient lent.

@@ -419,6 +419,7 @@ Must not:
     (harnais ../../../tooling.sdd ; les silences actuels sont contractuels).
 
 Tasks:
+  [ ] Retiré en E11 avec le serveur RPC `serve --stdio` (décision du 2026-11-17 : aucun consommateur, l'extension VS Code est supprimée ; `dsd/cli.md#OI-2`). Spec et code partent ensemble.
   [ ] Dériver les Scenario non couverts en tests unitaires serde (module
     `#[cfg(test)]` de ./protocol.rs ou fichier de tests dédié — pas de store,
     pas de réseau), taggés par leur titre ; aujourd'hui seule une moitié des

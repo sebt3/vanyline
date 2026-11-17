@@ -586,6 +586,7 @@ Must not:
     line: &@str) -> @Option<@String>` (./mod.rs l'appelle mot pour mot).
 
 Tasks:
+  [ ] Retiré en E11 avec le serveur RPC `serve --stdio` (décision du 2026-11-17 : aucun consommateur, l'extension VS Code est supprimée ; `dsd/cli.md#OI-2`). Spec et code partent ensemble.
   [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ comme contrat positif — une réponse bâtie sur des types `Serialize` fermés ne peut pas échouer ; les `.expect` sont des surfaces de panic contractées ; les allows D6c deviennent des exemptions justifiées (réécrire leur ancrage). (Question d'origine : Invariant de sérialisation des réponses (fusionne l'ancien `[?]` « ~90 expects
     passés au travers du harnais ? » — la réponse à sa question interne est : oui, le
     fichier était bien compté, 100 uniques dont ~68 sites d'expect, tous traités en D6c

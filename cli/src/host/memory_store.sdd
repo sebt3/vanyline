@@ -52,5 +52,4 @@ Scenario: portée sans niveau partagé
 
 Tasks:
   [ ] `memory_store.rs` et ses tests.
-  [?] `hote#OI-1` : la disposition `memories/<référence>/<id>.md` est une proposition du DSD, non
-    validée.
+  [x] Décidé 2026-11-17 : disposition `memories/<référence>/<id>.md` (`hote#OI-1` soldé).

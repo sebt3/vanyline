@@ -18,8 +18,9 @@ dans un terminal, gérer les Owners, Projects et Sandboxes, et se brancher sur l
 - **BO-1:** Piloter vanyline depuis un terminal : conversation, objets Kubernetes, configuration.
     - **Source:** `AGENTS.md`, composant cli
 
-- **BO-2:** Offrir une interface d'intégration programmatique sans navigateur.
-    - **Source:** `vanyline.sdd`, tâche ouverte (décision du 2026-10-04, serveur RPC conservé)
+- **BO-2 (abandonné le 2026-11-17):** Offrir une interface d'intégration programmatique sans navigateur. Le serveur RPC est retiré
+  (`DEC-1`) : kydah-code et les intégrations parlent MCP à la sandbox, `app` offre REST et MCP.
+    - **Source:** `vanyline.sdd`, tâche ouverte (décision du 2026-10-04) ; décision du 2026-11-17
 
 - **BO-3:** Automatiser en batch, sans LLM, des opérations sur une sandbox (scripts Rhai).
     - **Source:** décision du développeur, 2026-11-07
@@ -27,7 +28,7 @@ dans un terminal, gérer les Owners, Projects et Sandboxes, et se brancher sur l
 ## Périmètre et non-objectifs
 
 Le domaine couvre : le chat TUI, `run`, `script`, la gestion des sessions, la gestion des Owners, Projects et Sandboxes,
-la configuration locale de l'hôte, le branchement sur la sandbox (`--sandbox`) et `serve --stdio`.
+la configuration locale de l'hôte et le branchement sur la sandbox (`--sandbox`).
 
 Hors périmètre : la conduite du LLM (domaine `agent-sessions` de lymaille), le contenu de la sandbox (domaine `sandbox`),
 le fonctionnement des objets Kubernetes (domaine `workspaces`).
@@ -123,10 +124,12 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 
 ## Décisions du domaine
 
-- **DEC-1 - Le serveur RPC est conservé**
-    - **Context:** son premier consommateur, l'extension VS Code, est supprimée.
-    - **Decision:** il reste une interface d'intégration pour d'autres clients.
-    - **Source:** `vanyline.sdd`, tâche ouverte (décision du 2026-10-04)
+- **DEC-1 - Le serveur RPC est retiré**
+    - **Context:** son seul consommateur, l'extension VS Code, est supprimée ; ses handlers dépendent de `vanyline-lib` (chat,
+      cfgstore) que le chantier retire (`app#DEC-1`). Décision du 2026-10-04 de le conserver, révisée.
+    - **Decision:** `serve --stdio` et la spec `docs/rpc-protocol.md` sont retirés avec la lib (E11) ; aucune réécriture sur lymaille. Rouvrable
+      si un client d'intégration apparaît.
+    - **Source:** décision du développeur, 2026-11-17
 
 - **DEC-2 - La CLI est un hôte lymaille permanent et autonome**
     - **Context:** `app#DEC-1` retire `vanyline-lib`, dont le chat de la CLI dépend.
@@ -230,8 +233,6 @@ stockage `cfgstore` sont retirés. Inventaire précis des specs à réécrire : 
 
 ## Open Issues
 
-- **OI-2:** **Que devient `serve --stdio` ?** Il garde un contrat sans consommateur connu : conservé en suspens
-  (`DEC-1`) tant qu'aucun client n'existe. **TBD.**
 - **OI-4:** **Contexte de configuration en CLI.** `--context` désigne un Project (`DEC-5`) ; comment ouvre-t-on une
   session de configuration, qui n'a pas de Project ? **TBD.**
 - **OI-5:** **Sandbox éphémère pour `script`.** Écartée à ce stade : `script` ne se branche que sur une sandbox

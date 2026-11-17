@@ -76,6 +76,4 @@ Scenario: fichier illisible
 
 Tasks:
   [ ] `catalog_store.rs` et ses tests.
-  [?] Version du format de `.vanyline/` (`hote#OI-4`) : un champ `version:` dans les fichiers YAML
-    de profil/provider/ContextType/ToolsetContext, ou seulement le format de lymaille ? Départ : le
-    seul format de lymaille ; ajout d'un champ si un changement incompatible l'exige.
+  [x] Décidé 2026-11-17 : aucun champ `version:` ; le seul format de lymaille (`hote#OI-4` soldé).

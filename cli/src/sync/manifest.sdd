@@ -43,4 +43,4 @@ Scenario: coupure en cours de copie
 
 Tasks:
   [ ] `manifest.rs` et ses tests — E10.
-  [?] Disposition `<state>/sync/<empreinte-du-dépôt>-<sandbox>.json` : ASSUMPTION du DSD à confirmer.
+  [x] Décidé 2026-11-17 : manifeste en `<state>/sync/<empreinte-du-dépôt>-<sandbox>.json`.
