@@ -49,9 +49,9 @@ Exposes:
     `read_policy = write_policy = AccessPolicy::OwnerOnly` ; `owner_column() =
     Column::OwnerId` ; hooks `before_create`/`before_update` (async, pattern
     `std::future::ready` de ./project_workflows.rs).
-    `filterable_columns() = [Scope, Kind, Project]` et `sortable_columns() = [Id, Title, Scope,
+    `filterable_columns() = [Scope, Kind, ProjectId]` et `sortable_columns() = [Id, Title, Scope,
     Kind]` (miryad-core 0.4.0, ticket #78) : la liste REST filtre par égalité sur ces colonnes
-    (`?scope=project&kind=complementary&project=web`) et trie par `sort`/`order` ; une colonne non
+    (`?scope=project&kind=complementary&project_id=3`) et trie par `sort`/`order` ; une colonne non
     déclarée est refusée 400 par miryad-core.
 
 Structure:
@@ -161,7 +161,7 @@ Scenario: un type de widget inconnu refuse sans lire le registre du frontend
 Scenario: la liste filtre et trie par colonnes déclarées (#78)
   Given trois lignes de l'appelante (un `custom` d'accueil, deux `complementary` de « web »
     de titres « B » et « A »)
-  When `GET /api/v1/dashboards?kind=complementary&project=web&sort=title&order=asc`, puis un
+  When `GET /api/v1/dashboards?kind=complementary&project_id=<id de « web »>&sort=title&order=asc`, puis un
     filtre sur une colonne non déclarée (`?def=x`)
   Then les deux `complementary` rendus dans l'ordre A puis B ; la colonne non déclarée est
     refusée 400
