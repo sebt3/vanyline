@@ -16,7 +16,7 @@ References:
   ./mod.sdd — @HostError
 
 Exposes:
-  @write_atomic(chemin: `&Path`, octets: `&[u8]`) -> `Result<(), HostError>` : crée les répertoires
+  @write_atomic(chemin: `&Path`, octets: `&[u8]`, mode: `u32`) -> `Result<(), HostError>` : crée les répertoires
     parents, écrit dans un fichier temporaire du MÊME répertoire, synchronise, puis renomme sur
     la cible.
   @read_text(chemin: `&Path`) -> `Result<Option<String>, HostError>` : `None` si le fichier
@@ -62,4 +62,4 @@ Scenario: fichiers temporaires ignorés
   Then il n'apparaît pas
 
 Tasks:
-  [ ] `files.rs` et ses tests (`tempfile`).
+  [x] `files.rs` et ses tests (`tempfile`).

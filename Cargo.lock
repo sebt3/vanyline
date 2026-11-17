@@ -8971,6 +8971,7 @@ dependencies = [
  "dirs",
  "futures",
  "kube",
+ "lymaille",
  "pulldown-cmark",
  "ratatui",
  "reqwest 0.12.28",
@@ -8978,7 +8979,9 @@ dependencies = [
  "rmcp 1.7.0",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8988,6 +8991,7 @@ dependencies = [
  "vanyline-crds",
  "vanyline-lib",
  "vanyline-tools",
+ "yaml_serde",
 ]
 
 [[package]]

@@ -49,4 +49,4 @@ Scenario: processus mort
   Then il réussit
 
 Tasks:
-  [ ] `process_lock.rs` et ses tests.
+  [x] `process_lock.rs` et ses tests.

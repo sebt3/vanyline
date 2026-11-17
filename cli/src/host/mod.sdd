@@ -28,7 +28,7 @@ Exposes:
     toolset_store;` (ordre alphabétique).
   @HostError — `pub enum` (`thiserror`) commune aux enfants : @Io { chemin, cause },
     @Format { chemin, cause } (fichier illisible ou invalide), @Invalid { cause } (refus par la
-    validation de lymaille), @Secret { cause }, @Cluster { cause }, @Locked { session }. Aucune
+    validation de lymaille), @Secret { cause }, @Cluster { cause }, @Locked { session, pid: `Option<u32>` (indicatif) }. Aucune
     variante ne porte la valeur d'un secret. Marqueurs `VNL-CLI-HST-NNN`, un par cause, définis
     dans l'enfant qui la lève.
 
@@ -42,5 +42,5 @@ Must not:
     (`k8s`) : le stockage de la CLI ne reprend aucun code de `cfgstore`.
 
 Tasks:
-  [ ] `mod.rs` : déclarations, @HostError ; dépendances de la crate `cli` (`lymaille`, `serde_yaml`
-    ou équivalent maintenu, `sha2`, `tempfile` ou écriture atomique maison).
+  [x] `mod.rs` : déclarations, @HostError ; dépendances de la crate `cli` (`lymaille`, `yaml_serde`,
+    `sha2`, `thiserror` ; écriture atomique maison, sans `tempfile` en production).

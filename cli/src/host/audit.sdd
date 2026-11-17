@@ -17,11 +17,19 @@ References:
   ./files.sdd ./layers.sdd
 
 Exposes:
-  @AuditLog — `new(layers: &Layers)` ; @record(enregistrement: &ScriptRecord) -> `Result<(), HostError>` ;
-    @for_session(id: &SessionId) -> `Vec<ScriptRecord>`. L'enregistrement est le `ScriptRecord` de
-    lymaille (événement `EventKind::Script`).
-  @AuditSink — implémente `lymaille::EventSink` : ne retient que `EventKind::Script`, les écrit par
-    @AuditLog::record, laisse passer les autres événements à un sink suivant.
+  @AuditEntry — { @turn: `u64` (tour de la session au moment du script), @record: `ScriptRecord`
+    (celui de lymaille, `EventKind::Script`) } : ce que le journal écrit, une ligne JSON par entrée.
+  @AuditLog — `new(layers: &Layers)` ; @record(session: &SessionId, entrée: &AuditEntry) ->
+    `Result<(), HostError>` ; @record_standalone(entrée: &AuditEntry, at: Timestamp) pour `script`
+    (fichier `script-<horodatage>.jsonl`, hors session) ; @for_session(id: &SessionId) ->
+    `Result<Vec<AuditEntry>, HostError>` (une lecture en échec ne ressemble jamais à un journal vide ;
+    une ligne complète invalide est @HostError::Format, une dernière ligne sans saut de ligne est
+    ignorée).
+  @AuditSink — implémente `lymaille::EventSink` (synchrone, ne peut pas échouer vers lymaille) : suit
+    le tour courant par `EventKind::TurnStarted`, ne retient que `EventKind::Script`, les écrit par
+    @AuditLog::record et laisse passer les autres événements au sink suivant. Les échecs d'écriture
+    sont retenus et rendus par @AuditSink::take_failures() (affichés par l'appelant, jamais perdus en
+    silence).
 
 Handles:
   Un fichier JSONL par session : `<state>/audit/<id>.jsonl`, une ligne par enregistrement, ajout en
@@ -42,9 +50,14 @@ Must not:
   Ouvrir le journal d'une session en écriture pour une autre session.
 
 Scenario: un enregistrement par script
-  Given une session qui exécute deux scripts
+  Given une session qui exécute deux scripts dans deux tours
   When les événements passent par @AuditSink
-  Then `@for_session` rend deux enregistrements, dans l'ordre, au texte complet
+  Then `@for_session` rend deux entrées, dans l'ordre, au texte complet et au tour exact
+
+Scenario: échec d'écriture non silencieux
+  Given un répertoire d'audit non inscriptible
+  When un script est audité
+  Then `take_failures()` rend l'erreur
 
 Scenario: ligne tronquée ignorée
   Given un journal dont la dernière ligne est tronquée
@@ -57,4 +70,4 @@ Scenario: aucun secret écrit
   Then le fichier ne contient que la forme masquée
 
 Tasks:
-  [ ] `audit.rs` et ses tests.
+  [x] `audit.rs` et ses tests.

@@ -58,4 +58,4 @@ Scenario: listage et suppression
   Then les trois puis deux identifiants, le plus récent d'abord
 
 Tasks:
-  [ ] `session_store.rs` et ses tests (aller-retour, écriture interrompue par injection d'échec).
+  [x] `session_store.rs` et ses tests (aller-retour, écriture interrompue par injection d'échec).

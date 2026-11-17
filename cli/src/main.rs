@@ -19,6 +19,10 @@ mod config;
 mod config_check;
 mod store;
 
+// Hôte lymaille (host/mod.sdd) : aucun consommateur avant les Solutions chat et batch.
+#[allow(dead_code)]
+mod host;
+
 mod tools;
 
 mod mcp_cmd;

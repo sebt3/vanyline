@@ -65,4 +65,4 @@ Scenario: répertoires des catégories
   Then les noms sont `agents`, `profiles`, `providers`, `toolsets`, `toolsets-drafts`, `context-types`, `contexts`, `memories`
 
 Tasks:
-  [ ] `layers.rs` et ses tests (système de fichiers simulé par la fonction d'existence injectée).
+  [x] `layers.rs` et ses tests (système de fichiers simulé par la fonction d'existence injectée).

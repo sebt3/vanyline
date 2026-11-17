@@ -19,16 +19,23 @@ References:
 Exposes:
   @FileSessionIndex — `new(store: &FileSessionStore, audit: &AuditLog)` ; implémente
     `lymaille::SessionIndex` (`list(filter)`, `script_errors(id)`).
+  @SessionEntry — type de l'hôte : { @id: `SessionId`, @title: `String`, @turns: `u64`, @agent:
+    `String`, @modified: `SystemTime` (date de modification du fichier d'état) } ; construit depuis
+    `SessionSummary::from_state` de lymaille (identifiant, titre, tours, agent) et le fichier (date) :
+    le `SessionSummary` de lymaille ne porte pas de date.
   @latest_for_context(contexte: `&str`) -> `Option<SessionId>` ; @sessions_for_context(contexte:
-    `&str`) -> `Vec<SessionSummary>` (identifiant, titre, nombre de tours, date, plus récent d'abord).
+    `&str`) -> `Vec<SessionEntry>` (plus récent d'abord).
 
 Handles:
   Le contexte d'une session est celui de son état (`ToolsetContext` ouvert) : une session est
     « du contexte X » quand l'état l'indique, jamais d'après un nom de fichier.
   Un fichier de session illisible est ignoré du listage et signalé par une entrée d'erreur dans
     le résultat de l'appelant, sans interrompre le listage (`hote#FR-4`).
-  `script_errors` lit les enregistrements du journal ./audit.sdd de la session ; un journal
-    absent rend une liste vide.
+  `script_errors` lit les entrées du journal ./audit.sdd de la session dont `record.error` est présent
+    et rend, pour chacune, un `ScriptError` de lymaille : tour de l'entrée, classe `Runtime` et texte
+    de l'erreur. La classe fine et la position (ligne, colonne) NE SONT PAS conservées par lymaille
+    (le `ScriptRecord` ne porte qu'un texte) : elles ne sont pas inventées. Un journal absent rend une
+    liste vide.
 
 Must:
   Rester cohérent avec ./session_store.sdd : une session supprimée disparaît du listage.
@@ -49,10 +56,12 @@ Scenario: session supprimée absente du listage
   Then elle n'y figure plus
 
 Scenario: erreurs de script
-  Given trois scripts audités dont un en erreur
+  Given trois scripts audités dont un en erreur au tour 2
   When `script_errors` est appelée
-  Then une seule erreur, avec sa classe et sa position
+  Then une seule erreur, au tour 2, avec le texte de l'erreur
 
 Tasks:
-  [ ] `session_index.rs` et ses tests.
+  [x] `session_index.rs` et ses tests.
   [x] Décidé 2026-11-17 : index par relecture des fichiers d'état (pas de fichier d'index à tenir cohérent) ; à revoir si le listage devient lent.
+  [?] Classe et position d'une erreur de script : lymaille ne les persiste pas (`ScriptRecord.error` est un
+    texte). Demande amont possible : les porter dans `ScriptRecord`. Départ : classe `Runtime`, pas de position.
