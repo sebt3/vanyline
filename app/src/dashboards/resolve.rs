@@ -154,24 +154,20 @@ async fn projet_de_sandbox(
     owner: i32,
     nom: &str,
 ) -> Result<(i32, String), AppError> {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     use crate::db::entities::{
         projects,
         sandboxes::{Column, Entity},
     };
 
-    // Le nom n'est unique que par projet : deux correspondances = écran ambigu (échec fermé).
-    let mut trouvees = Entity::find()
+    // Clé = nom K8s de la CR (`cr_name`), unique par propriétaire : jamais ambigu.
+    let sandbox = Entity::find()
         .filter(Column::OwnerId.eq(owner))
-        .filter(Column::Name.eq(nom))
-        .limit(2)
-        .all(db)
-        .await?;
-    if trouvees.len() != 1 {
-        return Err(ecran_impossible());
-    }
-    let sandbox = trouvees.remove(0);
+        .filter(Column::CrName.eq(nom))
+        .one(db)
+        .await?
+        .ok_or_else(ecran_impossible)?;
     let projet = projects::Entity::find_by_id(sandbox.project_id)
         .one(db)
         .await?
@@ -334,8 +330,8 @@ mod tests {
                 id: NotSet,
                 owner_id: Set(owner),
                 project_id: Set(project),
-                name: Set(name.to_string()),
-                cr_name: Set(format!("cr-{name}")),
+                name: Set(format!("n-{name}")),
+                cr_name: Set(name.to_string()),
                 missing_since: NotSet,
                 created_at: NotSet,
             },
@@ -585,9 +581,9 @@ mod tests {
         }
     }
 
-    /// Une sandbox de même nom dans deux projets de l'appelant : écran ambigu, 010.
+    /// Le nom d'une sandbox est son nom K8s (`cr_name`), jamais le nom affiché.
     #[tokio::test]
-    async fn sandbox_ambigue_refuse_010() {
+    async fn la_sandbox_se_resout_par_son_nom_k8s() {
         let state = state_with(real_db().await);
         let cookie = session_cookie(&state, "alice").await;
         let alice = resolve_user(&state.auth.db, "alice", None)
@@ -595,30 +591,15 @@ mod tests {
             .expect("alice")
             .id;
         let p1 = projet_de_test(&state.auth.db, alice, "p1").await;
-        let p2 = projet_de_test(&state.auth.db, alice, "p2").await;
-        sandbox_de_test(&state.auth.db, alice, p1, "s1").await;
-        crate::db::entities::sandboxes::Entity::insert(
-            crate::db::entities::sandboxes::ActiveModel {
-                id: NotSet,
-                owner_id: Set(alice),
-                project_id: Set(p2),
-                name: Set("s1".to_string()),
-                cr_name: Set("cr-s1-bis".to_string()),
-                missing_since: NotSet,
-                created_at: NotSet,
-            },
-        )
-        .exec(&state.auth.db)
-        .await
-        .expect("la seconde sandbox s'insère");
+        sandbox_de_test(&state.auth.db, alice, p1, "p1-main").await;
         let app = router(state);
-        let (status, json) = resolve(&app, &cookie, "scope=sandbox&sandbox=s1").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
-        assert!(
-            json["error"]
-                .as_str()
-                .is_some_and(|e| e.contains("VNL-APP-DSH-010")),
-            "{json}"
+        let (status, json) = resolve(&app, &cookie, "scope=sandbox&sandbox=p1-main").await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let (status, json) = resolve(&app, &cookie, "scope=sandbox&sandbox=n-p1-main").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "le nom affiché n'est pas une clé : {json}"
         );
     }
 
