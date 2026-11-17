@@ -53,7 +53,7 @@ ou `#[allow]` justifié d'une ligne citant la spec. La dette préexistante est t
 Batterie complète — identique à la CI (`test.yml`, voir sa spec `.github/workflows/workflows.sdd`),
 lancée par le `validator`. Une tâche n'est terminée que si tout passe.
 
-### Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore, health)
+### Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, health)
 
 ```bash
 cargo check --workspace
@@ -63,7 +63,7 @@ cargo clippy --workspace --all-targets -- -D warnings   # harnais — les flags 
 cargo fmt --all -- --check
 ```
 
-`--all-targets` couvre le code de test (`-D warnings` comme la CI — vu sur F2/`vanyline-cfgstore`
+`--all-targets` couvre le code de test (`-D warnings` comme la CI — vu sur F2 (ancien crate de configuration, retiré)
 2026-09-02 : unwraps de test verts en local, rouges en CI). `cargo fmt --all -- --check` est
 obligatoire avant de considérer une tâche terminée.
 
@@ -248,9 +248,10 @@ et rapport typé (exporté en TypeScript). Source unique des *invocations* de v�
 résultat en local (sandbox) et au central. Les règles restent celles du projet analysé.
 
 ### cli/
-Binaire `vanyline` : chat interactif en **TUI ratatui** (sans sous-commande ; exige un terminal),
-`run` (one-shot texte/JSONL), gestion de la configuration et des objets K8s, et serveur RPC
-JSON-RPC `serve --stdio` (conservé comme interface d'intégration).
+Binaire `vanyline`, hôte lymaille autonome qui s'exécute dans le cluster : `chat --context <projet> [--sandbox]`
+(**TUI ratatui**, exige un terminal), `run` (un tour, texte/JSONL), `script` (Rhai sur une sandbox, sans LLM),
+`sessions`, `owner`/`project`/`sandbox` (dont `apply -f` et `edit`), `sync push|pull` de `.vanyline/`, `toolset`,
+`secret set` et `config check`. Pas de serveur RPC (retiré le 2026-11-17). Contrat : `dsd/cli.md`, `cli/src/main.sdd`.
 
 ## Clients de la sandbox
 
@@ -258,7 +259,7 @@ JSON-RPC `serve --stdio` (conservé comme interface d'intégration).
 |--------|-------|------|-------|
 | frontend (WebSocket éditeur) | Ingress par sandbox (`{name}.sandboxes.{host}`) | Ticket court-vécu à usage unique (miné par `app`) | Éditeur web, terminal, LSP |
 | app | Service K8s interne | Jeton du SA de l'Owner (TokenRequest), après contrôle utilisateur↔Owner | Relais de ticket, git, santé du code, workflows (jobs, gate), agents (MCP) |
-| kydah-code, cli (`--toolbox`), opérateur | Service K8s interne / Ingress | Jeton du SA de l'Owner (kubeconfig de l'utilisateur) | MCP pour les LLM |
+| kydah-code, cli (`--sandbox`), opérateur | Service K8s interne / Ingress | Jeton du SA de l'Owner (kubeconfig de l'utilisateur) | MCP pour les LLM |
 | kubelet, supervision | Port d'exploitation | Aucune (non publié ; NetworkPolicy dédiée) | `/health`, `/metrics` |
 
 ## Interfaces inter-composants
@@ -285,23 +286,22 @@ logger du crate (`tracing` côté Rust, logger du projet côté frontend ; le ha
 | Composant | Langage | Dépendances clés |
 |-----------|---------|-----------------|
 | frontend | TypeScript | Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, `@nuxt/ui`, Tailwind, Reka UI, `@vanyline/ui`, `@vanyline/protocol` |
-| `packages/protocol` (`@vanyline/protocol`) | TypeScript pur | types Rust↔TS (`ChatEvent`, santé du code générés par ts-rs ; `config-domain.ts`, `workflow-domain.ts` miroirs), enveloppes RPC, `RpcConnection` — zéro dépendance UI |
+| `packages/protocol` (`@vanyline/protocol`) | TypeScript pur | types Rust↔TS (`ChatEvent` hérité en cours de retrait, santé du code, tableaux de bord, widgets et configuration lymaille générés par ts-rs ; `workflow-domain.ts` miroir), enveloppes RPC, `RpcConnection` — zéro dépendance UI |
 | `packages/ui` (`@vanyline/ui`) | TypeScript | Vue 3, `@nuxt/ui`, `reka-ui`, `@ai-sdk/vue` — composants chat + écrans config + `ConfigShell`, agnostiques du backend (ports `ChatTransport`/`ChatBackend`/`ConfigRepo` injectés) |
-| `lib` (`vanyline-lib`) | Rust | types/événements, session d'agent, tâches autonomes, feature `k8s` (client, `owner_token`), ts-rs |
+| `lib` (`vanyline-lib`) | Rust | interface avec le cluster et les sandboxes (feature `k8s`) : client Kubernetes (`owner_token`, CR), client fichier de la sandbox (`sandbox_fs`), erreur du crate |
 | `crds` (`vanyline-crds`) | Rust | définitions des CRDs du controller, nommage du namespace d'Owner |
 | `tools` (`vanyline-tools`) | Rust | tools MCP partagés |
-| `cfgstore` (`vanyline-cfgstore`) | Rust | stockage de configuration |
 | `health` (`vanyline-health`) | Rust | santé du code : presets, parseurs, runner, rapport (ts-rs) |
 | app | Rust | axum, SeaORM/PostgreSQL, `miryad-core` (features `mcp`, `workflow`, `lymaille`, `matrix`), `vanyline-lib` (+ `k8s`), restate-sdk |
 | sandbox | Rust | axum, `portable-pty`, `vanyline-tools`, `vanyline-health` |
 | controller | Rust | kube-rs, `vanyline-crds` |
-| cli | Rust | ratatui, crossterm, harness/CLI du projet |
+| cli | Rust | ratatui, crossterm, clap, `lymaille` (hôte), `vanyline-lib` (client cluster et sandbox) |
 
 ## Structure des répertoires
 
 ```
 vanyline/
-├── Cargo.toml          # workspace Cargo UNIQUE (membres lib/app/cli/sandbox/tools/controller/crds/cfgstore/health) + [workspace.lints] (harnais)
+├── Cargo.toml          # workspace Cargo UNIQUE (membres lib/app/cli/sandbox/tools/controller/crds/health) + [workspace.lints] (harnais)
 ├── package.json        # workspace npm racine (workspaces: frontend, packages/*)
 ├── vanyline.sdd        # spec racine — contraintes transverses + feuille de route de migration
 ├── tooling.sdd         # spec du harnais clippy/fmt + dette tracée
@@ -311,7 +311,7 @@ vanyline/
 ├── packages/
 │   ├── protocol/       # @vanyline/protocol — types Rust↔TS, RPC, RpcConnection
 │   └── ui/             # @vanyline/ui — composants chat + config, agnostiques du backend
-├── lib/  app/  cli/  sandbox/  tools/  controller/  crds/  cfgstore/  health/   # membres du workspace cargo
+├── lib/  app/  cli/  sandbox/  tools/  controller/  crds/  health/   # membres du workspace cargo
 ├── deploy/             # manifests / déploiement
 ├── toolchains/         # images OCI des toolchains sandbox
 └── docs/
