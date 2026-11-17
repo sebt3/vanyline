@@ -21,4 +21,5 @@ Must:
   N'être qu'un point de déclaration.
 
 Tasks:
-  [ ] `mod.rs`.
+  [x] `mod.rs` — E10. Déclare `command`, `manifest`, `plan`, `tree` ; le module est branché dans `main.rs`
+    (`Sync`, dispatch vers `command::run_sync`).

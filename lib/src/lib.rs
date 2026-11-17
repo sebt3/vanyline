@@ -46,6 +46,9 @@ pub mod k8s;
 pub mod model;
 /// Résolution/connexion MCP filtrée et tools préfixés exposés au LLM.
 pub mod prefixed_mcp;
+#[cfg(feature = "k8s")]
+/// Client de l'accès fichier de la sandbox (ticket + `/ws/fs`) — cf. `./sandbox_fs.sdd`.
+pub mod sandbox_fs;
 /// Moteur de tour : [`SessionContext`], résolution de config et [`run_agent_turn`].
 pub mod session;
 mod types;

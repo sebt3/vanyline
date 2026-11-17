@@ -43,6 +43,7 @@ lymaille = { version = "0.3", default-features = false, features = ["mcp-http", 
 rhai = { version = "1", features = ["sync"] }
 yaml_serde = { version = "0.10", default-features = false }
 sha2 = "0.10"
+secrecy = "0.10"
 thiserror = "2"
 zeroize = "1"
 vynil-core = { version = "0.9.1", default-features = false }

@@ -69,4 +69,8 @@ Scenario: rien à faire
   Then `Nothing` partout, `is_empty` vrai
 
 Tasks:
-  [ ] `plan.rs` et ses tests — E10.
+  [x] `plan.rs` et ses tests — E10. Écarts, tous voulus : `Plan` porte aussi son `direction` (pour l'affichage) ;
+    `build_plan` ne reçoit pas le détecteur : `secrets` est renseigné par l'appelant avec `find_secrets` ; le détecteur de
+    lymaille ne lit que le début du texte pour les préfixes (`sk-`, `Bearer`), donc `find_secrets` l'applique à chaque
+    ligne et à chaque jeton (séparé par espace, `=`, `:`, guillemet, virgule) ; une destination supprimée depuis la dernière
+    synchronisation est une divergence (non précisée par la spec), sauf `force`.

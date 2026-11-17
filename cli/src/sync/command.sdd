@@ -78,5 +78,13 @@ Scenario: coupure
   Then les fichiers copiés sont entiers, aucune divergence signalée sur eux (`AC-7`)
 
 Tasks:
-  [ ] `command.rs` et ses tests (sandbox simulée, dépôt temporaire) — E10.
+  [x] `command.rs` et ses tests (sandbox simulée, dépôt temporaire) — E10. Écarts, tous voulus : le seam est le trait
+    `DistantFs` (`tree.rs`) ; `secrecy` est ajouté à `cli` (déjà au lockfile) pour nommer le `SecretString` ; une
+    divergence rend le code 1 même avec `--dry-run` (une synchronisation réelle échouerait aussi) ; `--context` est vérifié
+    contre `spec.project` de la CR Sandbox ; la base de l'URL est `sandbox_ws_ticket_url` sans `/ws/ticket`, donc joignable là
+    où le client MCP de `session_open` l'est déjà ; `diff_lignes` remplace le diff par une ligne au-delà de 2 000 000 de cases ;
+    les dossiers vidés par une suppression restent dans la destination. La partie cluster de `run_sync` (contexte, jeton,
+    ticket) n'a pas de test sans cluster : elle est couverte par la compilation et la revue seulement.
   [?] Option de dépôt `--repo` : nom fixé par `host/layers.sdd`.
+  [?] Joignabilité de la sandbox (2026-11-17) : `run_sync` (comme `session_open` et le TUI) utilise l'URL de service `http://sandbox-<nom>.<ns>.svc:3000`, qu'un poste de travail ne résout pas hors du cluster. Il faut décider du chemin (port-forward ouvert par la CLI, Ingress public de la sandbox, ou autre) ; si c'est un Ingress HTTPS, le client WebSocket doit activer TLS (`https`/`wss` sont aujourd'hui refusés, `VNL-FS-002`).
+  [x] Décidé 2026-11-17 : divergence ⇒ code 1 même avec `--dry-run` ; une destination supprimée depuis la dernière synchronisation est une divergence (strict) ; un mot `Bearer` dans la prose fait refuser (détecteur de lymaille).

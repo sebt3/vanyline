@@ -57,4 +57,8 @@ Scenario: arbre absent
   Then un arbre vide
 
 Tasks:
-  [ ] `tree.rs` et ses tests — E10.
+  [x] `tree.rs` et ses tests — E10. Écarts, tous voulus : `read_remote` est générique sur le trait `DistantFs`
+    (seam de test, `command.sdd`), que `SandboxFs` implémente ; `TreeError` porte des identifiants `VNL-SYNC-001`…`006`
+    (format non contractualisé, `AGENTS.md`) ; un nom d'entrée qui contient `/` est refusé (`VNL-SYNC-001`) ; un
+    `.vanyline/` distant absent est reconnu par `VNL-TLS-001` ; un lien symbolique ou un type spécial est refusé
+    sans être suivi.

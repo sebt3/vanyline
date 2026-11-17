@@ -42,5 +42,7 @@ Scenario: coupure en cours de copie
   Then il ne mentionne que la première
 
 Tasks:
-  [ ] `manifest.rs` et ses tests — E10.
+  [x] `manifest.rs` et ses tests — E10. Écarts, tous voulus : `Manifest` est une structure (une alias ne porte pas
+    de méthodes) avec `chemins()` pour l'itération ; l'empreinte du dépôt est le SHA-256 de son chemin, en hexadécimal ;
+    le nom de la sandbox ne garde que `[A-Za-z0-9_-]` (jamais de séparateur de chemin) ; fichier en mode `0600`.
   [x] Décidé 2026-11-17 : manifeste en `<state>/sync/<empreinte-du-dépôt>-<sandbox>.json`.

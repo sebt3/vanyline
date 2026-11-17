@@ -43,6 +43,9 @@ mod target;
 
 mod tools;
 
+// Synchronisation de `.vanyline/` (sync/mod.sdd), dispatch dans `main` (sync/command.sdd).
+mod sync;
+
 mod config_cmd;
 mod mcp_cmd;
 mod model_cmd;
@@ -165,6 +168,9 @@ enum Commands {
     /// Manage K8s Sandboxes
     #[command(name = "sandbox", subcommand)]
     K8sSandbox(sandbox_cmd::Commands),
+    /// Copier `.vanyline/` vers la sandbox (`push`) ou depuis la sandbox (`pull`) (`sync/command.sdd`)
+    #[command(subcommand)]
+    Sync(sync::command::Commands),
     /// Valider les fichiers de configuration des deux niveaux (`config_cmd.sdd`)
     #[command(subcommand)]
     Config(config_cmd::Commands),
@@ -347,6 +353,11 @@ async fn main() -> std::process::ExitCode {
             let global =
                 options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
             return exit_code::from_outcome(project_cmd::run_project(cmd, &global).await);
+        }
+        Some(Commands::Sync(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(sync::command::run_sync(cmd, &global).await);
         }
         Some(Commands::K8sSandbox(cmd)) => {
             let global =

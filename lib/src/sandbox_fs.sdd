@@ -66,5 +66,10 @@ Scenario: ticket jamais journalisé
   Then ni le ticket ni le jeton n'apparaissent
 
 Tasks:
-  [ ] `sandbox_fs.rs` et ses tests (serveur WebSocket simulé) — E10. Dépendance `tokio-tungstenite` (ou
-    équivalent déjà dans le graphe) à valider.
+  [x] `sandbox_fs.rs` et ses tests (serveur WebSocket simulé) — E10. Dépendance `tokio-tungstenite` 0.29 (déjà dans le
+    graphe via `axum`, feature `k8s`, sans TLS : l'URL interne de la sandbox est `http://`) ; `secrecy` 0.10 (déjà dans
+    le graphe). Écarts, tous voulus : champ `tronque` (identifiant ASCII) pour `tronqué` ; erreurs à identifiants
+    `VNL-FS-001`…`005` (format non contractualisé, `AGENTS.md`) ; `with_read_limit` pour le plafond de réception ;
+    `delete` rend `Ok(false)` sur `VNL-TLS-001` ; le marqueur de troncature de `list` est détecté par son préfixe, pas
+    par sous-chaîne (écarte le `[!]` de `sandbox/src/ws/fs.sdd`). Le simulateur de test est un serveur axum ; le
+    harnais d'upgrade réel des Scenarios WS est donc couvert côté client, pas côté `sandbox`.
