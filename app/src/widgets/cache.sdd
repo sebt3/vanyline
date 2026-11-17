@@ -17,12 +17,22 @@ References:
   ./run.sdd — seul appelant
 
 Exposes:
-  @WidgetCache — handle `Clone` (état partagé) : @get_or_compute(@key: @CacheKey, @ttl_secs: `u64`,
-    @refresh: `bool`, @compute) -> `Result<@Entry, E>` où @compute est une fonction asynchrone
-    qui rend une @Entry ou une erreur `E`.
+  @WidgetCache — handle `Clone` (état partagé) : @WidgetCache::new(@clock) puis
+    @get_or_compute(@key: @CacheKey, @ttl_secs: `u64`, @refresh: `bool`, @compute) ->
+    `Result<@Fetched, E>`. @clock : `Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>` (horloge
+    injectée, seule source de `computed_at` et de l'âge d'une entrée ; la production passe
+    `Utc::now`, les tests une horloge réglable). @compute : `FnOnce() -> Fut` avec `Fut: Future<Output
+    = Result<@Entry, E>> + Send + 'static` et `E: Clone + Send + 'static + From<@ComputeAborted>` ; il s'exécute dans une
+    tâche `tokio::spawn` pour que l'abandon d'un demandeur n'interrompe pas l'exécution partagée.
   @CacheKey — { @subject: `String`, @dashboard: `i32`, @widget: `String`, @script_hash: `u64` }.
-  @Entry — { @output: @WidgetOutput, @computed_at: horodatage, @duration_ms: `u64` } ; la
-    réponse en déduit `cached` (vrai quand l'entrée vient du cache).
+  @Entry — { @output: @WidgetOutput, @computed_at: `DateTime<Utc>` (rendu en RFC 3339 par la
+    route), @duration_ms: `u64` }.
+  @ComputeAborted — type unité exposé par le module : la tâche de calcul s'est arrêtée sans
+    résultat (panique de @compute). Les demandeurs reçoivent `E::from(ComputeAborted)` ; jamais
+    de `resume_unwind`, de panique ni d'entrée de cache (l'appelant traduit en `010`).
+  @Fetched — { @entry: @Entry, @cached: `bool` } : `cached` est vrai seulement quand l'entrée
+    vient du cache ; une entrée calculée pour cet appel, ou partagée depuis une exécution en cours
+    déclenchée par un autre appel, vaut faux.
 
 Must:
   Ne jamais partager une entrée entre sujets : `subject` fait partie de la clé.
@@ -68,6 +78,11 @@ Scenario: l'abandon de tous les demandeurs ne laisse pas d'entrée
   When l'exécution s'achève avec succès
   Then aucune entrée n'est conservée et l'appel suivant recalcule
 
+Scenario: un calcul qui panique rend une erreur, sans entrée
+  Given un @compute qui panique
+  When @get_or_compute est appelé, puis de nouveau
+  Then les deux appels rendent `E::from(ComputeAborted)` et @compute est appelé les deux fois
+
 Scenario: un échec n'est pas conservé
   Given un @compute qui échoue
   When l'appel est répété
@@ -77,7 +92,7 @@ Depends on:
   tokio, ./model.rs.
 
 Tasks:
-  [ ] `cache.rs` : @WidgetCache et ses tests (horloge injectée pour les durées de vie).
+  [x] `cache.rs` : @WidgetCache et ses tests (horloge injectée pour les durées de vie).
 
 Done when:
   Les six Scenarios ont leurs tests, sans attente réelle (horloge injectée).

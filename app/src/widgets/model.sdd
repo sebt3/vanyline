@@ -87,7 +87,7 @@ Depends on:
   @serde, @serde_json, @ts_rs sous feature `ts-rs`.
 
 Tasks:
-  [ ] `model.rs` : les types ci-dessus et le test d'export ; `.github/workflows/test.yml` n'a rien
+  [x] `model.rs` : les types ci-dessus et le test d'export ; `.github/workflows/test.yml` n'a rien
     à changer (le job `tsrs` couvre déjà `vanyline-app`).
 
 Done when:

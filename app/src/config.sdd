@@ -267,7 +267,7 @@ Depends on:
     retrait du crate cfgstore (règle de `../../vanyline.sdd` : un espace par crate).
 
 Tasks:
-  [ ] `config.rs` : les trois champs `widget_*` et leurs variables ; Scenario
+  [x] `config.rs` : les trois champs `widget_*` et leurs variables ; Scenario
     `from_env_widgets_defauts_et_valeurs`.
   [x] Variables du moteur de workflow (2026-10-04) — FAIT 2026-10-10 (validation W0 :
     les 4 variables contractées ci-dessus — 3 en optionnelles, `VNL_WORKFLOW_LISTEN` en

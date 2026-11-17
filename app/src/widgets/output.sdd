@@ -26,7 +26,7 @@ Exposes:
       refusées.
 
 Must:
-  Refuser avec @OutputError toute valeur qui n'est pas un objet `{type, config}` ; un `type`
+  Refuser avec @OutputError toute valeur qui n'est pas un objet à exactement les clés `type` et `config` (toute autre clé au niveau supérieur est refusée, jamais ignorée : grammaire fermée, comme `config`) ; un `type`
     inconnu du registre ; un type connu mais non scriptable (`markdown`, `mermaid`, `scripted`,
     les widgets à source applicative) ; une `config` qui ne respecte pas la grammaire fermée du
     type (clé inconnue, forme ou nombre non fini). Les chaînes (`title`, `label`) sont du texte
@@ -45,7 +45,7 @@ Scenario: un diagramme en barres conforme passe
 
 Scenario: les sorties hors contrat sont refusées
   Given une chaîne, `{type: "markdown", config: {text: "x"}}`, `{type: "bar", config: {data: 3}}`,
-    `{type: "pie", config: {data: [{label: "a", value: "b"}]}}`, `{type: "inconnu", config: {}}`
+    `{type: "pie", config: {data: [{label: "a", value: "b"}]}}`, `{type: "inconnu", config: {}}`, `{type: "bar", config: {data: []}, extra: 1}`
   When @validate_output est appelée sur chacune
   Then chacune rend une @OutputError au message fixe
 
@@ -56,7 +56,7 @@ Tasks:
   [x] Décidé 2026-11-13 : validation Rust par type (pas de schéma JSON, `dsd/app/widgets.md#OI-7`) ;
     la grammaire de `bar` et `pie` est `{title?, data}` seulement, la configuration d'affichage
     (unité, orientation, couleurs…) s'ajoute quand un besoin apparaît.
-  [ ] `output.rs` : @validate_output et ses tests.
+  [x] `output.rs` : @validate_output et ses tests.
 
 Done when:
   Les deux Scenarios ont leurs tests ; aucune dépendance de schéma JSON n'est ajoutée.

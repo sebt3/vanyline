@@ -53,6 +53,20 @@ pub struct Config {
     /// laissée implicite. Même contrat de parse et de repli que `OIDC_TIMEOUT_SECS` :
     /// absente/vide/non parseable ⇒ défaut, jamais d'échec.
     pub subagent_max_secs: u64,
+    /// Plafond de durée d'exécution d'un script de widget (`VNL_WIDGET_MAX_DURATION_SECS`,
+    /// u64 de secondes, défaut `300` = 5 min — `dsd/app/widgets.md#FR-5`, `OI-6`) ; même
+    /// contrat de parse et de repli que `subagent_max_secs`.
+    #[allow(dead_code)] // config.sdd : consommé par widgets/runtime.sdd (tâche suivante)
+    pub widget_max_duration: std::time::Duration,
+    /// Plafond d'opérations Rhai d'un script de widget (`VNL_WIDGET_MAX_OPERATIONS`, u64,
+    /// défaut `0` = illimité — `dsd/app/widgets.md#OI-6`) ; même contrat de parse et de repli.
+    #[allow(dead_code)] // config.sdd : consommé par widgets/runtime.sdd (tâche suivante)
+    pub widget_max_operations: u64,
+    /// Plafond de taille du résultat d'un script de widget (`VNL_WIDGET_MAX_RESULT_BYTES`,
+    /// usize en octets, défaut `1048576` = 1 Mio — `dsd/app/widgets.md#OI-6`) ; même contrat
+    /// de parse et de repli.
+    #[allow(dead_code)] // config.sdd : consommé par widgets/runtime.sdd (tâche suivante)
+    pub widget_max_result_bytes: usize,
 }
 
 impl Config {
@@ -107,6 +121,18 @@ impl Config {
                 .unwrap_or_else(|_| "0.0.0.0:9080".to_string()),
             workflow_deployment_url: read("VNL_WORKFLOW_DEPLOYMENT_URL").ok(),
             subagent_max_secs: secs_or_default("VNL_SUBAGENT_MAX_SECS", 2700),
+            widget_max_duration: std::time::Duration::from_secs(secs_or_default(
+                "VNL_WIDGET_MAX_DURATION_SECS",
+                300,
+            )),
+            widget_max_operations: read("VNL_WIDGET_MAX_OPERATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            widget_max_result_bytes: read("VNL_WIDGET_MAX_RESULT_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_048_576),
         })
     }
 
@@ -187,6 +213,9 @@ mod tests {
             workflow_listen: "0.0.0.0:9080".to_string(),
             workflow_deployment_url: None,
             subagent_max_secs: 2700,
+            widget_max_duration: std::time::Duration::from_secs(300),
+            widget_max_operations: 0,
+            widget_max_result_bytes: 1_048_576,
         }
     }
 
@@ -225,6 +254,46 @@ mod tests {
 
             assert_eq!(config.subagent_max_secs, 2700, "valeur posée {valeur:?}");
         }
+    }
+
+    /// Scenario: `from_env_widgets_defauts_et_valeurs` (config.sdd, `dsd/app/widgets.md#FR-5`,
+    /// `OI-6`) — plafonds des widgets scriptés : défauts 300 s / illimité (0) / 1 Mio ; les
+    /// valeurs posées sont reprises ; les valeurs non parseables retombent sur les défauts.
+    #[test]
+    fn from_env_widgets_defauts_et_valeurs() {
+        let widgets_defauts = |config: &Config| {
+            assert_eq!(
+                config.widget_max_duration,
+                std::time::Duration::from_secs(300)
+            );
+            assert_eq!(config.widget_max_operations, 0);
+            assert_eq!(config.widget_max_result_bytes, 1_048_576);
+        };
+
+        // Aucune variable VNL_WIDGET_* : défauts.
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+        widgets_defauts(&config);
+
+        // Valeurs posées : reprises telles quelles.
+        let mut env = required_env();
+        env.insert("VNL_WIDGET_MAX_DURATION_SECS", "60".to_string());
+        env.insert("VNL_WIDGET_MAX_OPERATIONS", "5000".to_string());
+        env.insert("VNL_WIDGET_MAX_RESULT_BYTES", "2048".to_string());
+        let config = Config::from_env_with(env_read(env)).unwrap();
+        assert_eq!(
+            config.widget_max_duration,
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(config.widget_max_operations, 5000);
+        assert_eq!(config.widget_max_result_bytes, 2048);
+
+        // Valeurs non parseables : défauts, sans erreur.
+        let mut env = required_env();
+        env.insert("VNL_WIDGET_MAX_DURATION_SECS", "abc".to_string());
+        env.insert("VNL_WIDGET_MAX_OPERATIONS", "abc".to_string());
+        env.insert("VNL_WIDGET_MAX_RESULT_BYTES", "abc".to_string());
+        let config = Config::from_env_with(env_read(env)).unwrap();
+        widgets_defauts(&config);
     }
 
     /// Scenario: `oidc_config_copie_les_huit_champs`

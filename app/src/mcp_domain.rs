@@ -1561,6 +1561,9 @@ mod tests {
             workflow_listen: "0.0.0.0:9080".to_string(),
             workflow_deployment_url: None,
             subagent_max_secs: 2700,
+            widget_max_duration: std::time::Duration::from_secs(300),
+            widget_max_operations: 0,
+            widget_max_result_bytes: 1_048_576,
         }
     }
 
