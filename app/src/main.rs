@@ -20,7 +20,6 @@ mod error;
 mod k8s;
 mod mcp_domain;
 mod migration;
-mod naming;
 mod sessions;
 mod widgets;
 mod workflow;

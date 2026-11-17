@@ -15,6 +15,10 @@
     )
 )]
 
+pub mod naming;
+
+pub use naming::{MAX_DNS_LABEL, NamingError, display_name, sandbox_cr_name, validate_label};
+
 use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, Time};

@@ -5,10 +5,12 @@ use std::path::PathBuf;
 
 pub mod audit;
 pub mod catalog_store;
+pub mod context_derive;
 pub mod context_store;
 pub mod files;
 pub mod layers;
 pub mod memory_store;
+pub mod owner_auth;
 pub mod process_lock;
 pub mod secrets;
 pub mod session_index;

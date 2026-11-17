@@ -137,7 +137,7 @@ La CLI ne dépend que de lymaille 0.2.1. Specs d'abord (parallélisables) :
 
 Code, **séquentiel**, dans cet ordre (chaque étape après sa spec) :
 
-- [ ] **E6 — Hôte** : implémentations des traits de stockage sur fichiers, secrets, contexte dérivé, jeton d'Owner, audit.
+- [x] **E6 — Hôte** : implémentations des traits de stockage sur fichiers, secrets, contexte dérivé, jeton d'Owner, audit.
 - [ ] **E7 — TUI sur lymaille** : backend remplacé, adaptateur d'événements, approbation en session retirée.
 - [ ] **E8 — `run` et `script`.**
 - [ ] **E9 — Commandes objets** (`apply`, `edit`) et **E10 — `sync`.**

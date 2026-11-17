@@ -1,5 +1,4 @@
-//! Nommage des objets Kubernetes de l'app : fonctions pures, sans I/O — contrat : `naming.sdd`.
-#![allow(dead_code)] // naming.sdd Tasks : aucun consommateur de production avant le premier lot ; à retirer avec lui.
+//! Nommage des objets Kubernetes partagé par le monorepo : fonctions pures, sans I/O — contrat : `naming.sdd`.
 
 use thiserror::Error;
 
@@ -76,6 +75,7 @@ pub fn sandbox_cr_name(project: &str, name: &str) -> Result<String, NamingError>
 
 /// Nom affiché d'une CR adoptée : retire le préfixe `"{project}-"` si le reste est non vide,
 /// sinon retourne `cr_name` tel quel.
+#[must_use]
 pub fn display_name(project: &str, cr_name: &str) -> String {
     let prefix = format!("{project}-");
     match cr_name.strip_prefix(prefix.as_str()) {

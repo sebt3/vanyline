@@ -1,24 +1,20 @@
 Spec: Naming
 
 Purpose:
-  Fonctions pures de nommage des objets Kubernetes de l'app (décision du 2026-10-23,
-  `/vanyline.sdd`, « Modèle de données Project/Sandbox »). Le nom affiché d'une sandbox est
-  unique PAR PROJET ; le `metadata.name` de sa CR est déterministe, `<projet>-<nom>`, pour que
-  l'unicité dans le namespace de l'Owner (partagé par tous ses projets) soit garantie par
-  construction plutôt que par chance, et qu'une collision se détecte avant tout appel au cluster.
-  Le nom technique sert aussi d'hôte d'ingress (`{name}.sandboxes.{host}`) : il doit être un label
-  DNS valide (RFC 1123, 63 caractères au plus). Module sans état, sans I/O, sans log. Les
-  consommateurs (routes de création, réconciliateur) arrivent dans des lots ultérieurs.
+  Fonctions pures de nommage des objets Kubernetes partagées par le monorepo (décision du
+  2026-10-23, `/vanyline.sdd`, « Modèle de données Project/Sandbox ») : le `metadata.name` d'une
+  CR Sandbox est déterministe, `<projet>-<nom>`, pour que l'unicité dans le namespace de l'Owner
+  (partagé par tous ses projets) soit garantie par construction plutôt que par chance. Le nom
+  technique sert aussi d'hôte d'ingress (`{name}.sandboxes.{host}`) : il doit être un label DNS
+  valide (RFC 1123, 63 caractères au plus). Module sans état, sans I/O, sans log. Déplacé de
+  `app/src/naming.sdd` vers `vanyline-crds` pour que `cli` et `app` partagent le même calcul
+  (`cli/src/host/context_derive.sdd`, `cli#BR-2`) sans dépendre l'un de l'autre.
 
 Owns:
   ./naming.rs
 
-Can modify:
-  ./main.rs — uniquement l'ajout de la ligne `mod naming;` (ordre alphabétique des `mod`).
-  ./main.sdd — uniquement la mention du nouveau module dans sa liste.
-
 Can read:
-  ./error.rs, ./error.sdd — conventions d'identifiants `VNL-XXX-NNN`.
+  ./lib.sdd — ré-export des items publics de ce module dans la racine du crate.
 
 Exposes:
   @MAX_DNS_LABEL — `pub const usize = 63`.
@@ -48,21 +44,21 @@ Must:
 Must not:
   Normaliser, mettre en minuscules ni « réparer » une entrée invalide : elle est refusée.
   Consulter le cluster ou la base : l'unicité réelle est arbitrée par la base et par `AlreadyExists`.
-  Porter un code HTTP : le mappage 422/409 appartient aux routes (lot ultérieur).
+  Porter un code HTTP : le mappage 422/409 appartient aux routes de `app`.
 
 Depends on:
-  `thiserror` 2 (déjà dépendance de l'app).
-  ./error.sdd — convention des identifiants d'erreur. Les identifiants `VNL-NAM-001` et
-    `VNL-NAM-002` ne doivent exister nulle part ailleurs dans le dépôt (vérifier par `grep`).
+  `thiserror` 2 (dépendance de ce crate).
+  Les identifiants `VNL-NAM-001` et `VNL-NAM-002` ne doivent exister nulle part ailleurs dans le
+    dépôt (vérifier par `grep`).
 
 Tasks:
-  [ ] Écrire les tests des Scenario dans `#[cfg(test)] mod tests` de `./naming.rs`, les voir
-    échouer, puis implémenter ; ajouter `mod naming;` à `./main.rs`. Comme aucun consommateur de
-    production n'existe encore, porter un `#[allow(dead_code)]` justifié d'une ligne citant cette
-    spec sur le module, à retirer avec le premier consommateur.
+  [x] Déplacer `app/src/naming.rs` vers `./naming.rs` (même comportement, tests inchangés), retirer
+    `mod naming;` de `app/src/main.rs` et sa mention de `app/src/main.sdd`, ré-exporter depuis
+    `lib.rs`, ajouter `thiserror` à `crds/Cargo.toml`.
+  [x] Retirer `app/src/naming.sdd` et `app/src/naming.rs` (aucun consommateur dans `app`).
 
 Done when:
-  Chaque Scenario est couvert par un test vert et la batterie de `/AGENTS.md` passe.
+  Chaque Scenario est couvert par un test vert dans `vanyline-crds` et la batterie passe.
 
 Scenario: nom_technique_deterministe
   Given le projet "demo" et le nom "main"

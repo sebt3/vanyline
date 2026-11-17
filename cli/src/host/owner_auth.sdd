@@ -53,4 +53,4 @@ Scenario: échec de TokenRequest
   Then une erreur sans jeton ni URL
 
 Tasks:
-  [ ] `owner_auth.rs` et ses tests (seam sur le client K8s).
+  [x] `owner_auth.rs` et ses tests (seam sur le client K8s).

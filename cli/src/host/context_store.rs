@@ -15,7 +15,7 @@ use super::layers::{Category, Layers, Level};
 /// Extension des types et des contextes (YAML).
 const YAML_EXT: &str = "yaml";
 /// Nom du type de contexte livré avec la CLI (`context_derive.sdd`) : il n'est jamais écrit sur disque.
-const SHIPPED_TYPE: &str = "vanyline-cli";
+const SHIPPED_TYPE: &str = super::context_derive::CLI_CONTEXT_TYPE;
 
 /// Marqueur d'un type de contexte livré avec la CLI, refusé à l'écriture.
 const SHIPPED: &str = "VNL-CLI-HST-028";

@@ -18,20 +18,24 @@ References:
   /dsd/cli.md — `DEC-5`, `DEC-6`, `BR-2`
   ./owner_auth.sdd
   /lib/src/k8s.sdd — client Kubernetes, `sandbox_mcp_url`, nommage
-  /crds/src/lib.sdd — nommage `<projet>-<nom>`
+  /crds/src/naming.sdd — @sandbox_cr_name (`<projet>-<nom>`), ré-exporté par `vanyline-crds`
 
 Exposes:
-  @derive_context(client: &VnlK8sClient, owner: &str, projet: &str, sandbox: Option<&str>) ->
-    `Result<DerivedContext, HostError>` (async) ; @DerivedContext { @context: `ToolsetContext`,
+  @derive_context(source: &S, owner: &str, projet: &str, sandbox: Option<&str>) ->
+    `Result<DerivedContext, HostError>` (async) ; `S` est le seam @ClusterSource (trait `Send + Sync`,
+    futures boxées, motif de `./owner_auth.sdd`), implémenté par `VnlK8sClient` : `derive_context(&client, …)`
+    compile comme spécifié. @ClusterSource rend `ClusterRefusal` (`NotFound` ou `Other(cause)`) ;
+    @derive_context le convertit en @HostError::Cluster. @DerivedContext { @context: `ToolsetContext`,
     @context_type: `ContextType`, @mcp_url: `Option<String>` }.
-  @cli_context_type() -> `ContextType` : le type livré avec la CLI (constante compilée) : nom
+  @cli_context_type() -> `Result<ContextType, HostError>` (la construction d'un `ContextType` de lymaille est
+    faillible ; l'erreur est impossible pour la constante livrée et couverte par un test) : le type livré avec la CLI (constante compilée) : nom
     `vanyline-cli`, paramètres `project`, `branch`, `namespace`, rôle `sandbox` (MCP), agent par
     défaut `vanyline-cli` (agent livré aussi avec la CLI).
 
 Handles:
   Sans `--sandbox` : le contexte porte les paramètres du projet et AUCUN rôle MCP ; la session n'a
     aucune action sur le code (`cli#FR-2`). Avec `--sandbox` : la sandbox doit appartenir au
-    projet (`<projet>-<nom>` par le nommage de `vanyline-crds`, jamais recopié) et être `Running` ;
+    projet (`<projet>-<nom>` par la fonction de nommage de `vanyline-crds`, module `naming`, jamais recopiée ; ce module remplace `app/src/naming.rs`, déplacé là par la même tâche) et être `Running` ;
     sinon @HostError::Cluster qui le dit, avant toute session.
   Projet ou sandbox absent du cluster, ou interdit par le RBAC : @HostError::Cluster avec la cause
     de l'apiserver (`K8sNotFound` → « introuvable »).
@@ -67,5 +71,5 @@ Scenario: projet introuvable
   Then @HostError::Cluster « introuvable »
 
 Tasks:
-  [ ] `context_derive.rs` et ses tests (client K8s simulé par le seam de la lib si disponible).
+  [x] `context_derive.rs` et ses tests (client K8s simulé par le seam `ClusterSource`).
   [x] Décidé 2026-11-17 : type et agent `vanyline-cli` MINIMAUX (prompt d'une phrase, agent de développement sur la sandbox), à enrichir par fichiers ; la CLI n'a pas de workflows (ils relèvent d'`app`).

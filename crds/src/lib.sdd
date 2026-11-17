@@ -40,8 +40,9 @@ Structure:
     partagés entre specs (@EgressRule, @EgressPort), types d'appui par spec
     (@ProjectDefaults, @IngressControllerRef, @Toolchain, @LspSpec,
     @ApplicationStorageDefaults, @RestateSpec), quatre structs de status, trois items d'interface publique
-    hors types (@crd_manifests, @MCP_PORT + @service_name, @owner_namespace_name), et le
-    module `#[cfg(test)]`.
+    hors types (@crd_manifests, @MCP_PORT + @service_name, @owner_namespace_name), le sous-module
+    `naming` (./naming.sdd : @sandbox_cr_name, @validate_label, @display_name, @NamingError,
+    @MAX_DNS_LABEL, ré-exportés à la racine), et le module `#[cfg(test)]`.
     Ordre physique : Owner (avec ses types annexes) → Project → Sandbox → Application →
     @crd_manifests → @MCP_PORT / @service_name / @owner_namespace_name → tests.
     Consommation externe : `controller` (reconcilers + `--crds`), `vanyline-lib` feature
