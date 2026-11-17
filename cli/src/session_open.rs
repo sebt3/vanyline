@@ -9,14 +9,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use lymaille::{
-    AgentDefinition, AgentRef, CancelHandle, Clock, ContextError, ContextResult,
-    DEFAULT_SUMMARY_PROMPT, DefaultStrategy, Digest, EventSink, GrantedModule, Grants,
-    InferenceProvider, McpClientConfig, McpConnector, McpEnv, McpRetryPolicy, ModelSnapshot,
+    AgentDefinition, AgentRef, CancelHandle, Clock, DEFAULT_SUMMARY_PROMPT, DefaultStrategy,
+    EventSink, GrantedModule, Grants, InferenceError, InferenceProvider, InferenceRequest,
+    InferenceResponse, McpClientConfig, McpConnector, McpEnv, McpRetryPolicy, ModelSnapshot,
     ProfileStore as _, Provenance, Provider, ProviderStore as _, Redactor, ReplayMode,
     ResolvedProfile, RigConfig, RigProvider, RmcpConnector, Scratchpad, ScratchpadEngine,
-    ScratchpadLimits, SegmentContext, SessionId, SessionState, Summarizer, SystemClock,
-    ToolsetContext, TurnConfig, TurnRunner, builtin_rhai_pad_skill, mcp_module, resolve_start,
-    restore_session, rhai_pad_definition,
+    ScratchpadLimits, SegmentContext, SessionId, SessionState, SystemClock, ToolsetContext,
+    TurnConfig, TurnRunner, builtin_rhai_pad_skill, mcp_module, resolve_start, restore_session,
+    rhai_pad_definition,
 };
 use thiserror::Error;
 
@@ -30,6 +30,7 @@ use crate::host::process_lock::SessionLock;
 use crate::host::secrets::{SecretValue, Secrets};
 use crate::host::session_index::FileSessionIndex;
 use crate::host::session_store::FileSessionStore;
+use crate::summarizer::ProviderSummarizer;
 
 /// Marqueur d'une identifiant, un profil, un agent ou un contexte inconnu.
 const UNKNOWN: &str = "VNL-CLI-SES-001";
@@ -37,23 +38,34 @@ const UNKNOWN: &str = "VNL-CLI-SES-001";
 const LYMAILLE: &str = "VNL-CLI-SES-002";
 /// Marqueur d'un module MCP de la sandbox indisponible.
 const SANDBOX: &str = "VNL-CLI-SES-003";
-/// Marqueur du refus de résumé au débordement.
-const COMPACTION: &str = "VNL-CLI-SES-004";
 /// Taille maximale du rendu d'un résultat, en caractères (budget du contexte).
 pub const RENDU_MAX_CARACTERES: u64 = 12_000;
 
-/// Résumé refusé au débordement du contexte : aucun résumé n'est produit (`session_open.sdd`, `RefusingSummarizer`).
-pub struct RefusingSummarizer;
+/// Fournisseur de la session, partagé avec son résumeur : le tour et la compaction interrogent le MÊME fournisseur
+/// (`summarizer.sdd`, `session_open.sdd`, Handles).
+pub struct SharedProvider<P>(Arc<P>);
 
-impl Summarizer for RefusingSummarizer {
-    fn summarize(
+/// Runner de tours d'une session ouverte : son fournisseur est partagé avec son résumeur de compaction.
+pub type SessionRunner<P> =
+    TurnRunner<SharedProvider<P>, DefaultStrategy<ProviderSummarizer<P>>, FileSessionStore>;
+
+impl<P: InferenceProvider> InferenceProvider for SharedProvider<P> {
+    fn complete(
         &self,
-        _transcript: &str,
-        _digest: Option<&Digest>,
-    ) -> impl Future<Output = ContextResult<String>> + Send {
-        std::future::ready(Err(ContextError::Summarizer(format!(
-            "{COMPACTION}: le contexte déborde, aucun résumé n'est produit (la session reste sauvegardée)"
-        ))))
+        request: InferenceRequest,
+    ) -> impl Future<Output = Result<InferenceResponse, InferenceError>> + Send {
+        self.0.complete(request)
+    }
+
+    fn stream<F>(
+        &self,
+        request: InferenceRequest,
+        fragments: F,
+    ) -> impl Future<Output = Result<InferenceResponse, InferenceError>> + Send
+    where
+        F: FnMut(&str) + Send,
+    {
+        self.0.stream(request, fragments)
     }
 }
 
@@ -165,8 +177,8 @@ where
     P: InferenceProvider + 'static,
     N: EventSink + 'static,
 {
-    /// Runner de tours de la session, avec son état.
-    pub runner: TurnRunner<P, DefaultStrategy<RefusingSummarizer>, FileSessionStore>,
+    /// Runner de tours de la session, avec son état. Sa compaction demande le résumé au fournisseur de la session.
+    pub runner: SessionRunner<P>,
     /// Handle d'annulation du tour.
     pub cancel: CancelHandle,
     /// Puits d'audit ; ses échecs d'écriture se récupèrent par `take_failures`.
@@ -260,9 +272,10 @@ pub async fn open<E: OpenEnv, N: EventSink + 'static>(
     let agent = agent_du_contexte(&catalogue, &derived, &contexte).await?;
     let (resolu, fournisseur, cle) =
         profil_et_fournisseur(&catalogue, &layers, demande, &agent).await?;
-    let inference = env
-        .provider(&fournisseur, cle.as_ref().map(SecretValue::expose))
-        .map_err(|cause| lymaille_texte(&cause))?;
+    let inference = Arc::new(
+        env.provider(&fournisseur, cle.as_ref().map(SecretValue::expose))
+            .map_err(|cause| lymaille_texte(&cause))?,
+    );
 
     // Puits partagé : le puits possède son journal, lymaille le tient en `'static`.
     let audit = Arc::new(AuditSink::new(AuditLog::new(&layers), sink));
@@ -297,9 +310,10 @@ pub async fn open<E: OpenEnv, N: EventSink + 'static>(
     };
     notices.extend(notes);
 
+    let resumeur = ProviderSummarizer::new(Arc::clone(&inference), resolu.clone());
     let runner = TurnRunner::new(
-        inference,
-        DefaultStrategy::new(RefusingSummarizer, ReplayMode::None),
+        SharedProvider(inference),
+        DefaultStrategy::new(resumeur, ReplayMode::None),
         resolu,
         segment,
         pad,
@@ -436,10 +450,28 @@ async fn moteur<E: OpenEnv>(
     clock: &Arc<dyn Clock>,
     id: &SessionId,
 ) -> Result<Arc<ScratchpadEngine>, OpenError> {
+    let grants = accorder(env, cluster, derived, &demande.owner, puits, clock, id).await?;
+    let engine = ScratchpadEngine::builder(ScratchpadLimits::new(), grants)
+        .build()
+        .map_err(lymaille_erreur)?;
+    Ok(Arc::new(engine))
+}
+
+/// Modules que le contexte accorde à une session ou à un script (`cli#BR-3`) : le module `sandbox` n'est accordé que
+/// si la sandbox est dérivée. Partagé par `open` et par `script` (`script.sdd`, Handles).
+pub(crate) async fn accorder<E: OpenEnv>(
+    env: &E,
+    cluster: &E::Cluster,
+    derived: &DerivedContext,
+    owner: &str,
+    puits: &Arc<dyn EventSink>,
+    clock: &Arc<dyn Clock>,
+    id: &SessionId,
+) -> Result<Grants, OpenError> {
     let mut grants = Grants::new();
     if let Some(url) = &derived.mcp_url {
         let connecteur = env
-            .sandbox_connector(cluster, &demande.owner, url)
+            .sandbox_connector(cluster, owner, url)
             .map_err(sandbox_erreur)?;
         let mcp_env = McpEnv::new(
             Arc::new(Redactor::new()),
@@ -457,10 +489,7 @@ async fn moteur<E: OpenEnv>(
             .with_module(accorde)
             .ok_or_else(|| sandbox_texte("module `sandbox` déjà accordé"))?;
     }
-    let engine = ScratchpadEngine::builder(ScratchpadLimits::new(), grants)
-        .build()
-        .map_err(lymaille_erreur)?;
-    Ok(Arc::new(engine))
+    Ok(grants)
 }
 
 /// Erreur d'une session absente, ou d'une session d'un autre contexte.
@@ -498,7 +527,7 @@ fn sandbox_erreur(erreur: impl Display) -> OpenError {
 }
 
 /// Identifiant neuf d'une session (UUID v4).
-fn nouvel_identifiant() -> Result<SessionId, OpenError> {
+pub(crate) fn nouvel_identifiant() -> Result<SessionId, OpenError> {
     SessionId::new(uuid::Uuid::new_v4().to_string())
         .ok_or_else(|| lymaille_texte("identifiant de session vide"))
 }
@@ -523,17 +552,18 @@ mod tests {
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use lymaille::{
-        AgentRef, ContextError, Digest, ModelProfile, Provider, ProviderLevel, RecordingSink,
-        ScriptedConnector, ScriptedProvider, SessionId, SessionState, SessionStore as _,
-        Summarizer as _, Timestamp,
+        AgentRef, DEFAULT_SUMMARY_PROMPT, InferenceError, InferenceProvider, InferenceRequest,
+        InferenceResponse, Message, ModelProfile, Outcome, Provider, ProviderLevel, RecordingSink,
+        ScriptedConnector, ScriptedProvider, SessionId, SessionState, SessionStore as _, Timestamp,
     };
     use serde_json::json;
     use vanyline_crds::{Project, ProjectSpec, Sandbox, SandboxSpec, SandboxStatus};
 
-    use super::{OpenEnv, OpenError, RefusingSummarizer, Resume, SessionRequest, open};
+    use super::{OpenEnv, OpenError, Resume, SessionRequest, open};
     use crate::host::catalog_store::FileCatalog;
     use crate::host::context_derive::{ClusterRefusal, ClusterSource, derive_context};
     use crate::host::layers::{Layers, Level};
@@ -611,11 +641,29 @@ mod tests {
     struct FakeEnv {
         home: PathBuf,
         joignable: bool,
+        fournisseur: Arc<ScriptedProvider>,
+    }
+
+    /// Fournisseur partagé entre l'environnement et le test : le test lit les requêtes du tour et du résumé.
+    struct Partage(Arc<ScriptedProvider>);
+
+    impl InferenceProvider for Partage {
+        fn complete(
+            &self,
+            request: InferenceRequest,
+        ) -> impl Future<Output = Result<InferenceResponse, InferenceError>> + Send {
+            self.0.complete(request)
+        }
+    }
+
+    /// Réponse scriptée de l'assistant.
+    fn reponse(texte: &str) -> InferenceResponse {
+        InferenceResponse::new(Message::assistant(texte.to_owned(), None, Vec::new()), None)
     }
 
     impl OpenEnv for FakeEnv {
         type Cluster = FauxCluster;
-        type Provider = ScriptedProvider;
+        type Provider = Partage;
         type Connector = ScriptedConnector;
 
         fn home(&self) -> PathBuf {
@@ -641,12 +689,8 @@ mod tests {
             })
         }
 
-        fn provider(
-            &self,
-            _provider: &Provider,
-            _key: Option<&str>,
-        ) -> Result<ScriptedProvider, String> {
-            Ok(ScriptedProvider::new(Vec::new()))
+        fn provider(&self, _provider: &Provider, _key: Option<&str>) -> Result<Partage, String> {
+            Ok(Partage(Arc::clone(&self.fournisseur)))
         }
 
         fn sandbox_connector(
@@ -740,6 +784,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
 
         let ouverte = open(&env, &demande(Resume::New), RecordingSink::new())
@@ -765,6 +810,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
 
         let ouverte = open(&env, &demande(Resume::Last), RecordingSink::new())
@@ -781,6 +827,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
 
         let ouverte = open(&env, &demande(Resume::Last), RecordingSink::new())
@@ -807,6 +854,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
 
         let refus = open(
@@ -834,6 +882,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
 
         let refus = open(
@@ -860,6 +909,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: false,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
 
         let refus = open(
@@ -895,6 +945,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
         let mut requete = demande(Resume::New);
         requete.profile = Some("inconnu".to_owned());
@@ -914,6 +965,7 @@ mod tests {
         let env = FakeEnv {
             home: home.path().to_path_buf(),
             joignable: true,
+            fournisseur: Arc::new(ScriptedProvider::new(Vec::new())),
         };
         let mut requete = demande(Resume::New);
         requete.sandbox = Some("dev".to_owned());
@@ -928,20 +980,91 @@ mod tests {
         );
     }
 
+    /// Une session de seize tours de mille caractères, puis un tour après réouverture avec un profil à petit contexte :
+    /// la compaction est due avant ce tour, son résumé est demandé au MÊME fournisseur que la session (`session_open.sdd`,
+    /// Handles, Compaction ; `summarizer.sdd`).
     #[tokio::test]
-    async fn summarizer_refuse_au_debordement() {
-        let refus = RefusingSummarizer
-            .summarize("user: bonjour", None::<&Digest>)
+    async fn compaction_demandee_au_fournisseur_de_la_session() {
+        let home = tempfile::tempdir().expect("répertoire personnel temporaire");
+        catalogue_de_test(home.path());
+        let petit = ModelProfile::new(
+            "petit".to_owned(),
+            "fournisseur".to_owned(),
+            "modele".to_owned(),
+        )
+        .with_context_size(16_000)
+        .with_max_response(1_000);
+        FileCatalog::new(&couches(home.path()))
+            .put_profile_at(Level::User, &petit)
+            .expect("le profil à petit contexte doit s'écrire");
+        let script: Vec<_> = (0..16)
+            .map(|_| Ok(reponse(&"a".repeat(1_000))))
+            .chain([
+                Ok(reponse("résumé du passé")),
+                Ok(reponse("réponse finale")),
+            ])
+            .collect();
+        let fournisseur = Arc::new(ScriptedProvider::new(script));
+        let env = FakeEnv {
+            home: home.path().to_path_buf(),
+            joignable: true,
+            fournisseur: Arc::clone(&fournisseur),
+        };
+        let cancel_hors_tour = lymaille::CancelHandle::new();
+
+        let mut premiere = open(&env, &demande(Resume::New), RecordingSink::new())
+            .await
+            .expect("la session neuve doit s'ouvrir");
+        for index in 0..16 {
+            let question = format!("question {index} {}", "x".repeat(1_000));
+            let tour = premiere.runner.run_turn(&question, &cancel_hors_tour).await;
+            assert!(
+                matches!(&tour, Ok(sortie) if sortie.outcome() == Outcome::Valid),
+                "le tour {index} doit réussir sous le profil de test, obtenu {tour:?}"
+            );
+        }
+        let identifiant = premiere.runner.state().id().clone();
+        drop(premiere);
+
+        let mut reprise = open(
+            &env,
+            &SessionRequest {
+                profile: Some("petit".to_owned()),
+                ..demande(Resume::Id(identifiant))
+            },
+            RecordingSink::new(),
+        )
+        .await
+        .expect("la session doit se rouvrir sous le profil à petit contexte");
+        let tour = reprise
+            .runner
+            .run_turn("dernière question", &cancel_hors_tour)
             .await;
 
-        match refus {
-            Err(ContextError::Summarizer(message)) => {
-                assert!(
-                    message.contains("déborde"),
-                    "message explicite attendu : {message}"
-                );
-            }
-            autre => panic!("un refus de résumé est attendu, obtenu {autre:?}"),
-        }
+        assert!(
+            matches!(&tour, Ok(sortie) if sortie.outcome() == Outcome::Valid),
+            "le tour après compaction doit réussir, obtenu {tour:?}"
+        );
+        let requetes = fournisseur.requests();
+        assert_eq!(
+            requetes.len(),
+            18,
+            "16 tours, puis une requête de résumé et la requête du tour"
+        );
+        let resume = &requetes[16];
+        assert_eq!(
+            resume.system_prompt(),
+            DEFAULT_SUMMARY_PROMPT,
+            "la requête de résumé porte le prompt de lymaille"
+        );
+        assert!(
+            matches!(resume.messages().first(), Some(Message::User { content }) if content.contains("question 0")),
+            "le résumé lit le transcript de la session"
+        );
+        let tour_apres = &requetes[17];
+        assert!(
+            matches!(tour_apres.messages().first(), Some(Message::User { content }) if content.contains("résumé du passé")),
+            "le tour après compaction ouvre sur le résumé obtenu du fournisseur"
+        );
     }
 }

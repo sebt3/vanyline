@@ -10,9 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use lymaille::{
-    CancelHandle, DefaultStrategy, Message, RigProvider, SessionId, TodoList, TurnRunner, UserInbox,
-};
+use lymaille::{CancelHandle, Message, RigProvider, SessionId, TodoList, UserInbox};
 use tokio::sync::Mutex;
 
 use crate::exit_code::Outcome as ExitOutcome;
@@ -23,7 +21,7 @@ use crate::host::process_lock::SessionLock;
 use crate::host::session_index::{FileSessionIndex, SessionEntry};
 use crate::host::session_store::FileSessionStore;
 use crate::session_open::{
-    self, KubeEnv, OpenEnv, OpenError, OpenedSession, RefusingSummarizer, Resume, SessionRequest,
+    self, KubeEnv, OpenEnv, OpenError, OpenedSession, Resume, SessionRequest, SessionRunner,
 };
 use crate::target::{Settings, TargetError, resolve_owner};
 use crate::tui::sink::TuiSink;
@@ -113,8 +111,7 @@ struct Gardes {
 /// Pilotage d'une session lymaille : le `TurnRunner` partagé derrière un mutex
 /// tokio, pour qu'une panique de la tâche de tour ne le perde pas.
 struct RunnerDriver {
-    runner:
-        Arc<Mutex<TurnRunner<RigProvider, DefaultStrategy<RefusingSummarizer>, FileSessionStore>>>,
+    runner: Arc<Mutex<SessionRunner<RigProvider>>>,
     root: CancelHandle,
     inbox: UserInbox,
     _gardes: Gardes,

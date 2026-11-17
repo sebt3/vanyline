@@ -97,5 +97,4 @@ Scenario: version et aide
 Tasks:
   [x] `main.rs` réduit à ce contrat (E11 : handlers de lecture, `serve`, `--toolbox`, le REPL retirés ; les commandes
     `conversations`, `agents`, `providers`, `models`, `skills`, `mcp` ne sont plus dans la grammaire).
-  [!] `script` absent de la grammaire : la commande n'est pas implémentée tant que `./script.sdd` porte un `[?]`
-    bloquant (décision du développeur en attente, E8). La ligne `script` d'`Exposes` reste le contrat cible.
+  [x] `script` ajouté à la grammaire et au dispatch (`./script.sdd`, E8) ; la note « script absent » est retirée.

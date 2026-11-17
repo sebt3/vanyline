@@ -57,10 +57,15 @@ Scenario: réponse vide
   Then `ContextError::Summarizer`
 
 Scenario: échec d'inférence
-  Given un fournisseur qui échoue avec une erreur de classe `RateLimited` (ou la plus proche)
+  Given un fournisseur qui échoue avec une erreur de classe `Transient` (classes de lymaille 0.3 : `Transient`, `Permanent`, `ContextOverflow`)
   When `summarize`
   Then `ContextError::Summarizer` nommant la classe, sans corps de requête
 
 Tasks:
-  [ ] `summarizer.rs` et ses tests ; `session_open.rs` : remplacer `RefusingSummarizer` par @ProviderSummarizer
-    (même fournisseur et même profil que la session).
+  [x] `summarizer.rs` et ses tests ; `session_open.rs` : remplacer `RefusingSummarizer` par @ProviderSummarizer
+    (même fournisseur et même profil que la session). Test de compaction réelle : `session_open.rs`,
+    `compaction_demandee_au_fournisseur_de_la_session` (ScriptedProvider partagé).
+    Écart de justification : `session_open.rs` ajoute `SharedProvider<P>` (enveloppe d'`Arc<P>`) et l'alias
+    `SessionRunner<P>`, parce que lymaille n'implémente pas `InferenceProvider` pour `Arc<P>` et que le tour et le
+    résumeur doivent interroger le même fournisseur.
+  [x] Décidé 2026-11-17 : l'erreur du résumé porte le marqueur `VNL-CLI-SUM-001` (à poser dans le message du `ContextError::Summarizer`).

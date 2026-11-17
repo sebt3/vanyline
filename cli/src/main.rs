@@ -27,8 +27,15 @@ mod exit_code;
 #[allow(dead_code)]
 mod session_open;
 
+// Résumé de compaction par le fournisseur de la session (summarizer.sdd) : consommé par session_open.
+#[allow(dead_code)]
+mod summarizer;
+
 // Commande `run` (run.sdd) : dispatch dans `main`.
 mod run;
+
+// Commande `script` (script.sdd) : dispatch dans `main`.
+mod script;
 
 // Owner, namespace et réglages utilisateur (target.sdd) : consommé par chat et run ; `resolve_namespace`
 // attend les commandes d'objets (E9, suite). Retirer le allow quand il n'y a plus de code mort.
@@ -122,6 +129,26 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Exécuter un fichier Rhai sur une sandbox, sans LLM ni session (`script.sdd`)
+    Script {
+        /// Fichier Rhai à exécuter
+        file: std::path::PathBuf,
+        /// Projet du contexte de travail
+        #[arg(long)]
+        context: String,
+        /// Sandbox de travail (obligatoire)
+        #[arg(long)]
+        sandbox: String,
+        /// Paramètre `clé=valeur`, lu par le script avec `param("clé")` (répétable)
+        #[arg(long = "param")]
+        params: Vec<String>,
+        /// Délai de l'exécution, en secondes (absent ou 0 : aucun délai)
+        #[arg(short = 't', long = "timeout")]
+        timeout: Option<u64>,
+        /// Sortie JSON : un objet `{status, text}` sur la sortie standard
+        #[arg(long)]
+        json: bool,
+    },
     /// Lister les toolsets, promouvoir un brouillon (`toolset_cmd.sdd`)
     #[command(name = "toolset", subcommand)]
     Toolset(toolset_cmd::Commands),
@@ -159,7 +186,9 @@ fn options_globales(
 }
 
 #[tokio::main]
-// main.sdd (Must : aucune logique) : le dispatch est une table, une branche par famille de commandes.
+// main.sdd (Must : aucune logique) : le dispatch est une table, une branche par famille de commandes. La limite de
+// longueur est dépassée d'une branche (`script`, script.sdd) : la table reste une table.
+#[allow(clippy::too_many_lines)]
 async fn main() -> std::process::ExitCode {
     tracing_subscriber::registry()
         .with(
@@ -220,6 +249,26 @@ async fn main() -> std::process::ExitCode {
                 options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
             exit_code::from_outcome(run::run_run(args, global).await)
         }
+        Some(Commands::Script {
+            file,
+            context,
+            sandbox,
+            params,
+            timeout,
+            json,
+        }) => {
+            let args = script::ScriptArgs {
+                file,
+                context,
+                sandbox,
+                params,
+                timeout,
+                json,
+            };
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            exit_code::from_outcome(script::run_script(args, global).await)
+        }
         Some(Commands::Toolset(cmd)) => {
             let global =
                 options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
@@ -263,6 +312,61 @@ mod tests {
     use super::*;
 
     // Grammaire de `run` (run.sdd, main.sdd) : `--context` obligatoire, `-c` et `--resume` exclusifs.
+
+    // Grammaire de `script` (script.sdd, main.sdd) : `--context` et `--sandbox` obligatoires, `--param` répétable.
+    #[test]
+    fn script_parses_with_params_and_global_owner() {
+        let cli = Cli::try_parse_from([
+            "vanyline",
+            "--owner",
+            "alice",
+            "script",
+            "f.rhai",
+            "--context",
+            "p",
+            "--sandbox",
+            "s",
+            "--param",
+            "a=1",
+            "--param",
+            "b=2",
+            "-t",
+            "5",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(cli.owner.as_deref(), Some("alice"));
+        match cli {
+            Cli {
+                command:
+                    Some(Commands::Script {
+                        file,
+                        context,
+                        sandbox,
+                        params,
+                        timeout,
+                        json,
+                    }),
+                ..
+            } => {
+                assert_eq!(file, std::path::PathBuf::from("f.rhai"));
+                assert_eq!(context, "p");
+                assert_eq!(sandbox, "s");
+                assert_eq!(params, vec!["a=1".to_owned(), "b=2".to_owned()]);
+                assert_eq!(timeout, Some(5));
+                assert!(json);
+            }
+            _ => panic!("expected Commands::Script"),
+        }
+    }
+
+    #[test]
+    fn script_exige_le_sandbox() {
+        assert!(
+            Cli::try_parse_from(["vanyline", "script", "f.rhai", "--context", "p"]).is_err(),
+            "la sandbox est obligatoire pour script"
+        );
+    }
 
     #[test]
     fn run_timeout_parses() {

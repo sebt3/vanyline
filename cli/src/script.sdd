@@ -78,5 +78,16 @@ Scenario: échéance
   Then annulé, code 3
 
 Tasks:
-  [ ] `script.rs` et ses tests — E8.
-  [x] Décidé 2026-11-17 (option B) : les paramètres s'obtiennent par la fonction Rhai `param("nom")` enregistrée par la CLI (`with_registration`), et non par des constantes ; valeurs absentes du texte du script, du journal d'audit et des positions d'erreur.
+  [x] `script.rs` et ses tests — E8. Écarts et précisions (2026-11-17, à valider) :
+    `@ScriptArgs.params` porte les paires brutes (`Vec<String>`), et non `Vec<(String, String)>` : la lecture et le refus
+    (identifiant, doublon, secret) se font à l'exécution, pour qu'aucun message d'erreur de clap ne reprenne la valeur.
+    Identifiants des messages (`AGENTS.md`, identifiant unique) : `VNL-CLI-SCR-001` usage (fichier, paramètre mal formé,
+    identifiant, doublon, owner), `VNL-CLI-SCR-002` secret, `VNL-CLI-SCR-003` exécution qui ne commence pas (cluster,
+    contexte, moteur), `VNL-CLI-SCR-004` journal d'audit inaccessible (la commande échoue).
+    `status` de la sortie `--json` : `ok`, `failed` (erreur de script) ou `cancelled` (échéance ou Ctrl+C).
+    Une clé absente est une `NotFound` de genre `variable` (le nom de la clé, sans la valeur).
+    Le calcul des modules accordés est extrait de `session_open.rs` (`accorder`, partagé avec `open`) ; `nouvel_identifiant`
+    y passe en `pub(crate)`. Ctrl+C ⇒ 130 n'a pas de test : le signal ne se simule pas dans `cargo test` ; le mapping vient
+    de `exit_code.sdd`.
+  [x] Décidé 2026-11-17 (option B) : les paramètres s'obtiennent par la fonction Rhai `param("nom")` enregistrée par la CLI (`with_registration`), et non par des constantes ; valeurs absentes du texte du script, du journal d'audit et des positions d'erreur. Une valeur écrite par le script lui-même dans sa sortie reste dans le journal : c'est le texte rendu, masqué par lymaille, et non la valeur du paramètre.
+  [x] Acceptés 2026-11-17 : marqueurs `VNL-CLI-SCR-001` (usage), `002` (secret), `003` (exécution), `004` (journal d'audit) ; statut JSON `ok` | `failed` | `cancelled` ; une valeur que le script AFFICHE lui-même figure dans sa sortie donc dans le journal (masquée par lymaille seulement si secret reconnu) ; dispatch de `main` : `allow(clippy::too_many_lines)` justifié, refacto en `Script(ScriptArgs)` à faire avec le prochain ajout de commande.
