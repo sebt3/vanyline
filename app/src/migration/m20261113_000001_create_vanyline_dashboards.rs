@@ -25,8 +25,8 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Dashboard::OwnerId).integer().not_null())
                     .col(ColumnDef::new(Dashboard::Scope).string().not_null())
                     .col(ColumnDef::new(Dashboard::Kind).string().not_null())
-                    .col(ColumnDef::new(Dashboard::Project).string())
-                    .col(ColumnDef::new(Dashboard::Sandbox).string())
+                    .col(ColumnDef::new(Dashboard::ProjectId).integer())
+                    .col(ColumnDef::new(Dashboard::SandboxId).integer())
                     .col(ColumnDef::new(Dashboard::Title).string().not_null())
                     // `ColumnType::JsonBinary` en dur (précédent m20261005_000004 pour les
                     // colonnes JSON) : rendu `jsonb` sur PostgreSQL, typage dynamique accepté
@@ -40,6 +40,21 @@ impl MigrationTrait for Migration {
                             .to(User::Table, User::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
+                    // Un projet supprimé emporte ses tableaux.
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(Dashboard::Table, Dashboard::ProjectId)
+                            .to(Project::Table, Project::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    // Une sandbox supprimée n'emporte rien : la personnalisation appartient au
+                    // projet, seule l'information `sandbox_id` est vidée.
+                    .foreign_key(
+                        ForeignKey::create()
+                            .from(Dashboard::Table, Dashboard::SandboxId)
+                            .to(Sandbox::Table, Sandbox::Id)
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -48,18 +63,16 @@ impl MigrationTrait for Migration {
         // issue de la régression Phase 3 de ./mod.sdd : dans un `Table::create()`, `.index(...)`
         // uniquement avec `.unique()` ; le WHERE d'un partiel ne peut de toute façon pas vivre
         // dans une contrainte de table).
-        // Écart de contrat CONSIGNÉ (`[?]` des Tasks de la spec) : sur les deux moteurs, une
-        // clé NULL dans un index UNIQUE ne collide JAMAIS (`NULL != NULL`) — posé tel quel sur
-        // `(owner_id, scope, project, sandbox)`, l'index ne garderait le `home` (deux clés
-        // NULL) ni le `project`/`sandbox` (une clé NULL). Repli par expressions `COALESCE` :
-        // DDL brut IDENTIQUE sur PostgreSQL et SQLite (index d'expressions + WHERE partiel
-        // supportés des deux côtés), vérifié par le test des deux moteurs.
+        // Une clé NULL dans un index UNIQUE ne collide jamais (`NULL != NULL`) : l'écran
+        // d'accueil (`project_id` NULL) passe donc par `COALESCE(project_id, 0)`, sûr car aucun
+        // projet n'a l'identifiant 0. DDL identique sur PostgreSQL et SQLite (index d'expressions
+        // et WHERE partiel supportés des deux côtés).
         manager
             .get_connection()
             .execute_unprepared(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboards_custom_screen \
+                "CREATE UNIQUE INDEX idx_dashboards_custom_screen \
                  ON vanyline_dashboards \
-                 (owner_id, scope, COALESCE(project, ''), COALESCE(sandbox, '')) \
+                 (owner_id, scope, COALESCE(project_id, 0)) \
                  WHERE kind = 'custom'",
             )
             .await
@@ -83,8 +96,8 @@ enum Dashboard {
     OwnerId,
     Scope,
     Kind,
-    Project,
-    Sandbox,
+    ProjectId,
+    SandboxId,
     Title,
     Def,
 }
@@ -96,14 +109,31 @@ enum User {
     Id,
 }
 
+#[derive(DeriveIden)]
+enum Project {
+    #[sea_orm(iden = "vanyline_projects")]
+    Table,
+    Id,
+}
+
+#[derive(DeriveIden)]
+enum Sandbox {
+    #[sea_orm(iden = "vanyline_sandboxes")]
+    Table,
+    Id,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{ConnectionTrait, DbErr, Statement, Value};
+    use sea_orm::{
+        ActiveValue::NotSet, ConnectionTrait, DbErr, EntityTrait, Set, Statement, Value,
+    };
 
+    use crate::db::entities::{projects, sandboxes};
     use crate::db::test_support::real_db;
 
     /// Exécute une instruction SQL brute avec paramètres `?`.
@@ -144,31 +174,77 @@ mod tests {
             .id
     }
 
-    fn insert_custom(
-        db: &impl ConnectionTrait,
-        owner: i32,
-        project: Option<&str>,
-        kind: &str,
-    ) -> impl std::future::Future<Output = Result<u64, DbErr>> {
-        exec(
-            db,
-            "INSERT INTO vanyline_dashboards (owner_id, scope, kind, project, sandbox, title, def) \
-             VALUES (?, 'project', ?, ?, NULL, 'T', '{\"layout\": {\"columns\": 12}, \"widgets\": []}')",
-            vec![owner.into(), kind.into(), project.into()],
-        )
+    /// Projet de `owner` (via l'entité, `created_at` par défaut de la base).
+    async fn projet(db: &impl ConnectionTrait, owner: i32, name: &str) -> i32 {
+        projects::Entity::insert(projects::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            name: Set(name.to_string()),
+            missing_since: NotSet,
+            created_at: NotSet,
+        })
+        .exec(db)
+        .await
+        .expect("le projet s'insère")
+        .last_insert_id
     }
 
-    /// Scenario: `la table naît avec ses colonnes et son index partiel`.
+    /// Sandbox de `project` pour `owner` (via l'entité).
+    async fn sandbox(db: &impl ConnectionTrait, owner: i32, project: i32, name: &str) -> i32 {
+        sandboxes::Entity::insert(sandboxes::ActiveModel {
+            id: NotSet,
+            owner_id: Set(owner),
+            project_id: Set(project),
+            name: Set(name.to_string()),
+            cr_name: Set(format!("cr-{name}")),
+            missing_since: NotSet,
+            created_at: NotSet,
+        })
+        .exec(db)
+        .await
+        .expect("la sandbox s'insère")
+        .last_insert_id
+    }
+
+    /// Insertion SQL brute d'une ligne de définition (contourne le hook : c'est le DDL qui
+    /// est testé ici). `project`/`sandbox` sont des identifiants ou `NULL`.
+    async fn insert_row(
+        db: &impl ConnectionTrait,
+        owner: i32,
+        scope: &str,
+        kind: &str,
+        project: Option<i32>,
+        sandbox: Option<i32>,
+    ) -> Result<u64, DbErr> {
+        exec(
+            db,
+            "INSERT INTO vanyline_dashboards (owner_id, scope, kind, project_id, sandbox_id, title, def) \
+             VALUES (?, ?, ?, ?, ?, 'T', '{\"layout\": {\"columns\": 12}, \"widgets\": []}')",
+            vec![
+                owner.into(),
+                scope.into(),
+                kind.into(),
+                project.into(),
+                sandbox.into(),
+            ],
+        )
+        .await
+    }
+
+    /// Scenario: `la table naît avec ses colonnes et son index d'unicité`.
     #[tokio::test]
-    async fn la_table_nait_avec_ses_colonnes_et_son_index_partiel() {
+    async fn la_table_nait_avec_ses_colonnes_et_son_index_unique() {
         let db = real_db().await;
         // Témoin positif : la table existe (sinon toute assertion négative passerait).
-        assert!(scalar(
-            &db,
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'vanyline_dashboards'",
-            vec![]
-        )
-        .await > 0);
+        assert!(
+            scalar(
+                &db,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'vanyline_dashboards'",
+                vec![]
+            )
+            .await
+                > 0
+        );
 
         let stmt = Statement::from_string(
             db.get_database_backend(),
@@ -178,30 +254,46 @@ mod tests {
             .query_all_raw(stmt)
             .await
             .expect("table_info est queryable");
-        let colonnes: Vec<(String, i32, i32)> = rows
+        let colonnes: Vec<(String, String, i32, i32)> = rows
             .iter()
             .map(|row| {
                 (
                     row.try_get_by_index::<String>(1).expect("nom"),
+                    row.try_get_by_index::<String>(2).expect("type"),
                     row.try_get_by_index::<i32>(3).expect("notnull"),
                     row.try_get_by_index::<i32>(5).expect("pk"),
                 )
             })
             .collect();
+        let attendu = [
+            ("id", "integer", 1, 1),
+            ("owner_id", "integer", 1, 0),
+            ("scope", "varchar", 1, 0),
+            ("kind", "varchar", 1, 0),
+            ("project_id", "integer", 0, 0),
+            ("sandbox_id", "integer", 0, 0),
+            ("title", "varchar", 1, 0),
+            ("def", "jsonb", 1, 0),
+        ];
+        let noms: Vec<(&str, i32, i32)> = colonnes
+            .iter()
+            .map(|(nom, _, notnull, pk)| (nom.as_str(), *notnull, *pk))
+            .collect();
         assert_eq!(
-            colonnes,
-            vec![
-                ("id".to_string(), 1, 1),
-                ("owner_id".to_string(), 1, 0),
-                ("scope".to_string(), 1, 0),
-                ("kind".to_string(), 1, 0),
-                ("project".to_string(), 0, 0),
-                ("sandbox".to_string(), 0, 0),
-                ("title".to_string(), 1, 0),
-                ("def".to_string(), 1, 0),
-            ],
+            noms,
+            attendu
+                .iter()
+                .map(|(nom, _, notnull, pk)| (*nom, *notnull, *pk))
+                .collect::<Vec<_>>(),
             "les huit colonnes avec nullabilité et clé primaire du contrat"
         );
+        for ((nom, type_sql, _, _), (_, attendu_type, _, _)) in colonnes.iter().zip(attendu.iter())
+        {
+            assert!(
+                type_sql.to_lowercase().contains(attendu_type),
+                "colonne {nom} : type {type_sql}, attendu {attendu_type}"
+            );
+        }
 
         let table = object_sql(&db, "table", "vanyline_dashboards")
             .await
@@ -210,6 +302,18 @@ mod tests {
         assert!(
             table.contains("FOREIGN KEY (owner_id) REFERENCES miryad_users (id) ON DELETE CASCADE"),
             "FK cascade vers miryad_users absente : {table}"
+        );
+        assert!(
+            table.contains(
+                "FOREIGN KEY (project_id) REFERENCES vanyline_projects (id) ON DELETE CASCADE"
+            ),
+            "FK project_id cascade absente : {table}"
+        );
+        assert!(
+            table.contains(
+                "FOREIGN KEY (sandbox_id) REFERENCES vanyline_sandboxes (id) ON DELETE SET NULL"
+            ),
+            "FK sandbox_id set null absente : {table}"
         );
 
         let index = object_sql(&db, "index", "idx_dashboards_custom_screen")
@@ -221,34 +325,46 @@ mod tests {
             "l'index doit être UNIQUE : {index}"
         );
         assert!(
-            index.contains("WHERE") && index.to_lowercase().contains("custom"),
+            index.contains("COALESCE(project_id, 0)"),
+            "l'index porte l'expression COALESCE(project_id, 0) : {index}"
+        );
+        assert!(
+            index.contains("WHERE") && index.to_lowercase().contains("kind = 'custom'"),
             "le WHERE partiel (kind = 'custom') doit être visible : {index}"
         );
     }
 
-    /// Scenario: `le partiel garde sa promesse sur les deux moteurs` (SQLite ici ;
-    /// PostgreSQL est le moteur de service, même DDL).
+    /// Scenario: `l'unicité garde sa promesse sur les deux moteurs` (SQLite ici ; PostgreSQL
+    /// est le moteur de service, même DDL).
     #[tokio::test]
-    async fn le_partiel_garde_sa_promesse() {
+    async fn l_unicite_garde_sa_promesse() {
         let db = real_db().await;
         let alice = user(&db, "alice").await;
+        let p1 = projet(&db, alice, "p1").await;
+        let p2 = projet(&db, alice, "p2").await;
 
-        insert_custom(&db, alice, Some("p1"), "custom")
+        insert_row(&db, alice, "home", "custom", None, None)
             .await
-            .expect("premier custom insère");
-        let err = insert_custom(&db, alice, Some("p1"), "custom")
+            .expect("premier custom d'accueil insère");
+        let err = insert_row(&db, alice, "home", "custom", None, None)
             .await
-            .expect_err("le second custom du même écran doit être rejeté");
+            .expect_err("le second custom d'accueil doit être rejeté (NULL ramené à 0)");
         assert!(
             err.to_string().to_uppercase().contains("UNIQUE"),
             "le rejet doit venir de la contrainte UNIQUE partielle : {err}"
         );
 
-        insert_custom(&db, alice, Some("p1"), "complementary")
+        insert_row(&db, alice, "project", "custom", Some(p1), None)
             .await
-            .expect("les customs multiples ne bloquent pas les complémentaires (FR-5)");
+            .expect("un custom sur le projet p1 passe");
+        insert_row(&db, alice, "project", "custom", Some(p2), None)
+            .await
+            .expect("un custom sur un AUTRE projet passe (pas de sur-restriction)");
+        insert_row(&db, alice, "project", "complementary", Some(p1), None)
+            .await
+            .expect("le complémentaire de p1 passe");
 
-        // Témoin positif avant l'assertion de cascade : les deux lignes admises sont là.
+        // Témoin positif avant l'assertion de cascade : les quatre lignes admises sont là.
         assert_eq!(
             scalar(
                 &db,
@@ -256,8 +372,8 @@ mod tests {
                 vec![alice.into()]
             )
             .await,
-            2,
-            "un custom + un complementary admis (le second custom a été rejeté)"
+            4,
+            "les quatre lignes admises sont présentes"
         );
 
         exec(
@@ -276,6 +392,71 @@ mod tests {
             .await,
             0,
             "la FK emporte tout par CASCADE"
+        );
+    }
+
+    /// Scenario: `les suppressions suivent les FK`.
+    #[tokio::test]
+    async fn les_suppressions_suivent_les_fk() {
+        let db = real_db().await;
+        let alice = user(&db, "alice").await;
+        let p1 = projet(&db, alice, "p1").await;
+        let s1 = sandbox(&db, alice, p1, "s1").await;
+        insert_row(&db, alice, "sandbox", "custom", Some(p1), Some(s1))
+            .await
+            .expect("la personnalisation de sandbox s'insère");
+
+        exec(
+            &db,
+            "DELETE FROM vanyline_sandboxes WHERE id = ?",
+            vec![s1.into()],
+        )
+        .await
+        .expect("la sandbox se supprime");
+        let stmt = Statement::from_string(
+            db.get_database_backend(),
+            "SELECT sandbox_id IS NULL FROM vanyline_dashboards",
+        );
+        let row = db
+            .query_one_raw(stmt)
+            .await
+            .expect("la ligne subsiste")
+            .expect("une ligne");
+        assert!(
+            row.try_get_by_index::<bool>(0).expect("booléen"),
+            "sandbox_id passe à NULL, la ligne est conservée"
+        );
+
+        exec(
+            &db,
+            "DELETE FROM vanyline_projects WHERE id = ?",
+            vec![p1.into()],
+        )
+        .await
+        .expect("le projet se supprime");
+        assert_eq!(
+            scalar(&db, "SELECT COUNT(*) FROM vanyline_dashboards", vec![]).await,
+            0,
+            "supprimer le projet emporte le tableau"
+        );
+
+        // Suppression de l'utilisateur : ses lignes disparaissent par CASCADE.
+        let bob = user(&db, "bob").await;
+        let p2 = projet(&db, bob, "p2").await;
+        insert_row(&db, bob, "project", "complementary", Some(p2), None)
+            .await
+            .expect("le complémentaire de bob s'insère");
+        exec(
+            &db,
+            "DELETE FROM miryad_users WHERE id = ?",
+            vec![bob.into()],
+        )
+        .await
+        .expect("bob se supprime");
+        assert_eq!(
+            scalar(&db, "SELECT COUNT(*) FROM vanyline_dashboards", vec![]).await,
+            0,
+            "les lignes de l'utilisateur disparaissent par CASCADE"
         );
     }
 }

@@ -98,7 +98,7 @@ Depends on:
     la chaîne `Widget.widget_type`).
 
 Tasks:
-  [ ] `registry.rs` : types `mermaid` et `scripted`, source `Scripted`, indicateur `scriptable` ;
+  [x] `registry.rs` : types `mermaid` et `scripted`, source `Scripted`, indicateur `scriptable` ;
     Scenarios ci-dessus (le Scenario « scripted est réservé mais absent » est retiré).
   [?] Besoins de `chat` : `(0,0)` suppose que le widget prend le contexte de l'écran
     courant (`app/sessions` — le chat n'a pas de sélecteur) ; `OI-1` du DSD (widget vs

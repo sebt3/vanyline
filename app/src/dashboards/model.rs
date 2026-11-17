@@ -65,6 +65,9 @@ impl FromStr for Scope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+// Présent dans la forme FR-1 pour les définitions éphémères (`FR-9`) ; aucun consommateur de
+// production à ce jour (`./model.sdd`, `Exposes` de `Kind`).
+#[allow(dead_code)]
 pub enum Kind {
     /// Défaut livré avec l'app (jamais en base, `DEC-2`).
     Default,
@@ -137,6 +140,50 @@ pub struct DashboardDef {
     pub layout: Layout,
     /// Widgets dans l'ordre de rendu.
     pub widgets: Vec<Widget>,
+}
+
+/// Origine d'une définition rendue par la résolution (`DEC-5`) — exactement deux. Mêmes derives
+/// que `Scope`. Ne voyage pas dans le JSON stocké.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+pub enum Origin {
+    /// Défaut livré (aucune personnalisation pour l'appelant sur cet écran).
+    Default,
+    /// Personnalisation de l'appelant.
+    Custom,
+}
+
+/// Tableau effectif rendu par `../resolve.rs` (`./model.sdd`) : les clés d'ÉCRAN en NOMS (jamais
+/// les identifiants internes), `id` de la ligne pour `custom`, `None` pour `default`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+pub struct DashboardView {
+    /// Id de la ligne pour `custom`, `None` pour `default`.
+    pub id: Option<i32>,
+    /// Libellé (colonne `title` de la ligne, ou libellé du défaut livré).
+    pub title: String,
+    /// Écran résolu.
+    pub scope: Scope,
+    /// Projet de l'écran (nom) ; `None` pour l'accueil. Pour une sandbox : le projet de la sandbox.
+    pub project: Option<String>,
+    /// Sandbox de l'écran (nom) ; `None` hors écran sandbox.
+    pub sandbox: Option<String>,
+    /// Grille de la définition.
+    pub layout: Layout,
+    /// Widgets dans l'ordre de rendu.
+    pub widgets: Vec<Widget>,
+}
+
+/// Réponse de `GET /api/dashboards/resolve` (`DEC-5`) : `{origin, dashboard}`, forme unique côté
+/// Rust et TypeScript.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
+pub struct Resolved {
+    /// Origine du tableau rendu.
+    pub origin: Origin,
+    /// Tableau effectif.
+    pub dashboard: DashboardView,
 }
 
 /// Mesure la taille sérialisée de la partie STOCKÉE `{layout, widgets}` et la compare à
@@ -243,6 +290,38 @@ mod tests {
         assert_eq!(Scope::from_str(""), Err(()));
     }
 
+    /// Scenario: `la réponse de résolution porte les noms d'écran`.
+    #[test]
+    fn la_reponse_de_resolution_porte_les_noms_d_ecran() {
+        let resolved = Resolved {
+            origin: Origin::Custom,
+            dashboard: DashboardView {
+                id: Some(7),
+                title: "T".to_string(),
+                scope: Scope::Sandbox,
+                project: Some("p1".to_string()),
+                sandbox: Some("s1".to_string()),
+                layout: Layout { columns: 12 },
+                widgets: vec![],
+            },
+        };
+        let value = serde_json::to_value(&resolved).expect("la réponse est sérialisable");
+        assert_eq!(value["origin"], json!("custom"));
+        assert_eq!(value["dashboard"]["scope"], json!("sandbox"));
+        assert_eq!(value["dashboard"]["project"], json!("p1"));
+        assert_eq!(value["dashboard"]["sandbox"], json!("s1"));
+        assert_eq!(value["dashboard"]["id"], json!(7));
+        assert!(
+            value["dashboard"].get("project_id").is_none()
+                && value["dashboard"].get("sandbox_id").is_none(),
+            "aucun identifiant interne de projet ou de sandbox"
+        );
+        assert_eq!(
+            serde_json::to_value(Origin::Default).expect("origine sérialisable"),
+            json!("default")
+        );
+    }
+
     /// Scenario: `export ts-rs des formes publiées` (feature `ts-rs` uniquement — la
     /// génération effective et le job CI appartiennent à G5).
     #[cfg(feature = "ts-rs")]
@@ -255,6 +334,9 @@ mod tests {
         assert_eq!(<Layout as TS>::name(&cfg), "Layout");
         assert_eq!(<Scope as TS>::name(&cfg), "Scope");
         assert_eq!(<Kind as TS>::name(&cfg), "Kind");
+        assert_eq!(<Origin as TS>::name(&cfg), "Origin");
+        assert_eq!(<DashboardView as TS>::name(&cfg), "DashboardView");
+        assert_eq!(<Resolved as TS>::name(&cfg), "Resolved");
         let decl = <Widget as TS>::decl(&cfg);
         assert!(
             decl.contains("type") && !decl.contains("widget_type:"),
@@ -290,10 +372,16 @@ mod tests {
         let def = aggregate(
             <DashboardDef as TS>::export_to_string(&cfg).expect("DashboardDef exportable"),
         );
+        let origin = aggregate(<Origin as TS>::export_to_string(&cfg).expect("Origin exportable"));
+        let view = aggregate(
+            <DashboardView as TS>::export_to_string(&cfg).expect("DashboardView exportable"),
+        );
+        let resolved =
+            aggregate(<Resolved as TS>::export_to_string(&cfg).expect("Resolved exportable"));
         let out = format!(
             "// Generated by vanyline-app (ts-rs) from app/src/dashboards/model.rs.\n\
              // DO NOT EDIT — regenerate: cargo test -p vanyline-app --features ts-rs\n\n\
-             {scope}\n{kind}\n{layout}\n{widget}\n{def}\n"
+             {scope}\n{kind}\n{layout}\n{widget}\n{def}\n{origin}\n{view}\n{resolved}\n"
         );
         let target = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -304,7 +392,16 @@ mod tests {
         // Then : le fichier généré déclare les cinq types et la déclaration de `Widget`
         // porte `type` comme clé du type de widget (pas `widget_type`).
         let content = std::fs::read_to_string(target).expect("le fichier généré est relisible");
-        for name in ["DashboardDef", "Widget", "Layout", "Scope", "Kind"] {
+        for name in [
+            "DashboardDef",
+            "Widget",
+            "Layout",
+            "Scope",
+            "Kind",
+            "Origin",
+            "DashboardView",
+            "Resolved",
+        ] {
             assert!(
                 content.contains(&format!("export type {name} ")),
                 "{name} doit être déclaré en export type : {content}"

@@ -142,7 +142,7 @@ Tasks:
   [x] G5 — export ts-rs effectif vers `../../../packages/protocol/src/generated/` et job CI
     `tsrs` vérifiant la fraîcheur : FAIT 2026-11-13 (le job couvrait déjà vanyline-app
     depuis B8 ; commentaire de .github/workflows/test.yml mis à jour).
-  [ ] `model.rs` : `Layout.columns` imposé à 12 par la validation ; `Origin`, `DashboardView`
+  [x] `model.rs` : `Layout.columns` imposé à 12 par la validation ; `Origin`, `DashboardView`
     et `Resolved` déclarés ici (et non dans `resolve.rs`), exportés dans `dashboard-domain.ts`.
 
 Done when:

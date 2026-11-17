@@ -85,7 +85,7 @@ Depends on:
   ./model.sdd, ./registry.sdd — types et known().
 
 Tasks:
-  [ ] `defaults.rs` : ajouter `sandboxes` au défaut projet et `runs` au défaut sandbox ; les
+  [x] `defaults.rs` : ajouter `sandboxes` au défaut projet et `runs` au défaut sandbox ; les
     deux Scenarios restent verts (noms et ordre du tableau Structure).
 
 Done when:

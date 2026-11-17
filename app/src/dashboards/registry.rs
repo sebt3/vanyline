@@ -1,8 +1,8 @@
 //! Registre des types de widgets (`FR-4`, `DEC-1`) — contrat : `./registry.sdd`.
-//! Table statique des dix types livrés (`FR-6`) : nom, schéma JSON déclaratif de `config`,
-//! besoins de contexte et source de données. Le registre ne rend rien et ne valide pas la
-//! `config` contre son schéma : seule la forme objet est exigée à l'écriture
-//! (`../db/entities/dashboards.sdd`).
+//! Table statique des douze types livrés (`FR-6`) : nom, schéma JSON déclaratif de `config`,
+//! besoins de contexte, source de données et indicateur `scriptable`. Le registre ne rend rien et
+//! ne valide pas la `config` contre son schéma : seule la forme objet est exigée à l'écriture
+//! (`../db/entities/dashboards.rs`).
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -18,8 +18,7 @@ pub struct Needs {
     pub sandbox: bool,
 }
 
-/// Source de données du widget (`FR-10` en est la documentation, pas un champ). `Scripted`
-/// n'existe PAS ici : `app/widgets` n'est pas ouverte (`FR-6`).
+/// Source de données du widget (`FR-10` en est la documentation, pas un champ).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataSource {
@@ -37,13 +36,15 @@ pub enum DataSource {
     Chat,
     /// Tableaux complémentaires du projet (widget `dashboards`, `FR-5`).
     Dashboards,
-    /// Données portées par `config` (markdown, bar, pie).
+    /// Données portées par `config` (markdown, mermaid, bar, pie).
     Inline,
+    /// Donnée produite par un script de la définition (`../widgets/run.sdd`).
+    Scripted,
 }
 
 /// Entrée du registre : pour un type de widget, son nom verbatim, le schéma JSON déclaratif
-/// de sa `config` (pour le frontend — l'écriture n'exige qu'un objet), ses besoins et sa
-/// source.
+/// de sa `config` (pour le frontend — l'écriture n'exige qu'un objet), ses besoins, sa source et
+/// son aptitude à être produit par un script.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WidgetType {
     /// Nom verbatim (clé du registre, sensible à la casse).
@@ -54,9 +55,12 @@ pub struct WidgetType {
     pub needs: Needs,
     /// Source de données du widget.
     pub source: DataSource,
+    /// Vrai pour un widget graphique qu'un script peut produire : `bar` et `pie`, et eux seuls
+    /// (`../widgets/output.sdd`, `dsd/app/widgets.md#DEC-1`).
+    pub scriptable: bool,
 }
 
-/// Schémas `config` des dix types, adressés de façon stable par la table statique (une
+/// Schémas `config` des douze types, adressés de façon stable par la table statique (une
 /// seule initialisation paresseuse, `OnceLock`).
 struct Schemas {
     bar: Value,
@@ -64,10 +68,12 @@ struct Schemas {
     code_health: Value,
     dashboards: Value,
     markdown: Value,
+    mermaid: Value,
     pie: Value,
     projects: Value,
     runs: Value,
     sandboxes: Value,
+    scripted: Value,
     workflows: Value,
 }
 
@@ -96,6 +102,11 @@ fn schemas() -> &'static Schemas {
             "properties": { "text": { "type": "string" } },
             "required": ["text"]
         }),
+        mermaid: json!({
+            "type": "object",
+            "properties": { "title": { "type": "string" }, "source": { "type": "string" } },
+            "required": ["source"]
+        }),
         pie: json!({
             "type": "object",
             "properties": {
@@ -119,11 +130,19 @@ fn schemas() -> &'static Schemas {
             }
         }),
         sandboxes: json!({}),
+        scripted: json!({
+            "type": "object",
+            "properties": {
+                "script": { "type": "string" },
+                "ttl_secs": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["script"]
+        }),
         workflows: json!({}),
     })
 }
 
-/// Le registre complet (`FR-6` — dix types verbatims), ordre alphabétique de `name`.
+/// Le registre complet (`FR-6` — douze types verbatims), ordre alphabétique de `name`.
 #[must_use]
 pub fn all() -> &'static [WidgetType] {
     static ALL: OnceLock<Vec<WidgetType>> = OnceLock::new();
@@ -140,74 +159,60 @@ pub fn all() -> &'static [WidgetType] {
         project: false,
         sandbox: true,
     };
+    // Entrée standard : aucun besoin, non scriptable.
+    let simple = |name, config_schema, needs, source| WidgetType {
+        name,
+        config_schema,
+        needs,
+        source,
+        scriptable: false,
+    };
     ALL.get_or_init(|| {
         vec![
             WidgetType {
-                name: "bar",
-                config_schema: &s.bar,
-                needs: needs_none,
-                source: DataSource::Inline,
+                scriptable: true,
+                ..simple("bar", &s.bar, needs_none, DataSource::Inline)
             },
+            simple("chat", &s.chat, needs_none, DataSource::Chat),
+            simple(
+                "code-health",
+                &s.code_health,
+                needs_sandbox,
+                DataSource::CodeHealth,
+            ),
+            simple(
+                "dashboards",
+                &s.dashboards,
+                needs_project,
+                DataSource::Dashboards,
+            ),
+            simple("markdown", &s.markdown, needs_none, DataSource::Inline),
+            simple("mermaid", &s.mermaid, needs_none, DataSource::Inline),
             WidgetType {
-                name: "chat",
-                config_schema: &s.chat,
-                needs: needs_none,
-                source: DataSource::Chat,
+                scriptable: true,
+                ..simple("pie", &s.pie, needs_none, DataSource::Inline)
             },
-            WidgetType {
-                name: "code-health",
-                config_schema: &s.code_health,
-                needs: needs_sandbox,
-                source: DataSource::CodeHealth,
-            },
-            WidgetType {
-                name: "dashboards",
-                config_schema: &s.dashboards,
-                needs: needs_project,
-                source: DataSource::Dashboards,
-            },
-            WidgetType {
-                name: "markdown",
-                config_schema: &s.markdown,
-                needs: needs_none,
-                source: DataSource::Inline,
-            },
-            WidgetType {
-                name: "pie",
-                config_schema: &s.pie,
-                needs: needs_none,
-                source: DataSource::Inline,
-            },
-            WidgetType {
-                name: "projects",
-                config_schema: &s.projects,
-                needs: needs_none,
-                source: DataSource::Projects,
-            },
-            WidgetType {
-                name: "runs",
-                config_schema: &s.runs,
-                needs: needs_none,
-                source: DataSource::Runs,
-            },
-            WidgetType {
-                name: "sandboxes",
-                config_schema: &s.sandboxes,
-                needs: needs_project,
-                source: DataSource::Sandboxes,
-            },
-            WidgetType {
-                name: "workflows",
-                config_schema: &s.workflows,
-                needs: needs_project,
-                source: DataSource::Workflows,
-            },
+            simple("projects", &s.projects, needs_none, DataSource::Projects),
+            simple("runs", &s.runs, needs_none, DataSource::Runs),
+            simple(
+                "sandboxes",
+                &s.sandboxes,
+                needs_project,
+                DataSource::Sandboxes,
+            ),
+            simple("scripted", &s.scripted, needs_none, DataSource::Scripted),
+            simple(
+                "workflows",
+                &s.workflows,
+                needs_project,
+                DataSource::Workflows,
+            ),
         ]
     })
 }
 
 /// Recherche par nom exact (sensible à la casse) — `None` ne distingue pas « futur type »
-/// de « faute de frappe » (`AC-4`) ; `known("scripted")` rend `None` (`FR-6`).
+/// de « faute de frappe » (`AC-4`).
 #[must_use]
 pub fn known(name: &str) -> Option<&'static WidgetType> {
     all().iter().find(|widget| widget.name == name)
@@ -221,19 +226,21 @@ pub fn known(name: &str) -> Option<&'static WidgetType> {
 mod tests {
     use super::*;
 
-    /// Scenario: `les dix types standard sont connus`.
+    /// Scenario: `les douze types standard sont connus` (`FR-6`, `scripted` compris).
     #[test]
-    fn les_dix_types_standard_sont_connus() {
+    fn les_douze_types_standard_sont_connus() {
         let expected: &[(&str, bool, bool, DataSource)] = &[
             ("bar", false, false, DataSource::Inline),
             ("chat", false, false, DataSource::Chat),
             ("code-health", false, true, DataSource::CodeHealth),
             ("dashboards", true, false, DataSource::Dashboards),
             ("markdown", false, false, DataSource::Inline),
+            ("mermaid", false, false, DataSource::Inline),
             ("pie", false, false, DataSource::Inline),
             ("projects", false, false, DataSource::Projects),
             ("runs", false, false, DataSource::Runs),
             ("sandboxes", true, false, DataSource::Sandboxes),
+            ("scripted", false, false, DataSource::Scripted),
             ("workflows", true, false, DataSource::Workflows),
         ];
         for (name, project, sandbox, source) in expected {
@@ -250,7 +257,7 @@ mod tests {
         }
 
         let table = all();
-        assert_eq!(table.len(), 10, "exactement dix entrées");
+        assert_eq!(table.len(), 12, "exactement douze entrées");
         let mut names: Vec<&str> = table.iter().map(|w| w.name).collect();
         assert!(
             names.windows(2).all(|pair| pair[0] < pair[1]),
@@ -263,16 +270,23 @@ mod tests {
         );
     }
 
-    /// Scenario: `scripted est réservé mais absent`.
+    /// Scenario: `seuls bar et pie sont scriptables`.
     #[test]
-    fn scripted_est_reserve_mais_absent() {
-        assert!(known("scripted").is_none());
+    fn seuls_bar_et_pie_sont_scriptables() {
+        for widget in all() {
+            assert_eq!(
+                widget.scriptable,
+                matches!(widget.name, "bar" | "pie"),
+                "scriptable de {}",
+                widget.name
+            );
+        }
     }
 
     /// Scenario: `un nom inconnu rend None sans distinction`.
     #[test]
     fn un_nom_inconnu_rend_none_sans_distinction() {
-        for name in ["Markdown", "", "widget/chat", "scripted", "MARKDOWN"] {
+        for name in ["Markdown", "", "widget/chat", "MARKDOWN", "futur-type"] {
             assert!(known(name).is_none(), "{name:?} ne doit rien rendre");
         }
     }

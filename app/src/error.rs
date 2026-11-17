@@ -86,6 +86,20 @@ pub enum AppError {
     /// `./api/workflows.sdd`) — payload = l'erreur miryad-core (`MRD-WORKFLOW-*`).
     #[error("VNL-WFA-017: workflow engine unavailable: {0}")]
     WorkflowEngineUnavailable(String),
+    /// Écran de tableau de bord inconnu ou impossible (400, `./dashboards/resolve.sdd`) — message
+    /// fixe, sans valeur de la requête.
+    #[error("VNL-APP-DSH-010: unknown or impossible dashboard screen")]
+    DashboardScreenInvalid,
+    /// Widget scripté introuvable (404, `./widgets/run.sdd`) — aucune distinction entre absent,
+    /// d'un autre utilisateur, ou non scripté.
+    // Consommateurs à venir (`./widgets/run.sdd`, vague H1) : pas encore construites.
+    #[allow(dead_code)]
+    #[error("VNL-APP-WDG-001: widget not found")]
+    WidgetNotFound,
+    /// Contexte de widget non supporté (422, première version de `app/widgets`).
+    #[allow(dead_code)]
+    #[error("VNL-APP-WDG-002: widget context not supported")]
+    WidgetContextUnsupported,
 }
 
 /// Remplace le `fn db_err` dupliqué verbatim dans 9 modules (`api/{conversations,llm_providers,
@@ -125,8 +139,11 @@ impl IntoResponse for AppError {
             Self::K8sNotFound(_)
             | Self::WorkflowSandboxNotFound
             | Self::WorkflowRunNotFound
+            | Self::WidgetNotFound
             | Self::WorkflowNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::SandboxBranchEmpty | Self::WorkflowKindForbidden(_) => {
+            Self::SandboxBranchEmpty
+            | Self::WorkflowKindForbidden(_)
+            | Self::WidgetContextUnsupported => {
                 (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
             }
             Self::InternalError(_) | Self::K8sApiError(_) => {
@@ -141,7 +158,8 @@ impl IntoResponse for AppError {
             | Self::WorkflowDagInvalid(_)
             | Self::WorkflowUnknownScope(_)
             | Self::WorkflowSandboxNotAllowed
-            | Self::WorkflowScopeNotEditable => (StatusCode::BAD_REQUEST, self.to_string()),
+            | Self::WorkflowScopeNotEditable
+            | Self::DashboardScreenInvalid => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::WorkflowEngineNotConfigured | Self::WorkflowEngineUnavailable(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
@@ -366,6 +384,21 @@ mod tests {
                 AppError::WorkflowEngineUnavailable("x".into()),
                 "VNL-WFA-017: workflow engine unavailable: x".into(),
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                AppError::DashboardScreenInvalid,
+                "VNL-APP-DSH-010: unknown or impossible dashboard screen".into(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::WidgetNotFound,
+                "VNL-APP-WDG-001: widget not found".into(),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::WidgetContextUnsupported,
+                "VNL-APP-WDG-002: widget context not supported".into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
             ),
         ]
     }

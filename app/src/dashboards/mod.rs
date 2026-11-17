@@ -8,6 +8,8 @@ pub mod model;
 pub mod registry;
 pub mod resolve;
 
+use model::DASHBOARD_GRID_COLUMNS;
+
 /// Nombre maximal de widgets par définition (`OI-2` du DSD, borne `VNL-APP-DSH-001`).
 pub const DASHBOARD_MAX_WIDGETS: usize = 24;
 
@@ -69,18 +71,17 @@ pub fn validate_definition(def: &model::DashboardDef) -> Result<(), (&'static st
             ));
         }
     }
-    // Règle 6 — coordonnées dans la grille. `colonnes` hors `[4, 24]` est un manquement 004
-    // avant même de regarder les widgets.
+    // Règle 6 — coordonnées dans la grille FIXE de 12 colonnes (`FR-1`) : `columns` vaut 12,
+    // `w ≥ 1`, `x + w ≤ 12` (donc `w ≤ 12`), `h ∈ [1, 64]`, `y < 4096`.
     let columns = def.layout.columns;
-    if !(4..=24).contains(&columns) {
+    if columns != DASHBOARD_GRID_COLUMNS {
         return Err((
             "VNL-APP-DSH-004",
-            "grille hors bornes [4, 24] colonnes (VNL-APP-DSH-004)",
+            "grille différente de 12 colonnes (VNL-APP-DSH-004)",
         ));
     }
     for widget in &def.widgets {
         let within_row = widget.w >= 1
-            && widget.w <= 64
             && widget.x < columns
             && widget
                 .x
@@ -93,6 +94,54 @@ pub fn validate_definition(def: &model::DashboardDef) -> Result<(), (&'static st
                 "coordonnées de widget hors grille (VNL-APP-DSH-004)",
             ));
         }
+    }
+    // Règle 7 — `config` d'un widget `scripted` : `script` chaîne non vide, `ttl_secs` (s'il est
+    // présent) entier positif ou nul (`dsd/app/widgets.md#FR-1`).
+    for widget in &def.widgets {
+        if widget.widget_type == "scripted" && !scripted_config_valid(&widget.config) {
+            return Err((
+                "VNL-APP-DSH-011",
+                "config de widget scripté invalide (VNL-APP-DSH-011)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Forme de la `config` d'un widget `scripted` (règle 7) : `script` non vide, `ttl_secs` absent
+/// ou entier positif ou nul.
+fn scripted_config_valid(config: &serde_json::Value) -> bool {
+    let script_ok = config
+        .get("script")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|script| !script.is_empty());
+    let ttl_ok = config
+        .get("ttl_secs")
+        .is_none_or(|ttl| ttl.as_u64().is_some());
+    script_ok && ttl_ok
+}
+
+/// Garde-fou des définitions ÉPHÉMÈRES (`dsd/app/dashboards.md#FR-9`, `dsd/app/widgets.md#FR-9`) :
+/// `validate_definition` puis refus de tout widget `scripted` (`VNL-APP-DSH-012`). Jamais appelée
+/// par le hook d'écriture (un éphémère n'est pas stocké).
+///
+/// # Errors
+///
+/// Le couple `(code, message)` du premier manquement, codes `VNL-APP-DSH-001..006, 011, 012`.
+// Consommateur à venir : la réception d'un éphémère (`FR-9`, vague G6/H1). Aucun appelant
+// d'écriture — un éphémère n'est jamais stocké (`./mod.sdd`).
+#[allow(dead_code)]
+pub fn validate_ephemeral(def: &model::DashboardDef) -> Result<(), (&'static str, &'static str)> {
+    validate_definition(def)?;
+    if def
+        .widgets
+        .iter()
+        .any(|widget| widget.widget_type == "scripted")
+    {
+        return Err((
+            "VNL-APP-DSH-012",
+            "widget scripté refusé dans un tableau éphémère (VNL-APP-DSH-012)",
+        ));
     }
     Ok(())
 }
@@ -160,6 +209,66 @@ mod tests {
         let err = validate_definition(&def_with(vec![widget("w-a", "markdown", json!(3), 0, 6)]))
             .expect_err("une config non-objet doit être refusée");
         assert_eq!(err.0, "VNL-APP-DSH-006");
+    }
+
+    fn def_grille(columns: u16, widgets: Vec<Widget>) -> DashboardDef {
+        DashboardDef {
+            id: None,
+            title: String::new(),
+            layout: Layout { columns },
+            widgets,
+        }
+    }
+
+    fn scripted(config: Value) -> Widget {
+        widget("w-s", "scripted", config, 0, 6)
+    }
+
+    /// Scenario: `la config d'un widget scripté est contrôlée` (règle 7, `VNL-APP-DSH-011`).
+    #[test]
+    fn la_config_d_un_widget_scripte_est_controlee() {
+        validate_definition(&def_with(vec![scripted(json!({"script": "1"}))]))
+            .expect("un script non vide passe");
+        for config in [
+            json!({}),
+            json!({"script": "", "ttl_secs": 5}),
+            json!({"script": "1", "ttl_secs": -1}),
+        ] {
+            let err = validate_definition(&def_with(vec![scripted(config.clone())]))
+                .expect_err("la config scriptée invalide doit être refusée");
+            assert_eq!(err.0, "VNL-APP-DSH-011", "config {config}");
+        }
+    }
+
+    /// Scenario: `un tableau éphémère refuse un widget scripté` (`VNL-APP-DSH-012`).
+    #[test]
+    fn un_tableau_ephemere_refuse_un_widget_scripte() {
+        let def = def_with(vec![scripted(json!({"script": "1", "ttl_secs": 0}))]);
+        validate_definition(&def).expect("la définition standard passe");
+        let err = validate_ephemeral(&def).expect_err("un éphémère refuse le scripté");
+        assert_eq!(err.0, "VNL-APP-DSH-012");
+    }
+
+    /// Règle 6 (`./mod.sdd`) : la grille est fixe à 12 colonnes et `w ≤ 12`.
+    #[test]
+    fn la_grille_est_fixe_a_douze_colonnes() {
+        let widgets = vec![widget("w-a", "chat", json!({}), 0, 6)];
+        for columns in [4, 11, 24] {
+            let err = validate_definition(&def_grille(columns, widgets.clone()))
+                .expect_err("une grille autre que 12 colonnes est refusée");
+            assert_eq!(err.0, "VNL-APP-DSH-004", "colonnes {columns}");
+        }
+        validate_definition(&def_grille(
+            12,
+            vec![widget("w-b", "chat", json!({}), 0, 12)],
+        ))
+        .expect("un widget pleine largeur (w=12) passe");
+        let err = validate_definition(&def_grille(
+            12,
+            vec![widget("w-c", "chat", json!({}), 0, 13)],
+        ))
+        .expect_err("w=13 déborde la grille");
+        assert_eq!(err.0, "VNL-APP-DSH-004");
     }
 
     /// Scenario: `une définition standard passe` — le défaut accueil, même appel que le test

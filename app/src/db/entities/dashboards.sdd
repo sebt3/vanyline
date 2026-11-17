@@ -190,7 +190,7 @@ Depends on:
     validate_definition).
 
 Tasks:
-  [ ] `dashboards.rs` : colonnes `project_id` / `sandbox_id` (à la place de `project` /
+  [x] `dashboards.rs` : colonnes `project_id` / `sandbox_id` (à la place de `project` /
     `sandbox`), règles g et h dans les hooks (`before_create`, `before_update` interrogent la
     base par la connexion fournie), marqueur `009`.
   [ ] Le refus de doublon `009` n'est pas encore documenté côté frontend (le

@@ -85,7 +85,7 @@ Depends on:
     "miryad_users")`, précédent des sœurs).
 
 Tasks:
-  [ ] `m20261113_000001_create_vanyline_dashboards.rs` : colonnes `project_id` / `sandbox_id`
+  [x] `m20261113_000001_create_vanyline_dashboards.rs` : colonnes `project_id` / `sandbox_id`
     et leurs FK, index sur `COALESCE(project_id, 0)`, nouveaux Scenarios. `up` modifié en
     place car jamais déployé : les bases de développement et de test sont à recréer.
 

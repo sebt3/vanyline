@@ -159,11 +159,11 @@ Depends on:
     noms d'écran en identifiants, lecture seule), ../../error.sdd (@AppError).
 
 Tasks:
-  [ ] Le Scenario « rendre les défauts revient au défaut » supprime en test par
+  [x] Le Scenario « rendre les défauts revient au défaut » supprime en test par
     `Entity::delete_by_id` au lieu du DELETE de l'API générique que dit son `When`
     (validator G4, 2026-11-13) — le Then est asserté, le bout-en-bout strict (voie
     `rest::core::delete`) reste à faire.
-  [ ] `resolve.rs` : traduction nom → identifiant (projet, sandbox → projet), requête par
+  [x] `resolve.rs` : traduction nom → identifiant (projet, sandbox → projet), requête par
     `project_id`, `AppError::DashboardScreenInvalid` (`010`) à la place de l'`InternalError`
     de `008`, types de réponse importés de `./model.rs`.
 

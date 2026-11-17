@@ -89,9 +89,9 @@ Depends on:
   ./model.sdd (types), ./registry.sdd (`known`), @serde_json (mesure de taille).
 
 Tasks:
-  [ ] `mod.rs` : règle 7 (`VNL-APP-DSH-011`) et @validate_ephemeral (`VNL-APP-DSH-012`) ; les
+  [x] `mod.rs` : règle 7 (`VNL-APP-DSH-011`) et @validate_ephemeral (`VNL-APP-DSH-012`) ; les
     deux Scenarios ci-dessus.
-  [ ] `mod.rs` : la règle 6 impose `columns = 12` et `w ≤ 12` (plus de borne `[4, 24]` ni de
+  [x] `mod.rs` : la règle 6 impose `columns = 12` et `w ≤ 12` (plus de borne `[4, 24]` ni de
     `w ≤ 64`) ; mise à jour de la fonction et de ses tests.
 
 Done when:
