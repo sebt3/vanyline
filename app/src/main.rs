@@ -319,102 +319,24 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Document `OpenAPI` combiné des 11 ressources `resource_router` — fusion par
-/// `OpenApi::merge` de ONZE fragments dans l'ordre d'Exposes (dix lymaille puis
-/// `app-settings`), `info` renseigné une seule fois sur le document final (les fragments n'en
-/// portent pas). Sert `GET /api/swagger-ui` (feature Cargo `swagger-ui` de miryad-core) et
-/// `/api/openapi.json`.
-///
-/// Le fragment `app-settings` vient de `resource_openapi` (schéma du modèle + `SecurityScheme`
-/// Bearer). Les dix fragments lymaille sont construits ICI en interne (arbitrage Sébastien
-/// 2026-11-13) : `resource_openapi` exige `Model: utoipa::ToSchema`, que miryad-core 0.3.1 ne
-/// dérive pas pour `lymaille::definitions`, et la règle orpheline interdit à l'app de
-/// l'implémenter. Ils portent les mêmes méthodes (collection `GET`+`POST`, item
-/// `GET`+`PUT`+`DELETE`, `{id}` en paramètre de chemin) et l'exigence `bearer_auth` par simple
-/// référence de nom — sans redéclarer le `SecurityScheme` ni poser de schéma de modèle. Les
-/// noms de chemins viennent du trait `MiryadResource::resource_name`, source unique des
-/// montages router/MCP/openapi. Basculer ces fragments sur `resource_openapi` quand
-/// miryad-core dérive enfin `ToSchema` (cf. `main.sdd` Tasks).
+/// Document `OpenAPI` combiné des 12 ressources `resource_router` — fusion par
+/// `OpenApi::merge` de DOUZE fragments `resource_openapi` dans l'ordre d'Exposes (dix lymaille,
+/// puis `app-settings` et `dashboards`), `info` renseigné une seule fois sur le document final
+/// (les fragments n'en portent pas). Sert `GET /api/swagger-ui` (feature Cargo `swagger-ui` de
+/// miryad-core) et `/api/openapi.json`.
 fn openapi_spec() -> utoipa::openapi::OpenApi {
-    use miryad_core::lymaille::definitions;
-    use miryad_core::resource::MiryadResource;
-    use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn};
-    use utoipa::openapi::response::ResponseBuilder;
-    use utoipa::openapi::security::SecurityRequirement;
-    use utoipa::openapi::{Object, OpenApiBuilder, Paths, RefOr, Required, Schema, Type};
+    use miryad_core::lymaille::definitions as d;
 
-    // Les dix définitions lymaille dans l'ordre d'Exposes, noms verbatims du trait.
-    let lymaille_resources: [&str; 10] = [
-        definitions::agent::Entity::resource_name(),
-        definitions::toolset::Entity::resource_name(),
-        definitions::profile::Entity::resource_name(),
-        definitions::provider::Entity::resource_name(),
-        definitions::private_agent::Entity::resource_name(),
-        definitions::private_toolset::Entity::resource_name(),
-        definitions::context_type::Entity::resource_name(),
-        definitions::catalog_context::Entity::resource_name(),
-        definitions::user_context::Entity::resource_name(),
-        definitions::mcp_server::Entity::resource_name(),
-    ];
-
-    let id_param = ParameterBuilder::new()
-        .name("id")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .schema(Some(RefOr::T(Schema::Object(Object::with_type(
-            Type::Integer,
-        )))))
-        .build();
-
-    let mut paths = Paths::new();
-    for resource in lymaille_resources {
-        let collection = format!("/api/v1/{resource}");
-        let item = format!("/api/v1/{resource}/{{id}}");
-        // Chaque opération : exigence `bearer_auth` par référence de nom (le composant
-        // `SecurityScheme` est porté par le fragment `app-settings`, `merge` dédoublonne).
-        let op = |builder: OperationBuilder, status: &str| {
-            builder
-                .security(SecurityRequirement::new(
-                    "bearer_auth",
-                    Vec::<String>::new(),
-                ))
-                .response(
-                    status,
-                    ResponseBuilder::new()
-                        .description("Réponse du CRUD générique miryad-core")
-                        .build(),
-                )
-                .build()
-        };
-        let with_id = |builder: OperationBuilder| builder.parameter(id_param.clone());
-        paths.add_path_operation(
-            collection.clone(),
-            vec![HttpMethod::Get],
-            op(OperationBuilder::new(), "200"),
-        );
-        paths.add_path_operation(
-            collection,
-            vec![HttpMethod::Post],
-            op(OperationBuilder::new(), "201"),
-        );
-        paths.add_path_operation(
-            item.clone(),
-            vec![HttpMethod::Get],
-            op(with_id(OperationBuilder::new()), "200"),
-        );
-        paths.add_path_operation(
-            item.clone(),
-            vec![HttpMethod::Put],
-            op(with_id(OperationBuilder::new()), "200"),
-        );
-        paths.add_path_operation(
-            item,
-            vec![HttpMethod::Delete],
-            op(with_id(OperationBuilder::new()), "204"),
-        );
-    }
-
-    let mut spec = OpenApiBuilder::new().paths(paths).build();
+    let mut spec = resource_openapi::<d::agent::Entity>();
+    spec.merge(resource_openapi::<d::toolset::Entity>());
+    spec.merge(resource_openapi::<d::profile::Entity>());
+    spec.merge(resource_openapi::<d::provider::Entity>());
+    spec.merge(resource_openapi::<d::private_agent::Entity>());
+    spec.merge(resource_openapi::<d::private_toolset::Entity>());
+    spec.merge(resource_openapi::<d::context_type::Entity>());
+    spec.merge(resource_openapi::<d::catalog_context::Entity>());
+    spec.merge(resource_openapi::<d::user_context::Entity>());
+    spec.merge(resource_openapi::<d::mcp_server::Entity>());
     spec.merge(resource_openapi::<db::entities::app_settings::Entity>());
     spec.merge(resource_openapi::<db::entities::dashboards::Entity>());
     spec.info = utoipa::openapi::Info::new("vanyline", env!("CARGO_PKG_VERSION"));
@@ -486,38 +408,47 @@ mod tests {
         assert_eq!(spec.info.title, "vanyline");
         assert_eq!(spec.info.version, env!("CARGO_PKG_VERSION"));
 
-        // And du Scenario (arbitrage Sébastien 2026-11-13, étendu à la vague G) : les dix
-        // fragments lymaille sont manuels et ne déclarent AUCUN schéma de modèle — les
-        // `schemas` du document final sont exactement l'union des deux fragments d'entités
-        // de l'app (`app_settings`, `dashboards`), rien de plus.
-        let settings_fragment = resource_openapi::<db::entities::app_settings::Entity>();
-        let dashboards_fragment = resource_openapi::<db::entities::dashboards::Entity>();
-        let mut doc_schemas: Vec<&String> = spec
+        // And du Scenario : les `schemas` du document sont l'union des fragments
+        // `resource_openapi` des douze entités (lymaille comme app).
+        let mut expected_schemas: Vec<String> = Vec::new();
+        macro_rules! collect {
+            ($($entity:ty),+ $(,)?) => {$(
+                expected_schemas.extend(
+                    resource_openapi::<$entity>()
+                        .components
+                        .iter()
+                        .flat_map(|components| components.schemas.keys().cloned()),
+                );
+            )+};
+        }
+        {
+            use miryad_core::lymaille::definitions as d;
+            collect!(
+                d::agent::Entity,
+                d::toolset::Entity,
+                d::profile::Entity,
+                d::provider::Entity,
+                d::private_agent::Entity,
+                d::private_toolset::Entity,
+                d::context_type::Entity,
+                d::catalog_context::Entity,
+                d::user_context::Entity,
+                d::mcp_server::Entity,
+                db::entities::app_settings::Entity,
+                db::entities::dashboards::Entity,
+            );
+        }
+        let mut doc_schemas: Vec<String> = spec
             .components
             .iter()
-            .flat_map(|components| components.schemas.keys())
-            .collect();
-        let mut expected_schemas: Vec<&String> = settings_fragment
-            .components
-            .iter()
-            .flat_map(|components| components.schemas.keys())
-            .chain(
-                dashboards_fragment
-                    .components
-                    .iter()
-                    .flat_map(|components| components.schemas.keys()),
-            )
+            .flat_map(|components| components.schemas.keys().cloned())
             .collect();
         doc_schemas.sort_unstable();
         expected_schemas.sort_unstable();
-        // `schemas` est une MAP indexée par nom : `HookErrorBody`, déclaré par les deux
-        // fragments d'entités, n'apparaît qu'une fois dans le document (même dédoublonnage
-        // que les security_schemes ci-dessous).
         expected_schemas.dedup();
-        assert_eq!(
-            doc_schemas, expected_schemas,
-            "aucun schéma de modèle lymaille ne doit figurer dans le document : {doc_schemas:?}"
-        );
+        assert_eq!(doc_schemas, expected_schemas);
+        // Les dix `Model` lymaille se télescopent sous le nom `Model` (voir `main.sdd`).
+        assert!(doc_schemas.iter().any(|name| name == "Model"));
 
         // OpenApi::merge dédoublonne security_schemes/security par nom/égalité — les 12
         // fragments déclarent le même schéma Bearer, il ne doit apparaître qu'une fois.

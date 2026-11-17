@@ -502,10 +502,8 @@ mod tests {
         assert_eq!(json["code"].as_str(), Some("VNL-APP-DSH-006"));
     }
 
-    /// Scenario: `deux personnalisations du même écran, c'est 409 pas 422`. ÉCART DE SPEC
-    /// consigné (`[?]` de `./dashboards.sdd`) : miryad-core 0.3.1 traduit le `DbErr` de
-    /// contrainte en 500 `MRD-REST-003`, pas en 409 — le test verrouille le refus (jamais
-    /// 422, jamais 201) et le passage du second complementary.
+    /// Scenario: `la course sur un même écran rend 409` (la contrainte d'unicité est traduite en
+    /// 409 `MRD-REST-007` par miryad-core depuis 0.4.0, ticket #77).
     #[tokio::test]
     async fn deux_personnalisations_du_meme_ecran_sont_refusees() {
         let (app, db) = app_with_token().await;
@@ -531,11 +529,10 @@ mod tests {
         );
 
         let (status, json) = ask(&app, "POST", "/api/v1/dashboards", &alice, Some(premier)).await;
-        assert_ne!(status, StatusCode::CREATED, "le doublon ne passe pas");
-        assert_ne!(
+        assert_eq!(
             status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "c'est la contrainte (index partiel), pas le hook : {json}"
+            StatusCode::CONFLICT,
+            "le doublon est rejeté par l'index d'unicité en 409 (MRD-REST-007) : {json}"
         );
 
         // Un SECOND complementary sur le même projet passe (FR-5, pas d'index là-dessus).

@@ -97,9 +97,8 @@ Returns:
 
 Raises:
   Uniquement `HookError` ; jamais de panic. Course résiduelle entre deux créations
-    concurrentes du même écran : l'index d'unicité rejette la seconde et miryad-core rend 500
-    `MRD-REST-003` (le contrat REST de miryad-core ne traduit pas la contrainte en 409 ;
-    ticket amont) — cas rare, jamais une deuxième ligne.
+    concurrentes du même écran : l'index d'unicité rejette la seconde et miryad-core rend 409
+    `MRD-REST-007` (depuis 0.4.0, ticket #77) — cas rare, jamais une deuxième ligne.
 
 Handles:
   - Unicité : un second `custom` sur le même écran est refusé par le hook (règle h, `009`,
@@ -161,6 +160,12 @@ Scenario: deux personnalisations du même écran sont refusées 009
   Then refusée `VNL-APP-DSH-009` (422) avant l'écriture ; pendant ce temps un SECOND
     `complementary` sur le même projet passe (`FR-5`, pas d'unicité) ; une insertion
     contournant le hook (SQL brut de test) est rejetée par l'index d'unicité
+
+Scenario: la course sur un même écran rend 409
+  Given une première ligne `custom` déjà écrite sur l'écran, le hook rendant `Ok` (course simulée :
+    ligne insérée entre le contrôle et l'écriture)
+  When la création atteint l'index d'unicité
+  Then la réponse est 409 `MRD-REST-007`, jamais 500 ni 201
 
 Scenario: un complementary d'un autre utilisateur n'est pas visible
   Given un complementary créé par ana sur « p1 »

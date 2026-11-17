@@ -68,14 +68,10 @@ Structure:
   @tracing::error! avec identifiant `VNL-*` puis @std::process::exit(1).
   @health — fonction privée `async fn health() -> &'static str`, corps littéral `"ok"`.
   @openapi_spec — fonction privée (documentée par le commentaire de code) : fusion par
-  @OpenApi::merge de DOUZE fragments — DEUX @resource_openapi (les entités de l'app
-  `app_settings` et `dashboards`) et DIX MANUELS, un par définition lymaille (arbitrage Sébastien
-  2026-11-13 : @resource_openapi exige `Model: @utoipa::ToSchema`, que miryad-core 0.3.1 ne
-  dérive PAS pour `lymaille::definitions` — vérifié dépôt amont et crates publiés ; la
-  modification de miryad-core étant interdite par le chantier, les fragments sont construits
-  ICI en interne : chemins + méthodes + exigence `bearer_auth` par référence de nom, SANS
-  ressasser le @SecurityScheme ni déclarer de schéma de modèle). `info` posé une seule fois
-  sur le document final.
+  @OpenApi::merge de DOUZE fragments @resource_openapi, un par ressource : les dix définitions
+  lymaille (dont les `Model` dérivent `ToSchema` depuis miryad-core 0.4.0, ticket #79) puis les
+  entités de l'app `app_settings` et `dashboards`. `info` posé une seule fois sur le document
+  final.
   @mod tests (cfg(test)) — un seul test,
   `openapi_spec_exposes_all_twelve_resources_without_duplicate_security_scheme` ; c'est le
   SEUL test du fichier ; tout le reste de ./main.rs (séquence, assemblage, codes de
@@ -85,7 +81,7 @@ Structure:
   est une entité de l'app : son fragment OpenAPI vient de @resource_openapi, contrairement
   aux dix lymaille ; l'ancienne divergence router/openapi
   est sans objet, les ressources n'ont jamais de routes communes ; la méthode de production
-  des fragments diffère — un @resource_openapi, dix manuels — pas l'ordre) : les dix entités de
+  des fragments est la même pour les douze, @resource_openapi) : les dix entités de
   `miryad_core::lymaille::definitions` — `agent`, `toolset`, `profile`, `provider`,
   `private_agent`, `private_toolset`, `context_type`, `catalog_context`, `user_context`,
   `mcp_server` (chemins `/api/v1/{resource_name}` verbatims : `lymaille_catalog_agents`,
@@ -352,11 +348,10 @@ Handles:
   `STATIC_DIR` absent ou illisible au démarrage : le démarrage réussit et journalise un
     @tracing::warn! (identifiant `VNL-CFG-009`) ; ce n'est pas fatal — l'image embarque
     `/app/static`, et `/health` doit rester servi.
-  CRUD générique de miryad-core : un id inexistant rend 404 et la ligne d'un autre owner 403
+  CRUD générique de miryad-core : un id inexistant ET la ligne d'un autre owner rendent le même 404
     (ressources `OwnerOnly` : `lymaille_agents`, `lymaille_toolsets`, `lymaille_contexts`,
-    `dashboards`, outil MCP générique) ; un utilisateur peut donc sonder l'existence d'identifiants
-    d'autrui. Assumé : identifiants entiers séquentiels, aucune donnée lisible ; l'uniformisation
-    en 404 relève de miryad-core et n'est pas réécrite ici.
+    `dashboards`, outil MCP générique ; depuis 0.4.0, ticket #77) ; une contrainte d'unicité
+    violée rend 409. Comportement de miryad-core, non réécrit ici.
   Consommateurs externes de la table de montage : probes liveness/readiness du
     déploiement K8s sur `GET /health` (`../../deploy/web/deployment.yaml`, port de
     `LISTEN_ADDR` du configmap `0.0.0.0:8080`) ; le frontend (mêmes chemins que
@@ -382,14 +377,11 @@ Must:
     @ServeFile de repli `{STATIC_DIR}/index.html` (SPA routing sans configuration
     serveur supplémentaire).
   Poser l'`info` OpenAPI une seule fois, sur le document fusionné final (les fragments
-    @resource_openapi ne le portent pas, les fragments manuels n'en portent pas non plus),
+    @resource_openapi ne le portent pas),
     avec `title` `"vanyline"` et `version` la
     version du crate.
-  Construire les dix fragments lymaille en interne (chemins + méthodes + référence
-    `bearer_auth`) et NE PAS appeler @resource_openapi sur les entités de
-    `lymaille::definitions` (sans `ToSchema` amont, l'appel ne compile pas) ; quand un bump
-    miryad-core dérive enfin `ToSchema` (cf. Tasks), basculer ces dix fragments sur
-    @resource_openapi et resserrer ce contrat avec lui.
+  Obtenir les douze fragments par @resource_openapi (aucun fragment construit à la main), dans
+    l'ordre d'Exposes.
   Exposer la connexion DB via @MiryadAuthState.db uniquement (le `db` est mové dans
     l'état d'auth ; pas de second champ DB dans @AppState).
   Conserver @health sans extraction d'état ni authentification (les probes K8s n'ont pas
@@ -444,11 +436,9 @@ Depends on:
     C3 des six entités de config) — spec enfant ./db/entities/app_settings.sdd.
   `miryad_core::lymaille::definitions` (crate externe) — les dix entités de définition
     mergées en CRUD REST/MCP (surface subie : noms de ressources et politiques
-    d'accès portés par miryad-core, `miryad-core#DEC-14`). LIMITATION SUBIE en OpenAPI :
-    leurs @Model ne dérivent pas @utoipa::ToSchema dans miryad-core <= 0.3.1 (vérifié le
-    2026-11-13 dans le dépôt amont et les crates publiés), ce qui rend
-    @resource_openapi inapplicable à ces entités — d'où les dix fragments manuels
-    d'@openapi_spec (Exposes).
+    d'accès portés par miryad-core, `miryad-core#DEC-14`). Leurs @Model dérivent
+    @utoipa::ToSchema depuis miryad-core 0.4.0 (ticket #79) : @resource_openapi
+    s'applique à elles comme aux entités de l'app.
   Crate externe `miryad-core` v0.4.0 (hors workspace, source absente du dépôt) —
     @MiryadAuthState, @OidcClient, @auth_router, @resource_router, @resource_openapi,
     @swagger_ui_router, @miryad_core::migration::Migrator : surface subie, non specée
@@ -472,8 +462,7 @@ Scenario: purge_au_demarrage_puis_quotidienne
   Then une première purge est exécutée IMMÉDIATEMENT, puis une par période de 24 h ; un échec est journalisé en `warn` avec `VNL-WF-007` sans arrêter la tâche, un succès en `info` avec `VNL-WF-008`
 
 Tasks:
-  [ ] Ticket amont miryad-core : 404 uniforme pour une ligne `OwnerOnly` d'un autre owner (et
-    409 pour un doublon de contrainte unique, cf. `./db/entities/dashboards.sdd`).
+  [x] 404 uniforme et 409 sur contrainte unique : fournis par miryad-core 0.4.0 (ticket #77), contournements retirés.
   [x] DÉCIDÉ 2026-10-18 (recommandation validée : première purge AU DÉMARRAGE puis toutes les 24 h ; logs de purge porteurs d'un identifiant `VNL-WF-007` (échec) et `VNL-WF-008` (information : lignes supprimées) ; Scenario `purge_au_demarrage_puis_quotidienne`) — Première purge des runs (revue 2026-10-18) : `demarrer_purge_quotidienne` attend 24 h avant le premier — FAIT 2026-10-18 (validateur indépendant PASS, mutations démontrées)
     passage ; un pod redémarré plus souvent que toutes les 24 h ne purge jamais.
     Recommandation (Claude, 2026-10-18) : purger une première fois au démarrage (puis toutes les 24 h), les logs de purge portant un identifiant `VNL-*`.
@@ -526,13 +515,11 @@ Tasks:
   [x] Ordres de merge différents (router : skills/toolsets avant model_profiles ;
     openapi_spec : model_profiles avant toolsets/skills) — SOLDÉ en C3 du chantier lymaille
     (2026-11-12) : les deux listes sont désormais IDENTIQUES (liste unique d'Exposes).
-  [x] OpenAPI des ressources lymaille — ARBITRÉ par Sébastien le 2026-11-13 : fragments
-    MANUELS dans @openapi_spec (chemins + méthodes + référence `bearer_auth`, sans schéma
-    de modèle ni re-déclaration du schéma de sécurité), miryad-core 0.3.1 ne dérivant pas
-    ToSchema et sa modification étant interdite par le chantier.
-  [ ] Ticket amont miryad-core : dériver ToSchema (optionnel sous feature `lymaille`) sur
-    les @Model de `lymaille::definitions`, puis bump de la dépendance et bascule des dix
-    fragments manuels sur @resource_openapi (resserrer Exposes/Returns/Must avec).
+  [x] OpenAPI des ressources lymaille : fragments manuels retirés, @resource_openapi sur les douze (ticket #79, miryad-core 0.4.0).
+  [?] Collision de noms de schéma OpenAPI : les dix `Model` de `lymaille::definitions` dérivent
+    `ToSchema` sans `#[schema(as = …)]`, donc le document ne porte qu'un `Model`/`PagedModel`
+    pour dix ressources (miryad-core 0.4.0). À remonter en ticket amont (nom de schéma par
+    définition) ; sans effet sur les chemins ni sur le fonctionnement.
   [ ] Aucun test n'existe pour la séquence de démarrage, les codes de sortie ni
     l'assemblage : seul @openapi_spec est testé (`openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme`).
     Les Scenarios process (exit 1 + ID `VNL-*`) demandent un harnais d'intégration lançant
@@ -655,10 +642,9 @@ Scenario: openapi_spec fusionne douze ressources avec un seul schéma de sécuri
     `lymaille_mcp_servers`, `app-settings`, `dashboards`
     And aucun chemin `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`,
     `skills` ni `agents` nu n'apparaît (retrait C3 du chantier lymaille)
-    And les composants `schemas` du document ne contiennent AUCUN schéma de modèle
-    lymaille (les dix fragments sont manuels, seules les entités de l'app
-    `app_settings` et `dashboards` portent le leur — limitation ToSchema de miryad-core
-    0.3.1, arbitrage 2026-11-13)
+    And les composants `schemas` du document sont exactement l'union des `schemas` des douze
+    fragments @resource_openapi (les dix `Model` lymaille partagent le nom de schéma `Model`
+    et `PagedModel` — voir le `[?]` des Tasks)
     And `info.title` vaut `"vanyline"` et `info.version` la version du crate
     And `components.security_schemes` compte exactement 1 entrée (Bearer dédoublonné)
     And la sécurité globale du document compte exactement 1 entrée
