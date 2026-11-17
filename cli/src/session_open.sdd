@@ -32,9 +32,9 @@ Handles:
     (types associés : source du cluster, fournisseur d'inférence, connecteur MCP) : l'implémentation de
     production (`VnlK8sClient`, `RigProvider`, connecteur MCP authentifié par @OwnerAuth) est séparée
     de celle des tests (cluster, inférence et connecteur simulés).
-  Compaction : la CLI n'a pas encore de `Summarizer` de production ; le résumé REFUSE avec une erreur
-    explicite au débordement du contexte (la session reste sauvegardée, l'utilisateur est prévenu par
-    une notice) — voir le `[?]` des Tasks.
+  Compaction : le `Summarizer` est @ProviderSummarizer (`./summarizer.sdd`), qui demande le résumé au même
+    fournisseur et au même profil que la session ; un échec est visible (notice, sortie d'erreur), la session
+    reste sauvegardée.
   Ordre : (1) `Layers::discover` ; (2) client Kubernetes du kubeconfig (échec ⇒ `OpenError::Cluster`
     avec la cause, `VNL-K8S-001`) ; (3) @derive_context ; (4) résolution de la session
     (`Last` ⇒ @latest_for_context ; `Id` ⇒ chargement ; `New` ⇒ identifiant neuf) ; (5)
@@ -86,6 +86,4 @@ Scenario: cluster injoignable
 
 Tasks:
   [x] `session_open.rs` et ses tests (hôte simulé par les seams des stores ; cluster simulé).
-  [?] Compaction : le `Summarizer` refuse au débordement du contexte (départ prudent, aucun résumé par
-    le modèle). Une compaction par le fournisseur d'inférence est à concevoir : à décider avec le
-    développeur.
+  [x] Décidé 2026-11-17 : compaction par le fournisseur d'inférence (`./summarizer.sdd`) ; le refus explicite de départ (`RefusingSummarizer`, VNL-CLI-SES-004) est remplacé (tâche de `./summarizer.sdd`).

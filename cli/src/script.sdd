@@ -27,8 +27,9 @@ Handles:
     qu'une session de ce contexte ; un module non accordé échoue (`dsd/cli.md#AC-3`). Connexion MCP à
     la sandbox avec @OwnerAuth. Aucun accès au système de fichiers ni au shell locaux : tout passe
     par le MCP de la sandbox.
-  `--param clé=valeur` (`FR-5`) : chaque paire devient une constante Rhai en lecture seule ; la clé est
-    un identifiant Rhai valide, unique ; clé invalide ou répétée ⇒ erreur d'usage (code 2). Une valeur
+  `--param clé=valeur` (`FR-5`, option B du 2026-11-17) : chaque paire est lue par le script via la fonction
+    `param("clé")`, qui rend la valeur (chaîne) ; une clé absente rend une erreur de script (classe
+    `NotFound`), jamais `()` ; la clé est un identifiant Rhai valide, unique ; clé invalide ou répétée ⇒ erreur d'usage (code 2). Une valeur
     que le `SecretDetector` de lymaille reconnaît est refusée avant toute exécution (code 2).
   Sortie : le texte rendu par le script va sur la sortie standard ; une erreur de script (classe et
     position) sur la sortie d'erreur ; avec `--json`, la sortie standard porte UN objet
@@ -78,4 +79,4 @@ Scenario: échéance
 
 Tasks:
   [ ] `script.rs` et ses tests — E8.
-  [?] BLOQUÉ (2026-11-17) : lymaille 0.3.0 n'offre aucune API publique pour exécuter un script hors session avec des constantes Rhai en lecture seule (`Scratchpad::run` existe, pas les constantes ; préfixer le script par `const k = "v";` mettrait les valeurs dans le journal et décalerait les positions d'erreur). Option A : une API publique de constantes côté lymaille ; option B : amender `batch#FR-5` en une fonction Rhai `param("nom")` enregistrée par `with_registration`, valeurs absentes du texte et du journal. Décision du développeur requise.
+  [x] Décidé 2026-11-17 (option B) : les paramètres s'obtiennent par la fonction Rhai `param("nom")` enregistrée par la CLI (`with_registration`), et non par des constantes ; valeurs absentes du texte du script, du journal d'audit et des positions d'erreur.

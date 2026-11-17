@@ -1,0 +1,66 @@
+Spec: Summarizer — résumé de compaction par le fournisseur d'inférence
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`Summarizer`, `InferenceProvider`)
+
+Purpose:
+  Quand le contexte d'une session déborde, lymaille compacte l'historique par une stratégie qui a besoin d'un
+  `Summarizer` (`DefaultStrategy<S: Summarizer>`) : lymaille n'en fournit pas de production. Ce module en est
+  un, qui demande le résumé au MÊME fournisseur d'inférence que la session (décidé le 2026-11-17, remplace le
+  refus explicite du départ de `./session_open.sdd`). Le prompt de résumé est celui de lymaille
+  (`DEFAULT_SUMMARY_PROMPT`, qui exige les demandes de l'utilisateur citées VERBATIM).
+
+Owns:
+  ./summarizer.rs
+
+References:
+  ./session_open.sdd — assemblage de la stratégie
+  /dsd/cli/chat.md — `FR-7` (aucune erreur silencieuse)
+
+Exposes:
+  @ProviderSummarizer<P: InferenceProvider> — `new(provider: Arc<P>, profile: ResolvedProfile)` ; implémente
+    `lymaille::Summarizer` : `summarize(transcript, digest) -> Result<String, ContextError>`.
+
+Handles:
+  Requête : un seul tour sans outil — message système = `summary_prompt(None)` de lymaille, message utilisateur
+    = le transcript (un `rôle: contenu` par ligne) précédé, quand un `digest` est donné, de son rendu ; le profil
+    est celui de la session (modèle, taille de contexte) ; aucune température au-delà de celle du profil. Le texte
+    de la réponse est le résumé, tel quel.
+  Réponse vide ou blanche : `ContextError::Summarizer` (« résumé vide »), jamais un résumé vide accepté.
+  Échec d'inférence (`InferenceError`, toute classe) : `ContextError::Summarizer` portant la CLASSE de l'erreur
+    et son message, sans corps de requête ni secret ; l'erreur est visible (notice du TUI, sortie d'erreur de
+    `run`), la session reste sauvegardée.
+  Un transcript plus grand que le contexte du profil n'est pas découpé ici : lymaille borne ce qu'elle envoie ;
+    si le fournisseur refuse (dépassement), l'erreur ci-dessus est rendue.
+
+Must:
+  Ne jamais journaliser le transcript ni le résumé (contenu de conversation).
+  Utiliser le même fournisseur et le même profil que la session : aucun second chemin d'inférence, aucune clé
+    de plus.
+
+Must not:
+  Modifier le texte du résumé (pas de reformatage) ; réessayer en boucle (un échec est rendu une fois, les
+    nouvelles tentatives relèvent de la politique de relance de lymaille).
+
+Scenario: résumé rendu tel quel
+  Given un fournisseur simulé qui répond « résumé »
+  When `summarize("user: a\nassistant: b", None)`
+  Then « résumé », et la requête contient le prompt de lymaille et le transcript
+
+Scenario: digest précédent
+  Given un `digest` fourni
+  When `summarize`
+  Then le rendu du digest précède le transcript dans le message utilisateur
+
+Scenario: réponse vide
+  Given un fournisseur qui répond une chaîne blanche
+  When `summarize`
+  Then `ContextError::Summarizer`
+
+Scenario: échec d'inférence
+  Given un fournisseur qui échoue avec une erreur de classe `RateLimited` (ou la plus proche)
+  When `summarize`
+  Then `ContextError::Summarizer` nommant la classe, sans corps de requête
+
+Tasks:
+  [ ] `summarizer.rs` et ses tests ; `session_open.rs` : remplacer `RefusingSummarizer` par @ProviderSummarizer
+    (même fournisseur et même profil que la session).

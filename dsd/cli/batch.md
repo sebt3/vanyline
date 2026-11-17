@@ -79,7 +79,7 @@ approbation en cours de session.
     - **Source:** `cli#FR-4`, `cli#BR-3`
     - **Verified by:** `AC-4`
 
-- **FR-5 - MUST:** `--param clé=valeur`, répétable, expose chaque paire au script comme constante Rhai en lecture seule. Le
+- **FR-5 - MUST:** `--param clé=valeur`, répétable, expose chaque paire au script par la fonction Rhai `param("clé")` (décidé le 2026-11-17 : lymaille 0.3 ne sait pas poser de constante hors session, et préfixer le script par des `const` mettrait les valeurs dans le journal d'audit). Le
   nom doit être un identifiant Rhai valide et unique. Une valeur que le détecteur de secrets de lymaille reconnaît est
   refusée.
     - **Source:** décision du développeur, 2026-11-07 ; `CON-2`

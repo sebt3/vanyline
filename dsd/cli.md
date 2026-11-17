@@ -50,6 +50,9 @@ le fonctionnement des objets Kubernetes (domaine `workspaces`).
 
 ## Hypothèses, contraintes et dépendances
 
+- **CON-0 (décidé le 2026-11-17):** La CLI s'exécute DANS le cluster (un pod de travail, comme celui du développeur) : elle joint les Services des sandboxes par leur adresse interne (`sandbox-<nom>.<ns>.svc`). L'usage depuis un poste hors cluster (port-forward, Ingress public, TLS du client fichier) n'est pas supporté et n'est pas un objectif.
+    - **Source:** décision du développeur, 2026-11-17
+
 - **CON-1:** Le terminal est requis pour le TUI ; le chat n'a pas de mode sans terminal.
     - **Source:** `AGENTS.md`, composant cli
 

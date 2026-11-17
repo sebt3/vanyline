@@ -244,6 +244,16 @@ Must:
     `Provisioning`, chaîne inconnue) ⇒ `False`/`NotRunning` — `message` =
     `phase=<phase>`, `observed_generation` = generation de la CR,
     `last_transition_time` = horodatage de calcul (régénéré à chaque reconcile).
+  Détecter la dérive de spec (condition `RestartPending`, `dsd/workspaces/sandboxes.md#DEC-10`, décidé
+    2026-11-17) : le Pod porte l'annotation `vanyline.solidite.fr/spec-hash` = empreinte SHA-256 (hex) de la
+    « spec utile » de la Sandbox au moment de sa création, calculée par @spec_hash : sérialisation JSON canonique
+    (clés triées) de `{toolchains, resources, image, branch, env}` de `spec` — les champs qui exigent un
+    redémarrage du Pod ; `egress`, `suspended`, labels et annotations n'en font PAS partie. @compute_status
+    ajoute une SECONDE condition `RestartPending` : `True`/`SpecDrift` (`message` = « spec modifiée depuis le
+    démarrage du Pod ») quand un Pod existe ET que son annotation diffère de @spec_hash de la spec courante (ou
+    est absente : Pod antérieur à cette fonction) ; `False`/`UpToDate` sinon (Pod absent, suspendu ou à jour).
+    La phase ne change JAMAIS pour cette raison, et le controller ne redémarre jamais le Pod : la condition
+    tombe à `False` dès que le Pod recréé par stop/start porte l'empreinte de la spec courante.
   Boucler @reconcile : namespace = celui de la CR, repli `"default"` ; finalizer
     `vanyline.solidite.fr/sandbox-cleanup` (@FINALIZER) avec dispatch
     @Event::Apply → @apply, @Event::Cleanup → @cleanup ; erreurs du mécanisme finalizer
@@ -407,7 +417,7 @@ Accepts:
     assainies (noms, branches, images, CIDR) — validité RFC 1123/CIDR reportée à
     l'apiserver.
   @aggregate_toolchain_env : tranche de @Toolchain dans l'ordre significatif (l'ordre
-    EST contractuel) ; @compute_status : phase = toute chaîne, mapping tolérant.
+    EST contractuel) ; @compute_status : phase = toute chaîne, mapping tolérant ; @spec_hash(spec) -> String (empreinte de la spec utile, voir Must).
 
 Returns:
   Builders : manifests K8s complets typés (@Pod, @Job, @Service, @NetworkPolicy,
@@ -784,6 +794,31 @@ Scenario: lsp_aucun_preset_pour_nom_inconnu
   When @resolve_toolchain_lsp résout
   Then `None` — pas de montage LSP ni de route `/ws/lsp` (test existant
     `resolve_toolchain_lsp_unknown_is_none`)
+
+Scenario: spec_hash_stable_et_sensible_aux_champs_utiles
+  Given deux specs identiques, puis la même avec `toolchains` modifié, puis la même avec `egress` modifié
+  When @spec_hash est calculé pour chacune
+  Then identique pour les deux premières, différent pour `toolchains`, IDENTIQUE pour `egress`
+
+Scenario: pod_porte_l_empreinte_de_la_spec
+  Given une sandbox
+  When le Pod est construit
+  Then l'annotation `vanyline.solidite.fr/spec-hash` vaut @spec_hash de la spec
+
+Scenario: restart_pending_vrai_sur_derive
+  Given un Pod portant l'ancienne empreinte et une spec dont les toolchains ont changé
+  When @compute_status
+  Then la condition `RestartPending` est `True`/`SpecDrift`, la phase reste `Running`
+
+Scenario: restart_pending_faux_apres_redemarrage
+  Given un Pod recréé avec l'empreinte de la spec courante, puis un Pod absent (suspendu)
+  When @compute_status
+  Then la condition `RestartPending` est `False`/`UpToDate` dans les deux cas
+
+Scenario: restart_pending_pod_sans_annotation
+  Given un Pod sans annotation d'empreinte
+  When @compute_status
+  Then `RestartPending` est `True`/`SpecDrift`
 
 Scenario: pod_nom_sandbox_prefixe_et_namespace
   Given une Sandbox `demo-branch` dans le namespace `ns`
@@ -1424,3 +1459,4 @@ Scenario: cleanup_job_remove_exist_non_succeeded_attente_cluster
   When le reconciler traite @Event::Cleanup
   Then l'observation du log/spacing (409 VNL-CTL-001 warn 30 s vs attente propre)
     départage le comportement réel du rappel de `create`
+  [ ] `@spec_hash`, annotation `vanyline.solidite.fr/spec-hash` du Pod, condition `RestartPending` de @compute_status (décidé 2026-11-17) ; l'affichage « redémarrage requis » de la CLI (`sandbox show`, `apply`) et de l'app lit cette condition. Reste hors de cette tâche : checkout de la nouvelle branche au redémarrage (`vanyline.sdd`, tâche « option C »).
