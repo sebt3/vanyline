@@ -102,11 +102,8 @@ pub enum AppError {
     WidgetContextUnsupported,
 }
 
-/// Remplace le `fn db_err` dupliqué verbatim dans 9 modules (`api/{conversations,llm_providers,
-/// local_tools,mcp_servers,me,owners,projects,sandboxes}.rs`, `ws/chat.rs`) — trouvé en revue
-/// Phase 3 (miryad-core-integration). Même code qu'avant (`VNL-DB-006`, tout `DbErr` mappé en
-/// `InternalError`) : la consolidation ne change aucun comportement observable, juste l'endroit
-/// où il vit. `#[from]` permet `?` directement sur un `Result<_, sea_orm::DbErr>`.
+/// Tout `DbErr` devient une `InternalError` au marqueur `VNL-DB-006` (un seul seau, voir
+/// `error.sdd`) ; `#[from]` permet `?` directement sur un `Result<_, sea_orm::DbErr>`.
 impl From<sea_orm::DbErr> for AppError {
     fn from(e: sea_orm::DbErr) -> Self {
         Self::InternalError(format!("VNL-DB-006: {e}"))
@@ -397,6 +394,12 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
         ]
+    }
+
+    /// Garde : une variante ajoutée à `AppError` impose sa ligne de fixture (28 variantes).
+    #[test]
+    fn une_fixture_par_variante() {
+        assert_eq!(fixtures().len(), 28);
     }
 
     #[test]

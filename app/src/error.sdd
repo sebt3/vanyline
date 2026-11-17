@@ -388,12 +388,12 @@ Tasks:
   [x] `VNL-DB-007: context not found` / `VNL-DB-008: created conversation not found` —
     SANS OBJET depuis C2 du chantier lymaille : émis uniquement par ./api/conversations.rs et
     ./ws/chat.rs, retirés avec eux (grep : plus aucune occurrence dans le dépôt).
-  [ ] Combler les tests du module : les 4 tests existants ne couvrent que 4 des 25 statuts ;
+  [x] Combler les tests du module (soldé : barème, Display, corps JSON, @From, `source()`, unicité et garde « une fixture par variante » existent) : les 4 tests existants ne couvrent que 4 des 25 statuts ;
     ajouter un test par Scenario taggé par son titre (21 statuts manquants dont les 14 WFA,
     corps JSON +
     @Content-Type, les 2 @From manuels avec rendus complets, @std::error::Error::source(),
     unicité des marqueurs, chemin WS log-only).
-  [ ] Décider du sort du commentaire d'@doc du @From<@sea_orm::DbErr> (référence
+  [x] Commentaire d'@doc de @From<DbErr> reformulé vers `error.sdd` — ex-question : Décider du sort du commentaire d'@doc du @From<@sea_orm::DbErr> (référence
     historique « Phase 3 (miryad-core-integration) ») : le reformuler vers ./error.sdd ou
     le conserver tel quel.
   [x] `AgentNotFound`/`UnprocessableReference` — TRANCHÉ en C3 du chantier lymaille
