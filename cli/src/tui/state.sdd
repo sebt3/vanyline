@@ -1,13 +1,14 @@
 Spec: TUI state — état et mise à jour pures
 
-Platform: Rust/vanyline-cli
+Platform: Rust/vanyline-cli — lymaille 0.3 (événements de session)
 
 Purpose:
   Le MODÈLE du chat interactif et sa fonction de mise à jour, sans aucune I/O (architecture
   « Elm ») : `update(state, action) -> (state, Vec<Effect>)`. Il porte la transcription, l'état
   d'attente, le défilement, le panneau de tâches, l'historique de saisie et la politique des
   touches ; il décide des commandes slash. Tout ce qui touche au terminal, au disque et au
-  réseau est un `Effect` exécuté par ./mod.sdd. Fichier neuf, conception.
+  réseau est un `Effect` exécuté par ./mod.sdd. Adapté de la version sur `ChatEvent` de
+  `vanyline-lib` à celle des `Event` de lymaille (`dsd/cli/chat.md#DEC-1`).
 
 Owns:
   ./state.rs
@@ -15,135 +16,156 @@ Owns:
 Can read:
   ./editor.sdd
   ./sink.sdd
-  /lib/src/event.sdd
-  ../store.sdd
+  ../session_open.sdd
+  ../host/audit.sdd
+
+References:
+  /dsd/cli/chat.md — `FR-2` à `FR-10`, `DEC-1`, `DEC-3`, `AC-2` à `AC-6`
+  /dsd/cli.md — `DEC-8`
 
 Exposes:
-  @TranscriptItem — `User(text)` | `Assistant { blocks }` (texte en cours ou terminé, rendu par
-    ./markdown.sdd) | `Reasoning(text)` (raisonnement du modèle, replié par défaut) |
-    `ToolCall { id, name, args, result: Option<String>, is_error, expanded }` |
-    `Subagent { id, agent, task, items, done }` | `Notice(level, text)` (info/avertissement/erreur,
-    `tool_unavailable` compris) | `Interrupted`.
-  @AppState — `{ transcript, status: Idle | Running { since }, input: EditorState, history,
-    scroll: Scroll (suit la fin par défaut), todo: Vec<TodoItem>, todo_visible, usage: {input,
-    output}, agent, conversation_id, title, git_summary: Option<String>, quit_armed: bool,
-    size: (u16,u16) }`.
+  @TranscriptItem — `User { text, during_turn: bool }` (envoyé pendant un tour : marqué) |
+    `Assistant { blocks }` (texte en cours ou terminé, rendu par ./markdown.sdd) | `Script {
+    seq, functions: Vec<String>, duration_ms, ok, error: Option<String>, script: String, output:
+    String, expanded }` (une exécution de script, repliée en une ligne, `dsd/cli.md#DEC-8`) |
+    `Subagent { run, agent, status: Running | Ended(Outcome) | Interrupted }` (ligne de statut,
+    mise à jour par sondage) | `Notice(level, text)` (info, avertissement, erreur) | `Interrupted`.
+  @AppState — `{ transcript, status: Idle | Running { since }, input: EditorState, history, scroll:
+    Scroll (suit la fin par défaut), todo: Vec<TodoItem>, todo_visible, usage: {prompt,
+    completion}, agent, session_id, title, dirty_files: Option<usize> (nombre de fichiers modifiés
+    du worktree, `None` sans sandbox), quit_armed: bool, size: (u16,u16), selection }`.
   @Action — `Key(KeyEvent)`, `Paste(String)`, `Resize(w,h)`, `Mouse(MouseEvent)`, `Tick`,
-    `Agent(ChatEvent)` (de @TuiSink), `TurnFinished(Result)`, `GitSummary(Option<String>)`.
-  @Effect — `StartTurn(String)`, `CancelTurn`, `Save`, `Quit`, `RefreshGit`, `NewConversation`,
-    `SwitchAgent(String)`.
+    `Session(Event)` (de @TuiSink), `TurnFinished(TurnResult)`, `Todo(Vec<TodoItem>)`,
+    `DirtyFiles(Option<usize>)`, `Runs(Vec<RunStatus>)`, `SessionList(Vec<SessionSummary>)`.
+  @Effect — `StartTurn(String)`, `InjectInput(String)` (entrée utilisateur dans le tour en cours),
+    `CancelTurn`, `Quit`, `RefreshTodo`, `RefreshDirtyFiles`, `PollRuns`, `NewSession`,
+    `ListSessions`, `ResumeSession(SessionId)`.
   @update(state, action) -> (AppState, Vec<Effect>) — totale, sans panique sur toute entrée.
 
 Handles:
   Touches (état `Idle` ou `Running`) :
-    Entrée — envoie la saisie (non vide) : `StartTurn` ; ignorée avec un indice pendant un tour.
+    Entrée — saisie non blanche : au repos, `StartTurn` ; PENDANT un tour, `InjectInput` (aucun
+      second tour) et l'élément `User` est marqué `during_turn` (`chat#FR-2`).
     Alt+Entrée ou Ctrl+J — nouvelle ligne dans la saisie.
-    Ctrl+C — pendant un tour : `CancelTurn` (la transcription reçoit `Interrupted`) ; au repos : vide
-      la saisie ; deux Ctrl+C consécutifs au repos sur saisie vide : `Quit` (`quit_armed`).
+    Ctrl+C — pendant un tour : `CancelTurn` (la transcription reçoit `Interrupted`, le texte déjà
+      reçu est gardé) ; au repos : vide la saisie ; deux Ctrl+C consécutifs au repos sur saisie
+      vide : `Quit` (`quit_armed`).
     Ctrl+D — saisie vide : `Quit` ; sinon supprime le caractère sous le curseur.
-    Haut/Bas — historique de saisie (curseur en première/dernière ligne) ; PgUp/PgDn et molette —
-      défilement de la transcription ; Fin — retour au suivi de la fin ; Ctrl+L — rafraîchit.
-    Tab / Maj+Tab — déplace la sélection entre éléments repliables de la transcription ;
-      Espace sur une sélection — replie/déplie (appels d'outils et raisonnement) ; Ctrl+R — replie ou
-      déplie tous les raisonnements ; Ctrl+T — affiche ou masque le panneau des tâches.
-  Commandes slash (une ligne commençant par `/`) : `/help`, `/new` (nouvelle conversation :
-    `NewConversation`), `/agent <nom>` (`SwitchAgent`, valable au tour suivant), `/todo`
-    (bascule du panneau), `/quit`. Une commande inconnue produit une `Notice`, jamais un tour.
-  Événements de l'agent : `Token`/`ReasoningDelta` prolongent le dernier bloc assistant/raisonnement ;
-    `ToolCall` ajoute un élément ; `ToolResult` complète l'appel de même `id` (replié) ; `Subagent*`
-    imbriquent les éléments du sous-agent ; `Usage` cumule ; `ToolUnavailable` et `Error` deviennent
-    des `Notice` ; `Done` ferme le bloc. L'état `todo` est relu après chaque `ToolCall` d'outil de
-    tâches.
-  Défilement : suit la fin tant que l'utilisateur n'a pas remonté ; remonter fige la position,
-    revenir en bas (ou Fin) reprend le suivi.
-  Tour terminé en erreur : `Notice(error, …)` visible (contrairement à l'ancien REPL, aucune
-    erreur n'est silencieuse).
+    Haut/Bas — historique de saisie ; PgUp/PgDn et molette — défilement ; Fin — retour au suivi ;
+      Ctrl+L — rafraîchit.
+    Tab / Maj+Tab — sélection entre éléments repliables ; Espace sur une sélection — replie ou
+      déplie (exécutions de script) ; Ctrl+T — affiche ou masque le panneau des tâches.
+  Commandes slash : `/help`, `/new` (`NewSession`), `/todo` (bascule du panneau), `/sessions`
+    (`ListSessions`, puis choix d'une session : `ResumeSession`), `/quit`. `/agent` n'existe pas
+    (l'agent découle du contexte). Une commande inconnue produit une `Notice`, jamais un tour ; un
+    message commençant par `/` s'écrit `//` (`chat#FR-8`).
+  Événements de session (`Event` de lymaille) : `TextDelta` prolonge le dernier bloc assistant ;
+    `TurnEnded` ferme le bloc (le texte complet de `response` fait foi) ; `Script` ajoute un élément
+    `Script` replié (source : l'événement d'audit) ; `McpCall` complète les `functions` du script en
+    cours ; `TodoChanged` ⇒ `RefreshTodo` ; `MemoryChanged` ⇒ `Notice` (niveau et identifiant, jamais
+    le corps) ; `TokenUsage` cumule ; `InferenceRetry`, `McpReconnect`, `Overrun`, `EmptyResponse`,
+    `ResponseTruncated`, `TurnLeaseLost` ⇒ `Notice` ; `TitleChanged` met à jour le titre ;
+    `RunEnded`/`RunInterrupted` ⇒ mise à jour de la ligne `Subagent`. Le raisonnement du modèle n'est
+    pas affiché (`chat#DEC-2`). Toute autre variante : ignorée sans erreur.
+  Fin de tour (`TurnFinished`) : succès ⇒ `Idle`, `RefreshDirtyFiles` (avec sandbox) ; erreur ⇒ `Notice`
+    d'erreur visible et `Idle` ; annulé ⇒ `Interrupted` conservé, `Idle`. Aucune erreur n'est
+    silencieuse (`chat#FR-7`).
+  Sondage : `Tick` émet `PollRuns` à intervalle réduit tant qu'un `Subagent` est `Running`.
+  Défilement : suit la fin tant que l'utilisateur n'a pas remonté ; remonter fige la position, revenir
+    en bas (ou Fin) reprend le suivi.
 
 Must:
   Rester pur : aucune I/O, aucune horloge (le temps entre par `Tick`), aucun aléa.
-  Être total : toute séquence d'actions, y compris des événements d'agent dans un ordre inattendu,
-    laisse un état valide.
-  Ne jamais perdre de texte : ce que l'agent a émis reste dans la transcription même si le tour
-    est annulé ou en erreur.
+  Être total : toute séquence d'actions, y compris des événements dans un ordre inattendu, laisse
+    un état valide.
+  Ne jamais perdre de texte : ce que l'agent a émis reste dans la transcription même si le tour est
+    annulé ou en erreur.
   Utiliser des opérations vérifiées/saturantes pour tout indice et défilement.
-  Garder les erreurs visibles (Notice), jamais avalées.
 
 Must not:
   Lancer un tour depuis une saisie vide ou blanche.
-  Interpréter une saisie commençant par `//` comme une commande (échappement : un message
-    commençant par `/` s'écrit `//`).
+  Poser une demande de confirmation en cours de session (`chat#FR-10`).
+  Interpréter une saisie commençant par `//` comme une commande.
 
-Scenario: envoi_d_un_message
+Scenario: envoi d'un message au repos
   Given une saisie « bonjour » au repos
   When Entrée
-  Then effet `StartTurn("bonjour")`, état `Running`, élément `User("bonjour")`, saisie vidée, historique mis à jour
+  Then effet `StartTurn("bonjour")`, état `Running`, élément `User` non marqué, saisie vidée, historique mis à jour
 
-Scenario: saisie_vide_n_envoie_rien
+Scenario: saisie vide n'envoie rien
   Given une saisie blanche
   When Entrée
   Then aucun effet
 
-Scenario: entree_pendant_un_tour
+Scenario: message pendant un tour
   Given l'état `Running`
-  When Entrée avec une saisie
-  Then aucun `StartTurn`, une `Notice` « tour en cours »
+  When Entrée avec une saisie (`AC-2`)
+  Then effet `InjectInput`, aucun `StartTurn`, élément `User` marqué `during_turn`
 
-Scenario: ctrl_c_annule_le_tour
-  Given l'état `Running`
+Scenario: Ctrl+C annule le tour
+  Given l'état `Running` avec du texte déjà reçu
   When Ctrl+C
-  Then effet `CancelTurn`, élément `Interrupted`, état `Idle`
+  Then effet `CancelTurn`, élément `Interrupted`, le texte reçu est conservé (`AC-3`)
 
-Scenario: double_ctrl_c_quitte
+Scenario: double Ctrl+C quitte
   Given l'état `Idle` et une saisie vide
   When Ctrl+C deux fois de suite
   Then effet `Quit` au second
 
-Scenario: ctrl_d_quitte_sur_saisie_vide
-  Given une saisie vide
-  When Ctrl+D
-  Then effet `Quit`
-
-Scenario: jetons_prolongent_le_dernier_bloc
+Scenario: fragments de texte prolongent le dernier bloc
   Given un bloc assistant en cours
-  When trois `Token` arrivent
-  Then un seul bloc contient la concaténation
+  When trois `TextDelta` arrivent puis `TurnEnded`
+  Then un seul bloc, dont le texte final est `response`
 
-Scenario: appel_d_outil_et_resultat
-  Given un `ToolCall` d'id `t1`
-  When le `ToolResult` d'id `t1` arrive
-  Then l'élément porte le résultat, replié
+Scenario: exécution de script repliée
+  Given un événement `Script`
+  When il arrive
+  Then un élément `Script` replié (une ligne), script et sortie conservés, dépliable par Espace (`AC-4`)
 
-Scenario: suivi_de_la_fin
+Scenario: suivi de la fin
   Given une transcription plus haute que l'écran
-  When des jetons arrivent sans que l'utilisateur ait remonté
+  When des fragments arrivent sans que l'utilisateur ait remonté
   Then le défilement reste en bas ; après un PgUp il ne bouge plus tout seul
 
-Scenario: commande_slash_inconnue
-  Given la saisie `/inconnue`
+Scenario: commande slash inconnue et /agent
+  Given les saisies `/inconnue` et `/agent x`
   When Entrée
-  Then une `Notice`, aucun tour
+  Then une `Notice` « commande inconnue », aucun tour (`AC-5`)
 
-Scenario: echappement_double_slash
-  Given la saisie `//ls`
+Scenario: échappement double slash
+  Given la saisie `//ceci`
   When Entrée
-  Then `StartTurn("/ls")`
+  Then `StartTurn("/ceci")` (`AC-5`)
 
-Scenario: agent_indisponible_visible
-  Given un événement `ToolUnavailable { server: "grafana" }`
+Scenario: avertissements de session visibles
+  Given `InferenceRetry`, `McpReconnect` et `Overrun`
+  When ils arrivent
+  Then trois `Notice` visibles
+
+Scenario: changement de mémoire sans corps
+  Given `MemoryChanged { level, id }`
   When il arrive
-  Then une `Notice` d'avertissement mentionnant « grafana »
+  Then une `Notice` avec niveau et identifiant, jamais le corps
 
-Scenario: erreur_de_tour_visible
+Scenario: erreur de tour visible
   Given `TurnFinished(Err(..))`
   When il arrive
   Then une `Notice` d'erreur et l'état `Idle`
 
-Scenario: sequence_inattendue
-  Given un `ToolResult` d'un `id` inconnu, puis `Done` sans bloc
+Scenario: panneau des tâches
+  Given `TodoChanged` puis `Todo` de deux éléments, puis Ctrl+T
+  When ils arrivent
+  Then le panneau liste deux tâches et devient visible
+
+Scenario: ligne de sous-agent sondée
+  Given un `Subagent` `Running`
+  When `Runs` rapporte sa fin
+  Then la ligne passe à `Ended`
+
+Scenario: séquence inattendue
+  Given un `McpCall` sans script en cours, puis `TurnEnded` sans bloc
   When ils arrivent
   Then aucun plantage, l'état reste valide
 
-Scenario: panneau_des_taches
-  Given un outil de tâches qui pose deux éléments
-  When le `ToolCall` correspondant arrive puis Ctrl+T
-  Then le panneau liste deux tâches et devient visible
+Tasks:
+  [ ] `state.rs` adapté (E7) : `ChatEvent` → `Event` de lymaille ; tests purs de chaque Scenario.

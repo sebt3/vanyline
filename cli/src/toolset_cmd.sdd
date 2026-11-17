@@ -1,77 +1,54 @@
-Spec: ToolsetCmd
+Spec: Toolset cmd — `vanyline toolset list|promote`
+
+Platform: Rust/vanyline-cli/clap-derive
 
 Purpose:
-  Déclaration clap de la sous-commande `toolsets` du CLI `vanyline` : un énuméré
-  `Subcommand` à un seul variant, purement déclaratif — aucun comportement propre dans
-  ./toolset_cmd.rs. Le contrat d'exécution (listing des toolsets depuis le store de
-  config) vit dans `@run_toolsets` de ./main.rs ; les méthodes RPC `config/toolsets*`
-  (lecture + écriture) sont un contrat distinct de `./rpc/handlers.rs`, sans lien avec ce
-  fichier. Spec minimale sur le modèle `lib/src/builtin/mod.sdd` (règle fichier déclaratif
-  de `../../vanyline.sdd`).
+  Les commandes de gestion des toolsets locaux : lister les actifs et les brouillons, et PROMOUVOIR un
+  brouillon (`hote#DEC-1`). La promotion est l'action humaine hors session qui rend actif un toolset
+  écrit par un agent ou reçu par synchronisation ; elle n'est atteignable par aucun chemin de session.
 
 Owns:
   ./toolset_cmd.rs
 
-Can read:
-  ./main.rs
-
-Structure:
-  ./toolset_cmd.rs — `use clap::Subcommand;` puis `@Commands` (`pub enum`, derive
-  `Subcommand`) avec l'unique variant unitaire `List`, doc comment `/// List configured
-  toolsets`. Rien d'autre.
-  ./main.rs — consomme ce type : variant `Commands::Toolsets(#[command(subcommand)]
-  toolset_cmd::Commands)` (nom de commande clap dérivé : `toolsets`) et dispatch
-  `Some(Commands::Toolsets(cmd)) => run_toolsets(cmd)` vers `@run_toolsets`, qui résout
-  les couches de config (`discover_fs_store`), liste via
-  `ConfigStore::list_toolsets` et imprime une ligne `nom | source | description` par
-  toolset (`-` si description absente), ou `No toolsets configured.` si vide.
+References:
+  /dsd/cli/hote.md — `DEC-1`, `DEC-2`
+  ./host/toolset_store.sdd ./host/layers.sdd
 
 Exposes:
-  @Commands — énuméré `pub` d'un seul variant unitaire `List` ; monté dans l'arborescence
-  clap de ./main.rs sous `vanyline toolsets list`.
+  @Commands — `list [--json]` ; `promote <nom> [--level user|shared]` (défaut `user`).
+  @run_toolset(commande, global) -> `Outcome`.
 
 Handles:
-  `vanyline toolsets list` — parse uniquement ici ; exécution déléguée à `@run_toolsets`
-  (./main.rs).
-  `vanyline toolsets --help` / `vanyline toolsets` sans sous-commande — texte généré par
-  clap depuis la doc comment du variant `List`.
+  `list` : actifs et brouillons des deux niveaux, avec leur niveau et leur état (actif, brouillon).
+  `promote` : appelle @FileToolsets::promote ; affiche le nom, le niveau et les droits que le toolset
+    demande (exigences) AVANT de promouvoir et exige `--yes` pour ne pas interroger ; sans
+    `--yes`, liste et s'arrête (code 2, aucune interaction, comme `sync pull`). Un brouillon absent ou
+    invalide : code 1 avec la cause.
 
 Must:
-  Exposer exactement un variant `List`, sans argument ni option propre.
-  Conserver le nom de variant `List` : c'est lui qui définit le segment CLI `list`
-  (aucun attribut `#[command(name = ...)]` ne le renomme).
+  Ne promouvoir qu'un brouillon explicitement nommé.
 
 Must not:
-  Porter de logique d'exécution (accès store, affichage, code de sortie) : tout reste
-  dans ./main.rs et la suite RPC dans ./rpc/handlers.rs.
-  Exposer une sous-commande d'écriture (create/update/delete) : seule la lecture existe
-  côté CLI à ce jour, l'écriture n'existe que via RPC (`config/toolsets/create` etc.).
+  Promouvoir implicitement (aucun `--all`).
 
-Scenario: vanyline_toolsets_list_se_parse_en_commands_toolsets_list
-  Given l'arborescence clap de ./main.rs
-  When `Cli::try_parse_from` reçoit `["vanyline", "toolsets", "list"]`
-  Then le parse réussit et la commande est `Commands::Toolsets(toolset_cmd::Commands::List)`
+Scenario: promotion confirmée
+  Given un brouillon valide
+  When `toolset promote x --yes`
+  Then actif au niveau demandé, brouillon supprimé
 
-Scenario: une_sous_commande_inconnue_de_toolsets_est_rejetee
-  Given l'arborescence clap de ./main.rs
-  When `Cli::try_parse_from` reçoit `["vanyline", "toolsets", "supprimer"]`
-  Then le parse échoue (sous-commande inexistante, aucun variant ne la porte)
+Scenario: sans confirmation
+  Given un brouillon valide
+  When `toolset promote x` sans `--yes`
+  Then les exigences sont listées, rien n'est promu, code 2
 
-Depends on:
-  `clap::Subcommand` — derive générant le parseur et l'aide.
-  ./main.rs — seul consommateur du type (branchement `Commands::Toolsets`).
+Scenario: brouillon invalide
+  Given un brouillon refusé par la validation
+  When `toolset promote x --yes`
+  Then code 1, l'actif inchangé
 
 Tasks:
-  [?] Le doc comment dit « List configured toolsets » alors que `@run_toolsets` affiche
-    aussi la source de couche et la description — trancher avec Sébastien : le texte de
-    l'aide clap est-il suffisant ou doit-il décrire la sortie ?
-  [?] Asymétrie CLI/RPC : le CLI n'expose que `list` alors que ./rpc/handlers.rs offre
-    create/update/delete sur le même domaine — confirmer que c'est voulu (la spec CLI ne
-    doit pas les ajouter sans décision de Sébastien).
-  [ ] Si un variant est ajouté (ex: `Show { name }`), étendre cette spec (Structure,
-    Exposes, Scenario de parse) AVANT toute implémentation, et mettre à jour le match de
-    `@run_toolsets` en conséquence.
-
-Done when:
-  ./toolset_cmd.rs continue de ne porter que l'énuméré `@Commands` à un variant `List` ;
-  tout variant ou option ajouté exige d'étendre cette spec en conséquence.
+  [ ] `toolset_cmd.rs` et ses tests — E9.
+  [?] Les anciennes commandes `models`, `skills`, `mcp` (`model_cmd.sdd`, `skill_cmd.sdd`,
+    `mcp_cmd.sdd`) lisaient `cfgstore` : retirées avec lui (E11), la configuration s'édite à la main
+    dans les fichiers des niveaux et `config check` la vérifie. Confirmer ce retrait ou garder des
+    commandes de lecture `agent|profile|provider list|show` ?

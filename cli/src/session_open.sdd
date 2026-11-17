@@ -1,0 +1,79 @@
+Spec: Session open — ouverture et reprise d'une session lymaille
+
+Platform: Rust/vanyline-cli — lymaille 0.3
+
+Purpose:
+  Le chemin commun à `chat` et `run` pour obtenir une session prête à conduire un tour : résout les
+  couches, dérive le contexte de travail, prend le verrou de la session, ouvre une session neuve ou
+  reprend une session existante, et assemble les dépendances de lymaille avec les stores de l'hôte
+  (`hote#FR-7`, `FR-10`, `chat#FR-1`, `chat#FR-9`, `batch#FR-1`). Un seul assemblage, partagé.
+
+Owns:
+  ./session_open.rs
+
+References:
+  /dsd/cli/hote.md — `FR-7`, `FR-8`, `FR-10`
+  /dsd/cli/chat.md — `FR-1`, `FR-9`
+  /dsd/cli/batch.md — `FR-1`
+  ./host/mod.sdd ./host/layers.sdd ./host/context_derive.sdd ./host/owner_auth.sdd
+  ./host/session_store.sdd ./host/session_index.sdd ./host/process_lock.sdd ./host/audit.sdd
+
+Exposes:
+  @SessionRequest — { @context: `String` (projet), @sandbox: `Option<String>`, @resume: @Resume,
+    @profile: `Option<String>` (`-m`), @repo: `Option<PathBuf>`, @namespace: `Option<String>` } ;
+    @Resume — `New` | `Last` (`-c`) | `Id(SessionId)` (`--resume`).
+  @OpenedSession — session lymaille prête (état, `TurnRunner`, handle d'annulation, `EventSink`
+    composé de l'audit et du sink demandé), @SessionLock, identifiant, titre, contexte dérivé.
+  @open(demande: @SessionRequest, sink: impl EventSink) -> `Result<OpenedSession, OpenError>` (async).
+
+Handles:
+  Ordre : (1) `Layers::discover` ; (2) client Kubernetes du kubeconfig (échec ⇒ `OpenError::Cluster`
+    avec la cause, `VNL-K8S-001`) ; (3) @derive_context ; (4) résolution de la session
+    (`Last` ⇒ @latest_for_context ; `Id` ⇒ chargement ; `New` ⇒ identifiant neuf) ; (5)
+    @SessionLock::acquire ; (6) chargement de l'état ou création ; (7) `resolve_start` de lymaille
+    sur le contexte dérivé (agent principal par défaut du contexte) ; (8) assemblage des stores, de
+    @OwnerAuth, de @Secrets et du détecteur de secrets.
+  `Last` sans session pour ce contexte : une session neuve (pas d'erreur) avec une notice ;
+    `Id` inconnu ou d'un autre contexte : `OpenError::Unknown` qui nomme l'identifiant.
+  Le profil `-m` désigne un profil de modèle du catalogue (`batch` « Compatibilité ») ; absent, celui
+    de l'agent. Profil inconnu : `OpenError::Unknown`.
+  Les relais `fs` et `shell` de lymaille restent désactivés : toute action sur le code passe par le
+    MCP de la sandbox (`dsd/cli.md#DEC-2`).
+  Aucune approbation de commande en session (`chat#FR-10`).
+
+Must:
+  Prendre le verrou avant de lire l'état et le garder dans @OpenedSession.
+  Ne jamais écrire sur le cluster.
+  Libérer le verrou si l'ouverture échoue à une étape ultérieure.
+
+Must not:
+  Ouvrir une session sans contexte dérivé valide ; reprendre une session d'un autre contexte.
+
+Scenario: session neuve
+  Given un projet et aucun historique
+  When @open avec `New`
+  Then un @OpenedSession à identifiant neuf, verrou pris, agent du contexte
+
+Scenario: reprise de la dernière session
+  Given deux sessions du contexte
+  When @open avec `Last`
+  Then la plus récente, historique chargé
+
+Scenario: session déjà ouverte
+  Given un verrou tenu par un autre processus
+  When @open avec `Id`
+  Then `OpenError` (@HostError::Locked), aucun chargement
+
+Scenario: identifiant d'un autre contexte
+  Given une session du contexte B
+  When @open avec `Id` sur le contexte A
+  Then `OpenError::Unknown`
+
+Scenario: cluster injoignable
+  Given aucun kubeconfig joignable
+  When @open
+  Then `OpenError::Cluster` (`VNL-K8S-001`), aucun verrou conservé
+
+Tasks:
+  [ ] `session_open.rs` et ses tests (hôte simulé par les seams des stores ; cluster simulé).
+  [?] Nom du ContextType et de l'agent par défaut livrés avec la CLI : voir `./host/context_derive.sdd`.

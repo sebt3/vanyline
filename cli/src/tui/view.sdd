@@ -1,14 +1,14 @@
 Spec: TUI view — rendu ratatui
 
-Platform: Rust/vanyline-cli/ratatui
+Platform: Rust/vanyline-cli/ratatui — vocabulaire lymaille (`dsd/cli/chat.md#DEC-1`)
 
 Purpose:
   Rendu pur de l'état du chat (./state.sdd) dans un tampon ratatui : `render(frame, state)`. Aucune
   I/O, aucune horloge (l'animation d'attente vient de l'état). Testable avec `TestBackend`.
-  Disposition : en-tête (agent, conversation, état), transcription défilante, panneau de tâches
+  Disposition : en-tête (agent, session, état), transcription défilante, panneau de tâches
   (repliable, à droite sur terminal large, au-dessus de la saisie sinon), zone de saisie
   multi-lignes (hauteur adaptative, de 1 à 8 lignes), barre d'état (touches utiles, jetons,
-  résumé git, indice d'état). Fichier neuf, conception.
+  nombre de fichiers modifiés, indice d'état). Adapté à l'élément `Script` et aux lignes de sous-agent.
 
 Owns:
   ./view.rs
@@ -25,15 +25,17 @@ Exposes:
     couleurs sobres et lisibles à 16 couleurs, jamais de dépendance à une police spéciale.
 
 Handles:
-  Transcription : éléments dans l'ordre ; `User` préfixé d'un marqueur ; `Assistant` rendu par
-  ./markdown.sdd ; `Reasoning` replié en une ligne `▸ raisonnement (N lignes)`, déplié en
-  style atténué ; `ToolCall` en une ligne `▸ nom(args tronqués)` avec statut (`…` en cours, `✓`, `✗`),
-  déplié : arguments et résultat, bornés à 40 lignes avec marqueur de troncature ; `Subagent` indenté
-  avec son agent ; `Notice` colorée par niveau ; `Interrupted` en gras atténué. Défilement :
-  décalage tiré de l'état, indicateur « ↓ nouveau » quand l'utilisateur a remonté et que du contenu
-  arrive. Sélection (Tab) surlignée. Barre d'état : animation d'attente (un caractère tournant
-  d'après `Tick`), jetons entrée/sortie, résumé git, rappel `Ctrl-D quitter · /help`. Terminal
-  plus petit que 40×10 : message « terminal trop petit ».
+  Transcription : éléments dans l'ordre ; `User` préfixé d'un marqueur (marqué « pendant le tour »
+  quand `during_turn`) ; `Assistant` rendu par ./markdown.sdd ; `Script` en UNE ligne
+  `▸ script · fonctions MCP appelées · durée · ✓/✗` (statut sans couleur : `…` en cours, `✓`, `✗`),
+  déplié : le script complet puis sa sortie ou son erreur, bornés à 40 lignes avec marqueur de
+  troncature (`dsd/cli.md#DEC-8`) ; `Subagent` en une ligne de statut (agent, `…`/`✓`/`✗`) ; `Notice`
+  colorée par niveau ; `Interrupted` en gras atténué. Le raisonnement du modèle n'est pas affiché
+  (`chat#DEC-2`). Défilement : décalage tiré de l'état, indicateur « ↓ nouveau » quand l'utilisateur
+  a remonté et que du contenu arrive. Sélection (Tab) surlignée. Barre d'état : animation d'attente
+  (un caractère tournant d'après `Tick`), jetons prompt/completion, nombre de fichiers modifiés du
+  worktree quand `dirty_files` est `Some` (rien sinon, `chat#FR-12`), rappel `Ctrl-D quitter · /help`.
+  Terminal plus petit que 40×10 : message « terminal trop petit ».
 
 Must:
   Ne jamais paniquer, quelle que soit la taille (y compris 0×0 et 1×1).
@@ -58,12 +60,12 @@ Scenario: panneau_des_taches_large
   When @render
   Then le panneau est à droite ; à 80 colonnes il est au-dessus de la saisie
 
-Scenario: appel_d_outil_replie_et_deplie
-  Given un `ToolCall` replié, puis déplié
+Scenario: script replié puis déplié
+  Given un élément `Script` replié, puis déplié
   When @render
-  Then une ligne `▸ nom(args…)` puis arguments et résultat bornés
+  Then une ligne `▸ script …` avec durée et statut, puis le script complet et sa sortie bornés
 
-Scenario: resultat_tronque
+Scenario: sortie tronquée
   Given un résultat de 500 lignes déplié
   When @render
   Then au plus 40 lignes et un marqueur de troncature
@@ -75,13 +77,18 @@ Scenario: terminal_minuscule
 
 Scenario: statut_sans_couleur
   Given un rendu en noir et blanc
-  When un appel d'outil réussit puis un autre échoue
+  When un script réussit puis un autre échoue
   Then `✓` et `✗` les distinguent
 
 Scenario: indicateur_nouveau_contenu
   Given l'utilisateur remonté dans la transcription et un jeton qui arrive
   When @render
   Then « ↓ nouveau » est visible
+
+Scenario: nombre de fichiers modifiés
+  Given `dirty_files` à `Some(3)`, puis `None`
+  When @render
+  Then « 3 fichiers modifiés » dans la barre d'état, puis rien
 
 Scenario: curseur_dans_la_saisie
   Given une saisie de deux lignes avec du texte Unicode large
@@ -92,3 +99,6 @@ Scenario: saisie_adaptative
   Given une saisie de 12 lignes
   When @render
   Then la zone de saisie occupe 8 lignes au plus et fait défiler son contenu
+
+Tasks:
+  [ ] `view.rs` adapté (E7) : éléments `Script` et `Subagent`, barre d'état ; tests `TestBackend` de chaque Scenario.

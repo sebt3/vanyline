@@ -1,19 +1,16 @@
 Spec: TUI — chat interactif en ratatui
 
-Platform: Rust/vanyline-cli/ratatui/crossterm/tokio
+Platform: Rust/vanyline-cli/ratatui/crossterm/tokio — lymaille 0.3
 
 Purpose:
-  Le chat INTERACTIF du CLI (`vanyline` sans sous-commande) devient une interface terminale
-  plein écran en ratatui (décision du 2026-10-04) ; le mode `run <message>` (one-shot, sortie
-  texte ou JSONL) est inchangé. Ce module est l'ossature : initialisation et restauration du
-  terminal, boucle d'événements (clavier, flux d'événements de l'agent, horloge de rafraîchissement,
-  fin de tour) et branchement sur `vanyline_lib::session::run_agent_turn`. L'architecture est
-  « état pur + vue » : ./state.sdd (mise à jour pure, sans I/O), ./view.sdd (rendu pur dans un
-  tampon ratatui), ./editor.sdd (zone de saisie), ./markdown.sdd (rendu du texte de l'agent),
-  ./sink.sdd (pont entre l'agent et la boucle). Seul ce fichier fait de l'I/O terminal, ce qui
-  rend tout le reste testable avec le `TestBackend` de ratatui. Le TUI n'utilise jamais
-  `println!`/`eprintln!` (harnais clippy) : tout passe par le backend ratatui. Fichier neuf,
-  conception.
+  Le chat INTERACTIF du CLI : interface terminale plein écran en ratatui, conservée de l'ancienne
+  version (`dsd/cli/chat.md#DEC-1`) avec un backend remplacé : la session est une session lymaille
+  ouverte par `../session_open.sdd`, les événements sont les `Event` de lymaille. Ce module est
+  l'ossature : initialisation et restauration du terminal, boucle d'événements (clavier, flux
+  d'événements de session, horloge, fin de tour) et pilotage de la session par un `TurnRunner`.
+  L'architecture est « état pur + vue » : ./state.sdd, ./view.sdd, ./editor.sdd, ./markdown.sdd,
+  ./sink.sdd. Seul ce fichier fait de l'I/O terminal. Le TUI n'utilise jamais `println!`/`eprintln!`
+  : tout passe par le backend ratatui, sauf la ligne finale écrite après restauration.
 
 Owns:
   ./mod.rs
@@ -24,175 +21,128 @@ Can read:
   ./editor.sdd
   ./markdown.sdd
   ./sink.sdd
+  ../session_open.sdd
   ../chat.sdd
-  ../store.sdd
-  /lib/src/session.sdd
-  /lib/src/event.sdd
   /tooling.sdd
 
+References:
+  /dsd/cli/chat.md — `FR-1` à `FR-12`, `DEC-2`, `DEC-3`, `AC-1` à `AC-8`
+
 Exposes:
-  @run_tui(session: TuiSession) -> Result<(), CliError> (async) — point d'entrée du mode
-    interactif, appelé par ../chat.rs. @TuiSession : `{ ctx: SessionContext (sink remplacé par
-    @TuiSink), conversation: Conversation, agent: String, workspace_context: Option<String>,
-    workspace_summary: Vec<String>, git_root: Option<PathBuf>, toolbox: Option<@Arc<crate::
-    ToolboxTarget>> (cible du jeton d'Owner par tour — `None` = sans toolbox, requis par le
-    §Must « jeton du toolbox par tour » de ../chat.sdd), mouse: bool (capture de la souris —
-    molette — activée EN DUR à `true` : aucun drapeau `--no-mouse` n'existe dans la grammaire
-    clap, porte du `[?]` ouvert ci-dessous — ratifié 2026-10-14 pour les deux champs) }`.
+  @run_tui(session: @OpenedSession, options: @TuiOptions) -> `Result<TuiExit, CliError>` (async) —
+    point d'entrée du mode interactif, appelé par ../chat.rs. @TuiOptions { @mouse: `bool` (capture de
+    la molette, `true` en dur), @sandbox: `Option<SandboxHandle>` (pour l'état git, `None` sans
+    sandbox) }. @TuiExit — `Normal` | `Signal`.
   @TerminalGuard — garde RAII : active le mode raw et l'écran alternatif à la création, les
     RESTAURE dans `Drop`, y compris sur panique (un hook de panique restaure le terminal AVANT
-    d'afficher quoi que ce soit) et sur SIGTERM/SIGHUP.
+    d'afficher quoi que ce soit) et sur SIGTERM/SIGHUP (`chat#FR-11`, `AC-7`).
 
 Handles:
-  Prérequis : stdin ET stdout sont des terminaux ; sinon @run_tui n'est pas appelé (../chat.sdd
-  rend l'erreur d'usage). Taille minimale 40×10 ; en dessous, la vue affiche « terminal trop
-  petit » sans planter.
-  Boucle : `tokio::select!` sur (1) `crossterm::event::EventStream` (touches, collage, redimension,
-  souris), (2) le récepteur d'@TuiEvent de @TuiSink (jetons, appels d'outils, erreurs, usage…),
-  (3) la fin de la tâche de tour (résultat), (4) une horloge de 100 ms (animation d'attente
-  ET polling de la garde de tour — cf. §Must « Panique de la tâche de tour ») ;
-  chaque événement devient une `Action` appliquée par `state::update`, qui rend des `Effect` exécutés
-  ici (lancer un tour, annuler, sauvegarder, quitter) ; le rendu (`view::render`) suit chaque
-  changement, au plus 30 fois par seconde (les jetons rapprochés sont fusionnés).
-  Tour : lancé dans une tâche `tokio` dédiée avec le @SessionContext (sink = @TuiSink) ; un seul
-  tour à la fois. Annulation : abandon de la tâche (les connexions MCP se ferment à la chute de
-  leur garde) ; un tour annulé n'est PAS persisté. Fin de tour réussie : persistance de la
-  conversation comme avant (message utilisateur, message assistant, `todo`, `store::save_conversation`),
-  puis `git diff --shortstat` dans la barre d'état.
-  Collage : les collages multi-lignes arrivent en un seul événement et entrent dans la zone de
-  saisie sans déclencher d'envoi.
-  Sortie : écran alternatif quitté et terminal restauré D'ABORD, puis UNE ligne finale écrite
-  APRÈS la restauration, hors écran alternatif (`stdout` direct depuis la couche de
-  restauration, jamais par le backend ratatui déjà mort) — `conversation: <id>` et reprise
-  `vanyline -c` — pour que le terminal garde une trace.
+  Prérequis : stdin ET stdout sont des terminaux (vérifié par ../chat.sdd avant l'ouverture). Taille
+  minimale 40×10 ; en dessous, la vue affiche « terminal trop petit » sans planter.
+  Boucle : `tokio::select!` sur (1) `crossterm::event::EventStream`, (2) le récepteur d'`Event` de
+  @TuiSink, (3) la fin de la tâche de tour, (4) une horloge de 100 ms (animation, sondage de la
+  garde de tour, sondage des runs de sous-agents) ; chaque événement devient une `Action` appliquée
+  par `state::update`, dont les `Effect` sont exécutés ici ; le rendu suit chaque changement, au
+  plus 30 fois par seconde (les fragments rapprochés sont fusionnés).
+  Tour : lancé dans une tâche `tokio` dédiée sur le `TurnRunner` de lymaille avec le sink composé
+  (audit + @TuiSink) ; un seul tour à la fois. `InjectInput` passe par l'entrée utilisateur de
+  lymaille (le message rejoint le tour en cours). `CancelTurn` appelle le handle d'annulation de
+  lymaille : le tour annulé est SAUVEGARDÉ par lymaille avec l'issue `Cancelled` (`chat#DEC-3`) — la CLI
+  n'ajoute aucune règle de non-sauvegarde, et la reprise connaît les scripts déjà exécutés.
+  Persistance : faite par lymaille dans le `SessionStore` de l'hôte à la fin de chaque tour ; ce
+  module ne sauvegarde rien lui-même.
+  État du worktree : après chaque tour, avec sandbox, `GET /git/status` avec le jeton d'Owner
+  (client de la sandbox de `vanyline-lib`, `dsd/cli.md#DEC-12`) ; le nombre de fichiers modifiés va
+  à la barre d'état ; un échec est une notice, jamais bloquant.
+  Sous-agents : tant qu'une ligne `Subagent` est `Running`, la boucle sonde le registre des runs de
+  lymaille (`PollRuns`).
+  Collage : les collages multi-lignes arrivent en un seul événement et entrent dans la zone de saisie
+  sans déclencher d'envoi.
+  Sortie : écran alternatif quitté et terminal restauré D'ABORD, puis UNE ligne finale écrite APRÈS la
+  restauration, hors écran alternatif — `session: <id>` et la commande de reprise
+  (`vanyline chat --context <projet> --resume <id>`) — pour que le terminal garde une trace.
+  Verrou de session libéré à la sortie (chute de @OpenedSession).
 
 Must:
   Restaurer le terminal dans TOUS les cas de sortie (normale, erreur, panique, signal).
-  N'utiliser aucune sortie standard directe (`println!`, `print!`, `eprintln!`) : harnais clippy.
+  N'utiliser aucune sortie standard directe pendant l'écran alternatif (harnais clippy).
   Garder `state::update` et `view::render` purs et testables sans terminal.
-  N'effectuer aucune arithmétique non vérifiée (`arithmetic_side_effects` en deny) : défilement,
-    largeurs et indices utilisent `saturating_*`/`checked_*` et `u16::try_from`.
-  Ne jamais bloquer la boucle : aucune lecture ou écriture disque synchrone longue, aucun appel
-    réseau dans la boucle (le tour vit dans sa tâche).
-  Persister un tour seulement après succès (même règle que ../chat.sdd).
-  Panique de la tâche de tour — polling du @tokio::task::JoinHandle (décidé 2026-10-14) : à
-    chaque tick de l'horloge de 100 ms, la boucle sonde la garde @TurnSlot ; une tâche
-    TERMINÉE alors que la garde est encore prise (panique, ou fin anticipée sans envoi de
-    @TurnOutcome) est consommée : si un résultat est malgré tout en attente sur le canal de
-    tour, il est traité par le chemin normal (pas de double traitement) ; sinon la garde est
-    libérée, la `@JoinError` est égouttée et la boucle injecte
-    @state::Action::TurnFinished(Err(@VnyError::InternalError(…))) — l'`Error` rendue dans la
-    transcription porte le marqueur `VNL-INT-001` et le texte « tour interrompu » ; l'état ne
-    reste JAMAIS `Running` à vie et la garde libérée rend le tour suivant possible. Un tour
-    annulé par @TurnSlot::cancel (Ctrl-C) ne passe pas par là : l'abandon libère déjà la garde
-    (le Scenario @tour_annule_non_persiste reste le seul chemin d'annulation).
+  N'effectuer aucune arithmétique non vérifiée (`arithmetic_side_effects` en deny).
+  Ne jamais bloquer la boucle : aucune E/S disque synchrone longue ni appel réseau dans la boucle (le
+    tour et les sondages vivent dans leurs tâches).
+  Ne poser aucune demande de confirmation en cours de session (`chat#FR-10`).
+  Panique de la tâche de tour — polling du `JoinHandle` : à chaque tick de 100 ms, la boucle sonde la
+    garde de tour ; une tâche TERMINÉE alors que la garde est encore prise (panique, ou fin anticipée
+    sans résultat) est consommée : si un résultat est en attente il suit le chemin normal ; sinon la
+    garde est libérée et la boucle injecte `TurnFinished(Err(…))` portant le marqueur `VNL-INT-001` et
+    « tour interrompu » ; l'état ne reste JAMAIS `Running` à vie et le tour suivant devient possible.
 
 Must not:
-  Écrire sur stdout/stderr pendant que l'écran alternatif est actif, hors backend ratatui.
+  Écrire sur la sortie standard ou la sortie d'erreur pendant l'écran alternatif, hors backend.
   Lancer deux tours en parallèle.
   Laisser une panique de rendu laisser le terminal en mode raw.
+  Ajouter une règle de non-sauvegarde d'un tour annulé.
 
-Tasks:
-  [ ] Dépendances du crate `cli` : `ratatui`, `crossterm` (feature `event-stream`), `futures`,
-    `unicode-width`, `pulldown-cmark` (rendu markdown) — `textwrap` RETIRÉ 2026-10-14
-    (validateur S7 : 0 usage dans le code, dépendance fantôme) ; vérifier le harnais clippy sur ces
-    usages (casts de coordonnées, `arithmetic_side_effects`).
-  [?] Écran alternatif contre vue « inline » (`Viewport::Inline`) : l'écran alternatif perd le
-    défilement natif du terminal à la sortie (compensé par la ligne finale et `vanyline -c`) ; une
-    vue inline garde la sortie dans le tampon du terminal au prix d'un rendu plus délicat. Départ :
-    écran alternatif.
-  [?] Support de la souris (défilement à la molette) : activé par défaut ? La capture de la souris
-    empêche la sélection native du terminal (Maj+clic la rétablit). Départ : molette activée,
-    `--no-mouse` pour la désactiver.
-  [?] Le drapeau `--no-mouse` n'est PAS posé (S7, 2026-10-13) : la grammaire clap est
-    figée par chat.sdd/main.sdd (aucun flag TUI) et le défaut « molette activée » est en
-    dur. Élargir la grammaire d'un flag global `--no-mouse`, ou retirer le drapeau du
-    départ et assumer la molette toujours active ?
-  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : DÉTECTER — poller le `JoinHandle`, effet « tour interrompu » (jamais `Running` à vie) ; Scenario + test. (Question d'origine : Panique dans la tâche de tour (S7, 2026-10-13) : non détectée par la boucle — le
-    `JoinHandle` n'est pas pollé, le canal mpsc fermé par la chute de la tâche se traduit
-    par une fin de flux mais l'état reste `Running` si la panique n'a pas rendu de
-    résultat. Contracter la détection (poll du handle, effet « tour interrompu ») dans
-    §Tour, ou assumer (le cas est une bug de notre code, pas un événement utilisateur) ?)
-    — contrat posé 2026-10-14 au §Must « Panique de la tâche de tour » + Scenario
-    @tour_interrompu_panique_tache_de_tour. FAIT 2026-10-14 — validator vert :
-    `TurnSlot::take_finished` + polling au tick (try_recv d'abord, jamais de double
-    traitement), tests `tour_interrompu_panique_take_finished_egoutte_join_error` et
-    `tour_interrompu_panique_sort_de_running_sans_sauvegarde` verts ; câblage ticker vérifié
-    par lecture (pas de tty en test).
-  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : RATIFIÉ — ajouter `toolbox` et `mouse` à §Exposes. (Question d'origine : @TuiSession hors §Exposes (revue S7, 2026-10-14) : la struct réelle porte
-    `toolbox` (requis par le §Must « jeton du toolbox par tour » de `../chat.sdd` — le
-    §Exposes est inachevé sur ce point) et `mouse` (départ du `[?]` souris, en dur à
-    `true`). Ratifier ces deux champs dans §Exposes ?)
-    — RATIFIÉ, spec amendée 2026-10-14 : les deux champs figurent au §Exposes. FAIT
-    2026-10-14 — validator vert : types et défaut conformes au code (`mouse` en dur à `true`,
-    `--no-mouse` inexistant — rédaction Exposes alignée sur l'état du code, `[?]` porte
-    ouvert).
-  [x] DÉCIDÉ 2026-10-14 (revue + arbitrage Sébastien) : reformuler §Sortie en « une ligne finale écrite après restauration, hors écran alternatif ». (Question d'origine : Ligne finale de sortie « par le backend » (§Handles Sortie vs code, revue S7,
-    2026-10-14) : le code l'écrit via `std::io::Write` APRÈS restauration de l'écran
-    (commentaire « hors backend » assumé — le harnais `print_stdout` interdit d'écrire
-    dans le backend après sa chute). Reformuler §Sortie en « une ligne finale écrite après
-    restauration, hors écran alternatif », ou exiger le backend ?)
-    — spec amendée 2026-10-14 : §Sortie reformulé (« ligne finale écrite APRÈS la
-    restauration, hors écran alternatif »). FAIT 2026-10-14 — validator vert : le code écrit
-    bien la ligne via `std::io::Write` après `drop(guard)` (ordre restauration : souris,
-    écran alternatif, raw), jamais par le backend.
-  [ ] Convertir chaque Scenario en test (`TestBackend` pour la vue, tests unitaires purs pour
-    l'état).
-  [?] Hook de panique × panique de la tâche de tour (découvert à la validation P5, 2026-10-14) :
-    une panique dans la tâche de tour déclenche le hook global installé par @run_tui, qui
-    RESTAURE le terminal (écran alternatif quitté) en pleine session — avant que le tick
-    n'injecte « tour interrompu », la boucle rendant alors hors écran alternatif. La
-    restauration mérite-t-elle d'être circonscrite au thread principal / aux paniques de
-    rendu, ou assumer (cas = bug interne de notre code, terminal perdu puis repris) ?
-
-Scenario: terminal_restaure_apres_sortie_normale
+Scenario: terminal restauré après sortie normale
   Given un @TerminalGuard actif et une sortie par Ctrl-D sur saisie vide
   When la boucle se termine
-  Then raw mode et écran alternatif sont désactivés
+  Then raw mode et écran alternatif sont désactivés (`AC-7`)
 
-Scenario: terminal_restaure_apres_panique
-  Given un rendu qui panique (test avec un backend factice)
+Scenario: terminal restauré après panique
+  Given un rendu qui panique (backend factice)
   When la panique se propage
   Then le terminal est restauré avant tout message de panique
 
-Scenario: terminal_trop_petit
+Scenario: terminal trop petit
   Given une taille de 30×6
   When la vue est rendue
   Then un message « terminal trop petit » et aucun plantage
 
-Scenario: un_seul_tour_a_la_fois
+Scenario: un seul tour à la fois
   Given un tour en cours
-  When l'utilisateur appuie sur Entrée avec une saisie
-  Then aucun second tour n'est lancé, un indice « tour en cours » est affiché
+  When l'utilisateur envoie un message
+  Then aucun second tour : le message est injecté dans le tour en cours (`AC-2`)
 
-Scenario: tour_annule_non_persiste
+Scenario: tour annulé sauvegardé
   Given un tour en cours avec du texte déjà reçu
-  When l'utilisateur annule (Ctrl-C)
-  Then la tâche est abandonnée, la conversation persistée est inchangée, la transcription marque le tour « interrompu »
+  When l'utilisateur appuie sur Ctrl+C
+  Then le handle d'annulation est appelé, la transcription garde le texte et marque « interrompu », la session sauvegardée par lymaille porte l'issue `Cancelled` (`AC-3`)
 
-Scenario: tour_interrompu_panique_tache_de_tour
-  Given une tâche de tour qui panique avant d'avoir rendu de @TurnOutcome (test `tokio::test`
-    : la panique est capturée par le runtime en `JoinError`)
-  When le polling de la garde @TurnSlot au tick de 100 ms constate la tâche terminée sans
-    résultat en attente sur le canal
-  Then la garde est consommée et libérée, @state::Action::TurnFinished(Err(@VnyError::
-    InternalError(« … tour interrompu … »))) est injectée : l'état sort de `Running` vers
-    `Idle`, la transcription porte une `Error` affichée contenant `VNL-INT-001` et
-    « interrompu », AUCUN effet de sauvegarde n'émerge (le tour interrompu n'est pas persisté,
-    même règle que l'annulation), et la garde libre rend un tour suivant possible — jamais
-    `Running` à vie
+Scenario: tour interrompu par panique de la tâche
+  Given une tâche de tour qui panique sans résultat
+  When le polling constate la tâche terminée
+  Then la garde est libérée, `TurnFinished(Err)` avec `VNL-INT-001`, état `Idle`, le tour suivant est possible
 
-Scenario: tour_reussi_persiste
-  Given un tour qui se termine avec succès
-  When la boucle reçoit le résultat
-  Then message utilisateur, message assistant et `todo` sont sauvegardés, la barre d'état affiche le résumé de `git diff`
+Scenario: état du worktree après un tour
+  Given une sandbox et un tour qui modifie un fichier
+  When le tour se termine
+  Then la barre d'état montre « 1 fichier modifié » ; sans `--sandbox`, rien (`AC-8`)
 
-Scenario: collage_multiligne
+Scenario: collage multi-ligne
   Given un collage de trois lignes
   When l'événement arrive
   Then la saisie contient les trois lignes et aucun tour n'est lancé
 
-Scenario: jetons_fusionnes
-  Given 200 jetons reçus en 10 ms
+Scenario: fragments fusionnés
+  Given 200 fragments reçus en 10 ms
   When la boucle les traite
-  Then au plus un rendu par intervalle de rafraîchissement, aucun jeton perdu
+  Then au plus un rendu par intervalle de rafraîchissement, aucun fragment perdu
+
+Scenario: ligne finale de reprise
+  Given une sortie normale
+  When le terminal est restauré
+  Then une dernière ligne donne l'identifiant de session et la commande de reprise
+
+Tasks:
+  [ ] Backend remplacé (E7) : `TuiSession` → `OpenedSession`, `run_agent_turn` → `TurnRunner`, retrait de
+    l'approbation de commande, de `store::save_conversation` et du résumé `git diff --shortstat` local.
+  [ ] Dépendances du crate `cli` : `ratatui`, `crossterm` (feature `event-stream`), `futures`,
+    `unicode-width`, `pulldown-cmark` ; vérifier le harnais clippy sur ces usages.
+  [?] Écran alternatif contre vue « inline » (`Viewport::Inline`) : départ écran alternatif (perd le
+    défilement natif à la sortie, compensé par la ligne finale et `--resume`).
+  [?] Souris : molette activée en dur ; la capture empêche la sélection native du terminal (Maj+clic la
+    rétablit). Ajouter un flag global `--no-mouse` ou assumer ?
+  [?] Hook de panique × panique de la tâche de tour : le hook global restaure le terminal en pleine
+    session avant que le tick n'injecte « tour interrompu ». Circonscrire la restauration au thread
+    principal et aux paniques de rendu, ou assumer ?

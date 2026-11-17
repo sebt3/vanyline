@@ -1,0 +1,48 @@
+Spec: Sessions cmd — gestion des sessions
+
+Platform: Rust/vanyline-cli/clap-derive
+
+Purpose:
+  Les commandes `vanyline sessions list` et `vanyline sessions delete <id>` (`dsd/cli.md#FR-5` :
+  lymaille laisse le listage et la suppression à l'hôte). La reprise passe par `chat -c/--resume`
+  et `run -c/--resume`, et `/sessions` dans le TUI.
+
+Owns:
+  ./sessions_cmd.rs
+
+References:
+  /dsd/cli.md — `FR-5`
+  ./host/session_index.sdd ./host/session_store.sdd ./host/process_lock.sdd
+
+Exposes:
+  @Commands — `list [--context <projet>] [--json]` ; `delete <id>`.
+  @run_sessions(commande, global) -> `Outcome`.
+
+Handles:
+  `list` : sessions du contexte (ou de tous), plus récente d'abord : identifiant, titre, contexte,
+    tours, date ; avec `--json`, un tableau JSON. Un fichier de session illisible est signalé sur la
+    sortie d'erreur, sans interrompre le listage.
+  `delete <id>` : refuse (code 1) une session ouverte par un autre processus (@SessionLock) ;
+    supprime l'état, le journal d'audit et le verrou ; identifiant inconnu : code 1 « session
+    inconnue ». Aucune confirmation interactive.
+
+Must:
+  Ne pas toucher au cluster ni lancer de session lymaille.
+
+Scenario: liste d'un contexte
+  Given trois sessions de deux contextes
+  When `sessions list --context A`
+  Then seules celles de A, la plus récente d'abord
+
+Scenario: suppression d'une session ouverte
+  Given une session tenue par un autre processus
+  When `sessions delete <id>`
+  Then refus, code 1, la session est intacte
+
+Scenario: suppression
+  Given une session libre
+  When `sessions delete <id>`
+  Then état et journal supprimés
+
+Tasks:
+  [ ] `sessions_cmd.rs` et ses tests — E7.

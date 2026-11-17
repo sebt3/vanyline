@@ -1,0 +1,80 @@
+Spec: Script — commande `vanyline script`
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`ScratchpadEngine`)
+
+Purpose:
+  La commande batch sans LLM (`dsd/cli/batch.md`, `FR-4` à `FR-9`, `dsd/cli.md#FR-4`) : exécute un
+  fichier Rhai sur une sandbox existante avec les seuls modules que le contexte accorde, sans
+  ouvrir de session. Sert à rejouer une opération déterministe avec les mêmes modules que l'agent
+  (`cli#BO-3`).
+
+Owns:
+  ./script.rs
+
+References:
+  /dsd/cli/batch.md — `FR-4` à `FR-9`, `DEC-2`, `AC-3`, `AC-4`, `AC-5`
+  /dsd/cli.md — `BR-1`, `BR-3`, `AC-3`
+  ./host/context_derive.sdd ./host/owner_auth.sdd ./host/audit.sdd ./host/layers.sdd ./exit_code.sdd
+
+Exposes:
+  @run_script(args: @ScriptArgs, global: @GlobalOptions) -> `Outcome` (async) ;
+  @ScriptArgs — { @file: `PathBuf`, @context: `String`, @sandbox: `String` (obligatoire), @params:
+    `Vec<(String, String)>` (`--param clé=valeur`, répétable), @timeout: `Option<u64>`, @json: `bool` }.
+
+Handles:
+  Environnement d'exécution : le contexte dérivé (`context_derive`, avec `--sandbox` obligatoire) et
+    les modules que ce contexte accorde à une session (`cli#BR-3`) : un script n'a pas plus de pouvoir
+    qu'une session de ce contexte ; un module non accordé échoue (`dsd/cli.md#AC-3`). Connexion MCP à
+    la sandbox avec @OwnerAuth. Aucun accès au système de fichiers ni au shell locaux : tout passe
+    par le MCP de la sandbox.
+  `--param clé=valeur` (`FR-5`) : chaque paire devient une constante Rhai en lecture seule ; la clé est
+    un identifiant Rhai valide, unique ; clé invalide ou répétée ⇒ erreur d'usage (code 2). Une valeur
+    que le `SecretDetector` de lymaille reconnaît est refusée avant toute exécution (code 2).
+  Sortie : le texte rendu par le script va sur la sortie standard ; une erreur de script (classe et
+    position) sur la sortie d'erreur ; avec `--json`, la sortie standard porte UN objet
+    `{"status": …, "text": …}` (`FR-6`).
+  `-t N` borne l'exécution : à l'échéance, annulation, code 3 ; Ctrl+C ⇒ 130 (`FR-7`, `FR-8`).
+  Aucun délai par commande de la sandbox n'est posé par la CLI : le script passe `timeout_secs` à
+    `execute_command` s'il en a besoin (`FR-9`, `DEC-2`).
+  Chaque exécution est inscrite au journal d'audit (`script-<horodatage>.jsonl`, `./host/audit.sdd`).
+
+Must:
+  Refuser un fichier illisible ou vide (erreur d'usage, code 2).
+  Ne jamais écrire une valeur de paramètre dans un journal ni dans un message d'erreur.
+  Ne pas ouvrir de session ni appeler un LLM.
+
+Must not:
+  Offrir une sandbox éphémère (`dsd/cli.md#OI-5`) ; accepter un nom de secret en paramètre.
+
+Scenario: script correct
+  Given un script qui rend « ok » et une sandbox simulée
+  When @run_script
+  Then « ok » sur la sortie standard, code 0, un enregistrement d'audit
+
+Scenario: script en erreur
+  Given un script qui lève une erreur à la ligne 3
+  When @run_script
+  Then classe et position sur la sortie d'erreur, code 1
+
+Scenario: paramètre ressemblant à un secret
+  Given `--param api_key=<valeur ressemblant à un secret>`
+  When @run_script
+  Then refusé avant toute exécution, code 2
+
+Scenario: paramètre invalide ou répété
+  Given `--param 1x=a` puis `--param a=1 --param a=2`
+  When @run_script
+  Then code 2 dans les deux cas
+
+Scenario: module non accordé
+  Given un script qui appelle un module absent du contexte
+  When @run_script
+  Then échec (code 1), aucun effet sur la sandbox
+
+Scenario: échéance
+  Given `-t 1` et un script qui dure davantage
+  When @run_script
+  Then annulé, code 3
+
+Tasks:
+  [ ] `script.rs` et ses tests — E8.

@@ -1,0 +1,44 @@
+Spec: Config cmd — `vanyline config check`
+
+Platform: Rust/vanyline-cli/clap-derive
+
+Purpose:
+  Valide les fichiers de configuration des deux niveaux (`hote#FR-4`) : parce que `.vanyline/`
+  circule par git et peut être écrit par un agent, une commande permet de vérifier d'un coup que
+  chaque agent, profil, provider, toolset, type de contexte et contexte se lit et se valide. Remplace
+  l'ancien `config check` de `cfgstore` (`./config_check.sdd`, retiré en E11).
+
+Owns:
+  ./config_cmd.rs
+
+References:
+  /dsd/cli/hote.md — `FR-4`
+  ./host/catalog_store.sdd ./host/toolset_store.sdd ./host/context_store.sdd ./host/layers.sdd
+
+Exposes:
+  @Commands — `check [--json]`.
+  @run_config(commande, global) -> `Outcome`.
+
+Handles:
+  Lit chaque fichier des catégories de chaque niveau existant par les stores de l'hôte (donc par la
+    validation de lymaille) ; liste les problèmes (chemin, catégorie, cause) sur la sortie standard,
+    code 1 s'il y en a ; « configuration valide » et code 0 sinon. Détecte aussi une référence
+    inconnue (agent → profil, profil → provider) et un provider qui porte une valeur ressemblant à un
+    secret.
+  Sans niveau partagé, ne vérifie que le niveau utilisateur, sans erreur.
+
+Must:
+  Ne rien écrire, ne pas résoudre de secret (les noms ne sont pas vérifiés dans `secrets.yaml`).
+
+Scenario: configuration saine
+  Given des agents, profils et providers valides
+  When `config check`
+  Then « configuration valide », code 0
+
+Scenario: fichier invalide et référence inconnue
+  Given un profil au YAML cassé et un agent qui référence un profil absent
+  When `config check`
+  Then les deux problèmes listés avec leur chemin, code 1
+
+Tasks:
+  [ ] `config_cmd.rs` et ses tests — E9.

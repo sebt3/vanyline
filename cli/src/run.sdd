@@ -1,0 +1,75 @@
+Spec: Run — commande `vanyline run`
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  La commande batch avec LLM (`dsd/cli/batch.md`, `FR-1` à `FR-3`) : un seul tour avec l'agent du
+  contexte, la réponse sur la sortie standard, le déroulé et les erreurs sur la sortie d'erreur,
+  ou les événements de lymaille en JSONL. Remplace la partie one-shot de l'ancien `chat.sdd`.
+
+Owns:
+  ./run.rs
+
+References:
+  /dsd/cli/batch.md — `FR-1` à `FR-3`, `FR-8`, `DEC-1`, `AC-1`, `AC-2`, `AC-3`, `AC-6`
+  ./session_open.sdd ./exit_code.sdd
+
+Exposes:
+  @run_run(args: @RunArgs, global: @GlobalOptions) -> `Outcome` (async) ;
+  @RunArgs — { @message: `String` (`-` lit l'entrée standard), @context, @sandbox, @continue_,
+    @resume, @model: `Option<String>` (`-m/--model`, profil), @timeout: `Option<u64>` (`-t/--timeout`),
+    @json: `bool` }.
+  @RunSink — `EventSink` : en sortie texte, écrit le déroulé (exécutions de script, avertissements,
+    erreurs) sur la sortie d'erreur et ne retient que le texte de la réponse finale ; avec `--json`,
+    écrit chaque `Event` de lymaille en une ligne JSON sur la sortie standard, dans l'ordre
+    d'émission.
+
+Handles:
+  Message `-` : lu en entier sur l'entrée standard ; vide ⇒ erreur d'usage (code 2). Message
+    vide en argument : idem.
+  Un seul tour (`run_batch` n'est pas exposé, `DEC-1`) sur l'agent du contexte ; la session est
+    sauvegardée et son identifiant écrit sur la sortie d'erreur (`session: <id>`).
+  Sortie texte : seule la réponse finale (`TurnEnded.response`) va sur la sortie standard, suivie
+    d'un saut de ligne ; avec `--json`, la sortie standard ne porte QUE les événements (une ligne
+    JSON valide par événement), les erreurs restent sur la sortie d'erreur.
+  `-t N` : à l'échéance, la CLI annule le tour par le handle d'annulation de lymaille (lymaille
+    n'interrompt jamais d'elle-même, elle émet `Overrun`) ; sans `-t`, aucun délai. Ctrl+C annule
+    de même ; codes : `exit_code::from_turn` (3 pour l'échéance, 130 pour Ctrl+C).
+  Une valeur de secret ne passe jamais en paramètre de ligne de commande (`batch#CON-2`).
+
+Must:
+  Écrire seulement des événements valides sur la sortie standard en `--json`.
+  Sauvegarder la session même quand le tour est annulé (`chat#DEC-3`).
+  Aucune demande de confirmation (`app#DEC-3`).
+
+Must not:
+  Écrire autre chose que la réponse (ou les événements) sur la sortie standard.
+
+Scenario: message sur l'entrée standard
+  Given `run -` avec « bonjour » sur l'entrée standard et un agent simulé
+  When @run_run
+  Then la réponse sur la sortie standard, `session: <id>` sur la sortie d'erreur, code 0
+
+Scenario: sortie JSONL
+  Given `run --json`
+  When le tour se termine
+  Then chaque ligne de la sortie standard est un événement JSON valide, aucune autre ligne
+
+Scenario: échéance
+  Given `-t 1` et un tour qui dépasse
+  When @run_run
+  Then le tour est annulé, code 3
+
+Scenario: reprise
+  Given un premier `run` puis `run -c` sur le même contexte
+  When le second s'exécute
+  Then la session est reprise, l'agent connaît l'échange précédent (`AC-6`)
+
+Scenario: message vide
+  Given `run -` et une entrée standard vide
+  When @run_run
+  Then erreur d'usage, code 2, aucune session ouverte
+
+Tasks:
+  [ ] `run.rs` et ses tests (agent simulé ; sorties capturées) — E8.
+  [?] `-m` : profil de modèle du catalogue (ASSUMPTION du DSD `batch` « Compatibilité »).

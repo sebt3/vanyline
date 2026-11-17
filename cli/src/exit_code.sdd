@@ -1,0 +1,51 @@
+Spec: Exit code — codes de sortie communs
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Calcule le code de sortie du processus à partir de l'issue d'une commande (`batch#FR-8`) : un seul
+  tableau de codes, commun à `run`, `script` et aux commandes d'objets. Pur, sans E/S.
+
+Owns:
+  ./exit_code.rs
+
+References:
+  /dsd/cli/batch.md — `FR-8`, `AC-3`
+  ./run.sdd ./script.sdd
+
+Exposes:
+  @Outcome — `Success` | `Failure` (échec du tour, du script ou de la commande) | `Usage`
+    (usage invalide) | `Timeout` (délai `-t` dépassé) | `Interrupted` (annulation par
+    l'utilisateur).
+  @from_outcome(@Outcome) -> `ExitCode` : `Success` 0, `Failure` 1, `Usage` 2, `Timeout` 3,
+    `Interrupted` 130.
+  @from_turn(outcome: lymaille::Outcome, deadline_hit: bool, user_cancelled: bool) -> @Outcome ;
+  @from_script(statut: …, deadline_hit: bool, user_cancelled: bool) -> @Outcome : projection de
+    l'issue de lymaille (`Valid`, `Failed`, `Cancelled`) ou du statut d'un script.
+
+Handles:
+  `Cancelled` dû à l'échéance (`deadline_hit`) → `Timeout` ; `Cancelled` dû à Ctrl+C
+    (`user_cancelled`) → `Interrupted` ; `Cancelled` sans cause connue → `Interrupted`.
+  `Valid` → `Success` ; `Failed` → `Failure`.
+
+Must:
+  Être totale et déterministe.
+  Donner la priorité à l'échéance quand les deux causes sont vraies.
+
+Scenario: tableau des codes
+  Given les cinq @Outcome
+  When @from_outcome
+  Then 0, 1, 2, 3, 130
+
+Scenario: annulation par échéance ou par l'utilisateur
+  Given `Cancelled` avec `deadline_hit`, puis avec `user_cancelled`, puis les deux
+  When @from_turn
+  Then `Timeout`, `Interrupted`, `Timeout`
+
+Scenario: issues de lymaille
+  Given `Valid` et `Failed`
+  When @from_turn
+  Then `Success` et `Failure`
+
+Tasks:
+  [ ] `exit_code.rs` et ses tests.
