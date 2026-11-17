@@ -8963,7 +8963,6 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 name = "vanyline"
 version = "0.0.11-alpha.12"
 dependencies = [
- "async-trait",
  "chrono",
  "clap",
  "crossterm",
@@ -8976,8 +8975,6 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rhai",
- "rig-core 0.38.1",
- "rmcp 1.7.0",
  "secrecy",
  "serde",
  "serde_json",
@@ -8989,10 +8986,8 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "uuid",
- "vanyline-cfgstore",
  "vanyline-crds",
  "vanyline-lib",
- "vanyline-tools",
  "vynil-core",
  "yaml_serde",
  "zeroize",

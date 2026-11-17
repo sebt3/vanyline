@@ -4,7 +4,7 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI vanyline : chat interactif TUI, exécution one-shot, gestion de configuration et d'objets Kubernetes, serveur RPC JSON-RPC."
+description = "CLI vanyline : chat interactif TUI, exécution one-shot, gestion d'objets Kubernetes et synchronisation de `.vanyline/`."
 repository = "https://github.com/sebt3/vanyline"
 readme = "../README.md"
 keywords = ["cli", "llm", "kubernetes"]
@@ -16,9 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 vanyline-lib = { path = "../lib", features = ["k8s"] }
-vanyline-tools = { path = "../tools" }
 vanyline-crds = { path = "../crds" }
-vanyline-cfgstore = { path = "../cfgstore" }
 kube = { version = "4", default-features = false, features = ["client"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -30,10 +28,7 @@ dirs = "5"
 dialoguer = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-async-trait = "0.1"
-rig-core = { version = "0.38", features = ["rmcp"] }
 futures = "0.3"
-rmcp = { version = "1.7.0", features = ["transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 unicode-width = "0.2.2"
 pulldown-cmark = "0.13.4"

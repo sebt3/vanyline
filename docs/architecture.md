@@ -21,7 +21,7 @@ foi** (les sections concernées portent une note « Cible ») :
 | Agents système, MCP de domaine, réglages globaux | `app/src/system_agents.sdd`, `mcp_domain.sdd`, `db/entities/app_settings.sdd` |
 | Frontend : tout responsive sauf l'IDE ; vue de sandbox responsive ; chat par écran | `frontend/src/frontend.sdd` et specs liées |
 | CLI : chat interactif en TUI ratatui | `cli/src/tui/*.sdd` |
-| Extension VS Code supprimée ; serveur RPC stdio conservé | `vanyline.sdd` |
+| Extension VS Code supprimée ; serveur RPC stdio retiré (2026-11-17) | `vanyline.sdd` |
 
 ## Vue d'ensemble
 
@@ -295,107 +295,11 @@ conversations (ancien `~/.config/vanyline/conversations/` → nouveau XDG
 data) : les anciens fichiers restent orphelins sur disque, jamais lus ni
 déplacés.
 
-## RPC stdio — `vanyline serve --stdio` (JSON-RPC 2.0)
+## RPC stdio — retiré
 
-> **Cible (2026-10-04)** : le serveur RPC stdio est CONSERVÉ comme interface d'intégration, bien que l'extension VS Code, son premier consommateur, soit supprimée.
-
-Serveur JSON-RPC 2.0 sur stdio (ndjson — une trame JSON par ligne, `\n`,
-stdout réservé au protocole, logs sur stderr), exposant tout le harness
-CLI pour l'extension VS Code (ou tout autre client programmatique) sans
-passer par l'app. **Spec complète (transport, enveloppes, table des codes
-d'erreur, exemples de trames pour chaque méthode) : `docs/rpc-protocol.md`
-— ce qui suit est le résumé architectural, pas une référence.**
-
-**Modules** : `cli/src/rpc/mod.rs` (boucle stdin/stdout, writer unique via
-canal mpsc), `protocol.rs` (types serde requêtes/réponses/notifications,
-namespace d'erreur `VNL-RPC-000` à `VNL-RPC-015`), `handlers.rs`
-(dispatch, `ServerState`, logique par méthode). Réutilise
-`vanyline_cfgstore::FsConfigStore` (config) et `cli/src/store.rs`
-(conversations, format JSON existant) tels quels — aucun nouveau stockage
-introduit.
-
-**Config — lecture et écriture** (`config/*`, F2) : `config/<domain>` liste
-les 6 domaines (`providers`, `models`, `mcpServers`, `toolsets`, `agents`,
-`skills`) ; `config/<domain>/{create,update,delete}` les édite via les
-méthodes d'écriture de `ConfigStore`, avec `layer?` optionnel (`"global"` /
-`"workspace"` — défaut : workspace si résolu à `initialize`, sinon global).
-`CfgStoreError` est traduit en `VNL-RPC-011..015` (write error / not found /
-name conflict / invalid name / validation) ; le reste retombe sur
-`VNL-RPC-006`. Actions : `config/providers/test` et `config/mcpServers/test`
-sondent la cible réseau **stockée dans la config** (SSRF assumée — serveur
-local, config de l'utilisateur), chacune **avec un timeout de 10 s** (le
-dispatch RPC est série : un sondage qui pend gèlerait tout le serveur) ;
-`config/localTools` renvoie le registre statique des 8 tools intégrés.
-
-**Ajouts F4** (le panneau de config de l'extension) : `config/skills/get`
-(`{name}` → `{name, description, body, source}`) — seule méthode exposant le
-`body` d'un skill, indispensable pour éditer un skill existant sans écraser
-son corps ; nom inconnu → `VNL-RPC-006`, `name` absent → `VNL-RPC-000`. Et un
-champ **additif `"source": "workspace" | "global"`** sur chaque entrée des 6
-lectures liste **et** de `config/skills/get` : la couche dont l'entrée est
-résolue (workspace gagne les collisions), calculé par
-`config_entry_source`/`file_entry_source`/`skill_entry_source` de
-`vanyline_cfgstore::layers` — mêmes valeurs que la colonne `source` des
-sous-commandes `vnl … list`. Purement additif : jamais sur le wire
-d'écriture, ignoré par les clients qui ne le connaissent pas (`app` inclus).
-
-**Méthodes K8s** (`owners/*`, `projects/*`, `sandboxes/*`, miroir des
-commandes CLI `owner`/`project`/`sandbox` — feature `k8s`, `VNL-RPC-010`
-en cas d'erreur) : `VnlK8sClient` est construit **paresseusement**, au
-premier appel de ce type, PAS à `initialize` — un cluster injoignable ne
-doit jamais empêcher `chat/send`/`config/*` de fonctionner. Mis en cache
-dans `ServerState.k8s_client`, remis à `None` à chaque `initialize`
-(le namespace peut changer avec le workspace). **Limitation v1** : le
-namespace est résolu une seule fois par session (`defaults.namespace` du
-`config.yaml` fusionné, sinon le contexte kubeconfig courant) — pas de
-param `namespace` par appel, contrairement au `--namespace` du CLI (qui
-peut varier à chaque invocation). Détails et exemples : `docs/rpc-protocol.md`
-section "Ressources K8s".
-
-**Concurrence de `chat/send`** — la seule méthode asynchrone du protocole
-(le tour LLM peut être long) : la boucle stdio reste séquentielle pour
-tout le reste, mais `chat/send` est **spawné** en tâche tokio indépendante
-pour ne pas bloquer la lecture d'autres requêtes (y compris un autre
-`chat/send` sur une AUTRE conversation — plusieurs conversations tournent
-en vrai parallèle). Pas de `Arc<Mutex<ServerState>>` global : seuls les
-champs qui doivent être visibles/mutables depuis une tâche spawnée
-(`busy: Arc<Mutex<HashSet<Uuid>>>`, `seq: Arc<Mutex<HashMap<Uuid,u64>>>`,
-`tx` — déjà `Clone` nativement) le sont individuellement ; `store` est un
-`Arc<FsConfigStore>` partagé sans verrou (lecture seule après
-`initialize`). Un `chat/send` sur une conversation déjà occupée répond
-`VNL-RPC-002` immédiatement, sans rien spawner. `BusyGuard` (`Drop`)
-garantit le nettoyage même si la tâche panique. `conversations/delete`
-purge aussi `busy`/`seq` pour l'id supprimé (sinon croissance non bornée
-de ces maps sur la durée de vie du process).
-
-Même pattern verrou-busy-par-conversation + spawn répliqué côté app
-(`app/src/ws/chat.rs`, `AppState.busy` + `BusyGuard` + `try_acquire_busy` —
-implémentation séparée, pas de code partagé entre les deux binaires, mais
-la même sémantique : un message reçu pendant un tour actif reçoit une
-erreur busy (`VNL-WS-001` côté WS, `VNL-RPC-002` côté RPC) au lieu d'être
-mis en file ou de bloquer la lecture du transport). Persistance
-identique sur les deux surfaces : le message user est enregistré AVANT le
-tour (il a bien été envoyé, quelle que soit l'issue du tour), le message
-assistant seulement APRÈS un tour réussi.
-
-**Passthrough camelCase/snake_case** : les enveloppes RPC propres à ce
-protocole (`InitializeResult`, `ConversationSummary`, `ChatSendParams`/
-`Result`, notifications) sont en camelCase ; `config/*` et
-`conversations/get` retournent les types `vanyline_lib`/CLI **tels
-quels**, en snake_case natif (`system_prompt`, `tool_calls`…) — aucune
-conversion, documenté explicitement dans `rpc-protocol.md` pour ne pas
-piéger le développeur de l'extension.
-
-**Dette assumée** (cohérente avec « Limites connues » plus bas) :
-`chat/cancel` est un no-op protocolaire (valide juste l'UUID, accepte,
-n'annule rien) — l'annulation réelle dépend du support d'annulation de
-`run_agent_turn`, toujours absent. Pas de watcher de config : `FsConfigStore`
-relit le disque à chaque appel (déjà son comportement natif, pas
-spécifique au RPC). Pas de détachement propre des tâches `chat/send`
-encore en vol à l'arrêt du serveur (shutdown/EOF) — `writer.await` peut
-attendre un tour qui ne se termine jamais si le client ferme la
-connexion en plein tour ; acceptable pour v1, le process est de toute
-façon sur le point de sortir.
+Le serveur `vanyline serve --stdio` est RETIRÉ (décision du 2026-11-17, `dsd/cli.md#DEC-1`) : aucun consommateur
+(l'extension VS Code est supprimée, kydah-code parle MCP à la sandbox) et ses handlers dépendaient de `vanyline-lib` (chat, cfgstore) retiré
+par le chantier lymaille. La spec `docs/rpc-protocol.md` est supprimée.
 
 ## Backend web — `vanyline-app`
 

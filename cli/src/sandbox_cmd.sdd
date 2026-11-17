@@ -30,8 +30,6 @@ Can read:
   ./main.rs
   ./owner_cmd.sdd
   ./project_cmd.rs
-  ./rpc/handlers.rs
-  ./rpc/protocol.rs
   ../Cargo.toml
   ../../crds/src/lib.rs
   ../../crds/src/lib.sdd

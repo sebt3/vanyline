@@ -116,9 +116,8 @@ Tasks:
     llm-template (agents `cadence`/`implement`/`diagnose`, `.claude/config.md`, tâches
     `.tasks/`).
   [x] Harnais `[workspace.lints]` posé (deny immédiat, dette tracée dans ./tooling.sdd).
-  [ ] Serveur RPC stdio (`vanyline serve --stdio`, `cli/src/rpc/`, `docs/rpc-protocol.md`, `RpcConnection`
-    de `@vanyline/protocol`) : CONSERVÉ (décision du 2026-10-04) alors que son premier consommateur,
-    l'extension VS Code, disparaît ; il reste une interface d'intégration pour d'autres clients.
+  [x] Serveur RPC stdio (`vanyline serve --stdio`) : RETIRÉ (décision du 2026-11-17, `dsd/cli.md#DEC-1`) : aucun consommateur
+    (l'extension VS Code est supprimée, kydah-code parle MCP à la sandbox), ses handlers dépendaient de la lib retirée.
   [ ] Reverse-engineering des specs par fichier, crate par crate, avec relecture attentive par
     Sébastien sur les incertitudes `[?]` — ordre : `vanyline-lib`, `vanyline-crds`,
     `vanyline-tools`, `vanyline-cfgstore`, `controller`, `sandbox`, `app`, `cli`.

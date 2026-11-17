@@ -95,4 +95,7 @@ Scenario: version et aide
   Then les valeurs de clap, code 0
 
 Tasks:
-  [ ] `main.rs` réduit à ce contrat (E7 à E11 : retirer les handlers de lecture, `serve`, `--toolbox`, le REPL).
+  [x] `main.rs` réduit à ce contrat (E11 : handlers de lecture, `serve`, `--toolbox`, le REPL retirés ; les commandes
+    `conversations`, `agents`, `providers`, `models`, `skills`, `mcp` ne sont plus dans la grammaire).
+  [!] `script` absent de la grammaire : la commande n'est pas implémentée tant que `./script.sdd` porte un `[?]`
+    bloquant (décision du développeur en attente, E8). La ligne `script` d'`Exposes` reste le contrat cible.

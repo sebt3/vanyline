@@ -26,8 +26,6 @@ Can read:
   ./main.rs
   ./project_cmd.rs
   ./sandbox_cmd.rs
-  ./rpc/handlers.rs
-  ./rpc/protocol.rs
   ../Cargo.toml
   ../../crds/src/lib.rs
   ../../lib/src/k8s.rs
@@ -124,11 +122,6 @@ Handles:
     `application_ref: None` et `egress: vec![]` codés en dur — non réglables par le CLI.
     En sérialisation kube, un champ @None d'@OwnerSpec voyage sous `"clé": null` (convention
     de ../../crds/src/lib.rs), pas de clé absente.
-  Parallelisme RPC (hors ce contrat, ratissé pour démarcation) — ./rpc/handlers.rs
-    `owners/list|get|create|delete` : mêmes méthodes @VnlK8sClient, params JSON camelCase
-    (`NameParams`, @OwnerCreateParams à spec aplatie `#[serde(flatten)]`), sans les flags
-    kebab ni l'agrégation ci-dessus ; params malformés ⇒ PARSE_ERROR/MALFORMED_REQUEST
-    (tests existants de ./rpc/handlers.rs).
 
 Must:
   Amendement E4 (`dsd/cli/objets.md`) : le dispatch (`run_*_k8s`) quitte `./main.rs` pour ce module

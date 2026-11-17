@@ -201,3 +201,7 @@ leur Solution (`dsd/app/<nom>.md`) existera. Ne pas en rédiger.
   chaîne `chat-event`/`host-event` ; le test filtre les `import type` que ts-rs 12 émet vers
   des frères inexistants — figé dans le Scenario de `model.sdd`). Leçon `[!]` : une
   instruction en cours de session à un sous-agent ne amende pas une spec ; passer par le .sdd.
+- E11 (lot 6a) : retrait fait — `cli/src/{rpc/,tools,store,config,config_check,mcp_cmd,model_cmd,skill_cmd}.rs` et leurs
+  specs, `tests/rpc_stdio_smoke.rs`, grammaire de `main.rs` réduite (`main.sdd`), dépendances `vanyline-cfgstore`,
+  `vanyline-tools`, `rig-core`, `rmcp`, `async-trait` retirées de `cli`. **E11 reste `[ ]`** : le crate `cfgstore` reste dans
+  le workspace tant que `lib` en dépend (`lib/Cargo.toml`) ; son retrait est le lot 6b, après F2.
