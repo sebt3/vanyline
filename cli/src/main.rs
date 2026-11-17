@@ -16,6 +16,8 @@
 
 mod chat;
 mod config;
+// Ancien `config check` (cfgstore) : remplacé par `config_cmd` (E9). Retiré avec `vanyline-cfgstore` (lot 6).
+#[allow(dead_code)]
 mod config_check;
 mod store;
 
@@ -41,13 +43,19 @@ mod target;
 
 mod tools;
 
+mod config_cmd;
 mod mcp_cmd;
 mod model_cmd;
 mod owner_cmd;
 mod project_cmd;
 mod sandbox_cmd;
+mod secret_cmd;
 mod sessions_cmd;
 mod skill_cmd;
+// Spécification complète des CRD (apply/edit, E9) : `parse_spec` et `check_immutable` ; apply/edit en attente
+// d'un remplacement du client K8s. Retirer le allow quand un consommateur existe.
+#[allow(dead_code)]
+mod spec_edit;
 mod toolset_cmd;
 
 mod rpc;
@@ -136,9 +144,12 @@ enum Commands {
     /// Manage model profiles
     #[command(subcommand)]
     Models(model_cmd::Commands),
-    /// Manage toolsets
+    /// Lister les toolsets, promouvoir un brouillon (`toolset_cmd.sdd`)
+    #[command(name = "toolset", subcommand)]
+    Toolset(toolset_cmd::Commands),
+    /// Enregistrer un secret dans le niveau utilisateur (`secret_cmd.sdd`)
     #[command(subcommand)]
-    Toolsets(toolset_cmd::Commands),
+    Secret(secret_cmd::Commands),
     /// Manage skills
     #[command(subcommand)]
     Skills(skill_cmd::Commands),
@@ -154,7 +165,7 @@ enum Commands {
     /// Manage K8s Sandboxes
     #[command(name = "sandbox", subcommand)]
     K8sSandbox(sandbox_cmd::Commands),
-    /// Validate configuration (both layers)
+    /// Valider les fichiers de configuration des deux niveaux (`config_cmd.sdd`)
     #[command(subcommand)]
     Config(config_cmd::Commands),
     /// Run a JSON-RPC 2.0 server (for the VS Code extension, or any programmatic client)
@@ -214,17 +225,23 @@ mod provider {
     }
 }
 
-mod config_cmd {
-    use clap::Subcommand;
-
-    #[derive(Subcommand)]
-    pub enum Commands {
-        /// Validate configuration (both layers)
-        Check,
+/// Options globales d'une commande qui parle au cluster ou au niveau de configuration (`main.sdd`, `@Cli`).
+fn options_globales(
+    owner: Option<String>,
+    repo: Option<std::path::PathBuf>,
+    namespace: Option<String>,
+) -> chat::GlobalOptions {
+    chat::GlobalOptions {
+        owner,
+        repo,
+        namespace,
     }
 }
 
 #[tokio::main]
+// main.sdd (Must : aucune logique) : le dispatch est une table, une branche par famille de commandes. L'allow
+// reste jusqu'au lot 6, qui retire les branches des commandes anciennes.
+#[allow(clippy::too_many_lines)]
 async fn main() -> std::process::ExitCode {
     tracing_subscriber::registry()
         .with(
@@ -254,11 +271,8 @@ async fn main() -> std::process::ExitCode {
                 continue_,
                 resume,
             };
-            let global = chat::GlobalOptions {
-                owner: cli.owner.clone(),
-                repo: cli.repo.clone(),
-                namespace: cli.namespace.clone(),
-            };
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
             return exit_code::from_outcome(chat::run_chat(args, global).await);
         }
         Some(Commands::Sessions(commande)) => {
@@ -287,21 +301,31 @@ async fn main() -> std::process::ExitCode {
                 timeout,
                 json,
             };
-            let global = chat::GlobalOptions {
-                owner: cli.owner.clone(),
-                repo: cli.repo.clone(),
-                namespace: cli.namespace.clone(),
-            };
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
             return exit_code::from_outcome(run::run_run(args, global).await);
         }
         Some(Commands::Conversations(cmd)) => run_conversation(cmd),
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
         Some(Commands::Providers(cmd)) => run_provider(cmd).await,
         Some(Commands::Models(cmd)) => run_models(cmd).await,
-        Some(Commands::Toolsets(cmd)) => run_toolsets(cmd).await,
+        Some(Commands::Toolset(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(toolset_cmd::run_toolset(cmd, &global).await);
+        }
+        Some(Commands::Secret(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(secret_cmd::run_secret(cmd, &global));
+        }
         Some(Commands::Skills(cmd)) => run_skills(cmd).await,
         Some(Commands::Mcp(cmd)) => run_mcp(cmd).await,
-        Some(Commands::Config(cmd)) => run_config(cmd).await,
+        Some(Commands::Config(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(config_cmd::run_config(cmd, &global).await);
+        }
         // tooling.sdd D6b — terminaison contractée : main.sdd §Handles « `serve`
         // nu → stderr `vanyline serve: only --stdio is currently supported` +
         // exit 1 » et §Raises (message exact en Handles).
@@ -314,9 +338,21 @@ async fn main() -> std::process::ExitCode {
                 std::process::exit(1);
             }
         }
-        Some(Commands::K8sOwner(cmd)) => run_owner_k8s(cmd, cli.namespace).await,
-        Some(Commands::K8sProject(cmd)) => run_project_k8s(cmd, cli.namespace, cli.owner).await,
-        Some(Commands::K8sSandbox(cmd)) => run_sandbox_k8s(cmd, cli.namespace, cli.owner).await,
+        Some(Commands::K8sOwner(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(owner_cmd::run_owner(cmd, &global).await);
+        }
+        Some(Commands::K8sProject(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(project_cmd::run_project(cmd, &global).await);
+        }
+        Some(Commands::K8sSandbox(cmd)) => {
+            let global =
+                options_globales(cli.owner.clone(), cli.repo.clone(), cli.namespace.clone());
+            return exit_code::from_outcome(sandbox_cmd::run_sandbox(cmd, &global).await);
+        }
     }
     std::process::ExitCode::SUCCESS
 }
@@ -583,30 +619,6 @@ pub(crate) fn discover_fs_store() -> vanyline_cfgstore::fs_store::FsConfigStore 
     vanyline_cfgstore::fs_store::FsConfigStore::new(config::discover_layers(&cwd))
 }
 
-// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `config check` » —
-// zéro problème → stdout `Config OK — no problems found.` exit 0 ; sinon CHAQUE
-// problème sur STDOUT puis exit 1 (§Raises « au moins un problème », §Must not
-// « jamais sur stderr un diagnostic de `config check` »). Rendu des diagnostiques
-// sur stdout en attente du [?] main.sdd l.551 (non tranché).
-#[allow(clippy::print_stdout)]
-async fn run_config(cmd: config_cmd::Commands) {
-    use config_cmd::Commands::Check;
-    match cmd {
-        Check => {
-            let store = discover_fs_store();
-            let problems = config_check::check_config(&store).await;
-            if problems.is_empty() {
-                println!("Config OK — no problems found.");
-            } else {
-                for p in &problems {
-                    println!("  {p}");
-                }
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
 // tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `models list` » ;
 // erreur store sur stderr + exit 1 (§Raises « erreur store sur
 // `agents/providers/models/toolsets/skills/mcp list` »).
@@ -628,33 +640,6 @@ async fn run_models(cmd: model_cmd::Commands) {
             for m in &models {
                 let source = config_entry_source(store.layers(), &m.name, |raw| &raw.models);
                 println!("  {} | {} | {} / {}", m.name, source, m.provider, m.model);
-            }
-        }
-    }
-}
-
-// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `toolsets list` » ;
-// erreur store sur stderr + exit 1 (§Raises « erreur store sur
-// `agents/providers/models/toolsets/skills/mcp list` »).
-#[allow(clippy::print_stdout, clippy::print_stderr)]
-async fn run_toolsets(cmd: toolset_cmd::Commands) {
-    use toolset_cmd::Commands::List;
-    use vanyline_lib::store::ConfigStore;
-    let store = discover_fs_store();
-    match cmd {
-        List => {
-            let toolsets = store.list_toolsets().await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            if toolsets.is_empty() {
-                println!("No toolsets configured.");
-                return;
-            }
-            for t in &toolsets {
-                let source = file_entry_source(store.layers(), "toolsets", "yaml", &t.name);
-                let summary = t.description.as_deref().unwrap_or("-");
-                println!("  {} | {} | {}", t.name, source, summary);
             }
         }
     }
@@ -720,453 +705,6 @@ async fn run_mcp(cmd: mcp_cmd::Commands) {
 /// n'est joignable — affichée et le process quitte en erreur ; le reste du
 /// CLI (chat, agents, config...) n'est pas affecté par cette fonction, elle
 /// n'est appelée que par les commandes K8s.
-// tooling.sdd D6b — terminaison contractée : §Handles @discover_k8s_client
-// « échec de discover → stderr + exit 1 » et §Raises (marqueur `VNL-K8S-001`
-// porté par @VnyError, message @Display sans reformatage local). Portée sur la
-// fonction : l'eprintln est dans l'expression finale (attribut de statement
-// impossible — leçon D6a).
-#[allow(clippy::print_stderr)]
-async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8s::VnlK8sClient {
-    let store = discover_fs_store();
-    let namespace = namespace_flag.or_else(|| config::configured_namespace(store.layers()));
-    vanyline_lib::k8s::VnlK8sClient::discover(namespace)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(1);
-        })
-}
-
-/// Nom d'Owner requis par les commandes project/sandbox et la toolbox : sans
-/// `--owner`, message d'erreur clair et quit(1) (UN OWNER = UN NAMESPACE
-/// 2026-10-04 : Projects et Sandboxes vivent dans `<app-ns>-<owner>`, le nom
-/// ne peut plus etre devine).
-fn require_owner(owner_flag: Option<String>) -> String {
-    owner_flag.unwrap_or_else(|| {
-        tracing::error!(
-            "--owner est requis pour cette commande : les Projects et les Sandboxes vivent dans le namespace de l'Owner (<app-ns>-<owner>)"
-        );
-        std::process::exit(1);
-    })
-}
-
-// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
-// « Handlers privés de rendu/dispatch (contrat de ce fichier) : … @run_owner_k8s »
-// et §Structure « les handlers `run_*` ».
-#[allow(clippy::too_many_lines)]
-// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `owner list` » et
-// « Rendu `owner show {name}` » (littéraux exacts) ; `Created/Deleted owner:`
-// §Returns « Handlers K8s » ; échecs client K8s (`VNL-K8S-001`) sur stderr +
-// exit 1, message @Display sans reformatage local (§Raises, §Must).
-#[allow(clippy::print_stdout, clippy::print_stderr)]
-async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
-    use kube::ResourceExt;
-    use owner_cmd::Commands::{Create, Delete, List, Show};
-    let client = discover_k8s_client(namespace).await;
-    match cmd {
-        List => {
-            let owners = client.list_owners().await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            if owners.is_empty() {
-                println!("No owners found.");
-            } else {
-                for o in &owners {
-                    println!(
-                        "  {} | {} | {}",
-                        o.name_any(),
-                        o.status
-                            .as_ref()
-                            .and_then(|s| s.pvc_name.as_deref())
-                            .unwrap_or("-"),
-                        o.status
-                            .as_ref()
-                            .and_then(|s| s.service_account.as_deref())
-                            .unwrap_or("-")
-                    );
-                }
-            }
-        }
-        Show { name } => {
-            let owner = client.get_owner(&name).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            println!("Owner: {}", owner.name_any());
-            println!(
-                "  homeSize: {}",
-                owner.spec.home_size.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  homeStorageClass: {}",
-                owner.spec.home_storage_class.as_deref().unwrap_or("-")
-            );
-            if let Some(pd) = &owner.spec.project_defaults {
-                println!("  projectDefaults:");
-                println!(
-                    "    storageSize: {}",
-                    pd.storage_size.as_deref().unwrap_or("-")
-                );
-                println!(
-                    "    storageClass: {}",
-                    pd.storage_class.as_deref().unwrap_or("-")
-                );
-            } else {
-                println!("  projectDefaults: -");
-            }
-            println!("Status:");
-            match &owner.status {
-                Some(status) => {
-                    println!("  pvcName: {}", status.pvc_name.as_deref().unwrap_or("-"));
-                    println!(
-                        "  serviceAccount: {}",
-                        status.service_account.as_deref().unwrap_or("-")
-                    );
-                    if status.conditions.is_empty() {
-                        println!("  conditions: -");
-                    } else {
-                        println!("  conditions:");
-                        for c in &status.conditions {
-                            println!(
-                                "    - {} status={} message={}",
-                                c.type_, c.status, c.message
-                            );
-                        }
-                    }
-                }
-                None => println!("  (not yet reconciled)"),
-            }
-        }
-        Create {
-            name,
-            home_size,
-            home_storage_class,
-            home_access_mode,
-            project_default_storage_size,
-            project_default_storage_class,
-            project_default_storage_access_mode,
-        } => {
-            let project_defaults = if project_default_storage_size.is_some()
-                || project_default_storage_class.is_some()
-                || project_default_storage_access_mode.is_some()
-            {
-                Some(vanyline_crds::ProjectDefaults {
-                    storage_size: project_default_storage_size,
-                    storage_class: project_default_storage_class,
-                    storage_access_mode: project_default_storage_access_mode,
-                })
-            } else {
-                None
-            };
-            let spec = vanyline_crds::OwnerSpec {
-                home_size,
-                home_storage_class,
-                home_access_mode,
-                project_defaults,
-                application_ref: None,
-                egress: Vec::new(),
-            };
-            let _owner = client.create_owner(&name, spec).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            println!("Created owner: {name}");
-        }
-        Delete { name } => {
-            client.delete_owner(&name).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            println!("Deleted owner: {name}");
-        }
-    }
-}
-
-// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
-// « Handlers privés de rendu/dispatch (contrat de ce fichier) : …
-// @run_project_k8s » et §Structure « les handlers `run_*` ».
-#[allow(clippy::too_many_lines)]
-// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `project list` »
-// et « Rendu `project show {name}` » (littéraux exacts) ; `Created/Deleted
-// project:` §Returns « Handlers K8s » ; échecs client K8s (`VNL-K8S-001`) sur
-// stderr + exit 1, message @Display sans reformatage local (§Raises, §Must).
-#[allow(clippy::print_stdout, clippy::print_stderr)]
-async fn run_project_k8s(
-    cmd: project_cmd::Commands,
-    namespace: Option<String>,
-    owner_flag: Option<String>,
-) {
-    use kube::ResourceExt;
-    use project_cmd::Commands::{Create, Delete, List, Show};
-    let owner = require_owner(owner_flag);
-    let client = discover_k8s_client(namespace).await;
-    match cmd {
-        List => {
-            let projects = client.list_projects(&owner).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            if projects.is_empty() {
-                println!("No projects found.");
-            } else {
-                for p in &projects {
-                    let cloned = p.status.as_ref().is_some_and(|s| s.cloned);
-                    println!(
-                        "  {} | owner={} | {} | cloned={}",
-                        p.name_any(),
-                        p.spec.owner,
-                        p.spec.repo_url,
-                        cloned
-                    );
-                }
-            }
-        }
-        Show { name } => {
-            let project = client.get_project(&owner, &name).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            println!("Project: {}", project.name_any());
-            println!("  owner: {}", project.spec.owner);
-            println!("  repoUrl: {}", project.spec.repo_url);
-            println!(
-                "  defaultBranch: {}",
-                project.spec.default_branch.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  storageSize: {}",
-                project.spec.storage_size.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  storageClass: {}",
-                project.spec.storage_class.as_deref().unwrap_or("-")
-            );
-            println!(
-                "  gitSecret: {}",
-                project.spec.git_secret.as_deref().unwrap_or("-")
-            );
-            match &project.spec.caches {
-                Some(c) if !c.is_empty() => println!("  caches: {}", c.join(", ")),
-                _ => println!("  caches: -"),
-            }
-            println!(
-                "  fetchInterval: {}",
-                project.spec.fetch_interval.as_deref().unwrap_or("-")
-            );
-            println!("Status:");
-            match &project.status {
-                Some(status) => {
-                    println!("  pvcName: {}", status.pvc_name.as_deref().unwrap_or("-"));
-                    println!("  cloned: {}", status.cloned);
-                    if status.worktrees.is_empty() {
-                        println!("  worktrees: -");
-                    } else {
-                        println!("  worktrees: {}", status.worktrees.join(", "));
-                    }
-                    if status.conditions.is_empty() {
-                        println!("  conditions: -");
-                    } else {
-                        println!("  conditions:");
-                        for c in &status.conditions {
-                            println!(
-                                "    - {} status={} message={}",
-                                c.type_, c.status, c.message
-                            );
-                        }
-                    }
-                }
-                None => println!("  (not yet reconciled)"),
-            }
-        }
-        Create {
-            name,
-            repo_url,
-            default_branch,
-            storage_size,
-            storage_class,
-            storage_access_mode,
-            git_secret,
-            caches,
-            fetch_interval,
-        } => {
-            let spec = vanyline_crds::ProjectSpec {
-                owner: owner.clone(),
-                repo_url,
-                default_branch,
-                storage_size,
-                storage_class,
-                storage_access_mode,
-                git_secret,
-                caches: if caches.is_empty() {
-                    None
-                } else {
-                    Some(caches)
-                },
-                fetch_interval,
-                egress: Vec::new(),
-            };
-            client
-                .create_project(&owner, &name, spec)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                });
-            println!("Created project: {name}");
-        }
-        Delete { name } => {
-            client
-                .delete_project(&owner, &name)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                });
-            println!("Deleted project: {name}");
-        }
-    }
-}
-
-// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
-// « Handlers privés de rendu/dispatch (contrat de ce fichier) : …
-// @run_sandbox_k8s » et §Structure « les handlers `run_*` ».
-#[allow(clippy::too_many_lines)]
-// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `sandbox list` »
-// et « Rendu `sandbox show {name}` » (littéraux exacts) ; `Created/Deleted/
-// Stopped/Started sandbox:` §Returns « Handlers K8s » ; échecs client K8s
-// (`VNL-K8S-001`) sur stderr + exit 1, message @Display sans reformatage local
-// (§Raises, §Must).
-#[allow(clippy::print_stdout, clippy::print_stderr)]
-async fn run_sandbox_k8s(
-    cmd: sandbox_cmd::Commands,
-    namespace: Option<String>,
-    owner_flag: Option<String>,
-) {
-    use kube::ResourceExt;
-    use sandbox_cmd::Commands::{Create, Delete, List, Show, Start, Stop};
-    let owner = require_owner(owner_flag);
-    let client = discover_k8s_client(namespace).await;
-    match cmd {
-        List => {
-            let sandboxes = client.list_sandboxes(&owner).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            if sandboxes.is_empty() {
-                println!("No sandboxes found.");
-            } else {
-                for s in &sandboxes {
-                    let phase = s
-                        .status
-                        .as_ref()
-                        .and_then(|st| st.phase.as_deref())
-                        .unwrap_or("-");
-                    println!(
-                        "  {} | project={} | branch={} | phase={}",
-                        s.name_any(),
-                        s.spec.project,
-                        s.spec.branch,
-                        phase
-                    );
-                }
-            }
-        }
-        Show { name } => {
-            let sandbox = client.get_sandbox(&owner, &name).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
-            println!("Sandbox: {}", sandbox.name_any());
-            println!("  project: {}", sandbox.spec.project);
-            println!("  branch: {}", sandbox.spec.branch);
-            println!("  image: {}", sandbox.spec.image.as_deref().unwrap_or("-"));
-            if sandbox.spec.toolchains.is_empty() {
-                println!("  toolchains: -");
-            } else {
-                println!("  toolchains:");
-                for tc in &sandbox.spec.toolchains {
-                    println!("    - {} = {}", tc.name, tc.image);
-                }
-            }
-            println!("Status:");
-            match &sandbox.status {
-                Some(status) => {
-                    println!("  phase: {}", status.phase.as_deref().unwrap_or("-"));
-                    println!("  service: {}", status.service.as_deref().unwrap_or("-"));
-                    if status.conditions.is_empty() {
-                        println!("  conditions: -");
-                    } else {
-                        println!("  conditions:");
-                        for c in &status.conditions {
-                            println!(
-                                "    - {} status={} message={}",
-                                c.type_, c.status, c.message
-                            );
-                        }
-                    }
-                }
-                None => println!("  (not yet reconciled)"),
-            }
-        }
-        Create {
-            name,
-            project,
-            branch,
-            toolchains,
-            image,
-        } => {
-            let spec = vanyline_crds::SandboxSpec {
-                project,
-                branch,
-                toolchains,
-                image,
-                resources: None,
-                egress: Vec::new(),
-                suspended: false,
-            };
-            client
-                .create_sandbox(&owner, &name, spec)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                });
-            println!("Created sandbox: {name}");
-        }
-        Delete { name } => {
-            client
-                .delete_sandbox(&owner, &name)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                });
-            println!("Deleted sandbox: {name}");
-        }
-        Stop { name } => {
-            client
-                .set_sandbox_suspended(&owner, &name, true)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                });
-            println!("Stopped sandbox: {name}");
-        }
-        Start { name } => {
-            client
-                .set_sandbox_suspended(&owner, &name, false)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                });
-            println!("Started sandbox: {name}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,6 +832,45 @@ mod tests {
             "s-1",
         ]);
         assert!(result.is_err(), "-c et --resume s'excluent");
+    }
+
+    // Grammaire E9 (`main.sdd`) : `secret set`, `config check`, `toolset list|promote`
+    #[test]
+    fn grammaire_secret_config_toolset() {
+        assert!(matches!(
+            Cli::try_parse_from(["vanyline", "secret", "set", "api"]).ok().and_then(|c| c.command),
+            Some(Commands::Secret(secret_cmd::Commands::Set { nom })) if nom == "api"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["vanyline", "config", "check"])
+                .ok()
+                .and_then(|c| c.command),
+            Some(Commands::Config(config_cmd::Commands::Check))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["vanyline", "toolset", "list", "--json"])
+                .ok()
+                .and_then(|c| c.command),
+            Some(Commands::Toolset(toolset_cmd::Commands::List {
+                json: true
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["vanyline", "toolset", "promote", "x", "--yes"])
+                .ok()
+                .and_then(|c| c.command),
+            Some(Commands::Toolset(toolset_cmd::Commands::Promote {
+                yes: true,
+                ..
+            }))
+        ));
+    }
+
+    // Grammaire E9 : la valeur d'un secret n'est jamais un argument ; `toolsets` (cfgstore) est retiré
+    #[test]
+    fn secret_set_refuse_la_valeur_en_argument_et_toolsets_retire() {
+        assert!(Cli::try_parse_from(["vanyline", "secret", "set", "api", "valeur"]).is_err());
+        assert!(Cli::try_parse_from(["vanyline", "toolsets", "list"]).is_err());
     }
 
     #[test]

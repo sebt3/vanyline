@@ -41,4 +41,4 @@ Scenario: fichier invalide et référence inconnue
   Then les deux problèmes listés avec leur chemin, code 1
 
 Tasks:
-  [ ] `config_cmd.rs` et ses tests — E9.
+  [x] `config_cmd.rs` et ses tests — E9 (lot 4).

@@ -187,7 +187,8 @@ Scenario: une sous-commande inconnue est rejetée
 
 Tasks:
   [ ] Variants `apply` et `edit`, dispatch `run_project` dans ce module, résolution de l'Owner par
-    `./target.sdd` ; Scenarios de parse et d'intégration (E9).
+    `./target.sdd` ; Scenarios de parse et d'intégration (E9). Écart (lot 2) : le dispatch `run_project` est livré
+    (résolution par `./target.sdd`) ; `apply` et `edit` attendent `./spec_edit.sdd` (voir sa Tasks).
   [?] `#[allow(clippy::large_enum_variant)]` sans commentaire de justification d'une
     ligne citant la spec : `tooling.sdd` (`Must not`) l'exige — trancher : ajouter la
     ligne de justification ou boxer `Create` avec Sébastien.

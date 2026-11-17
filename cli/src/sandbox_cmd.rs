@@ -1,4 +1,166 @@
+use std::io::Write;
+
 use clap::Subcommand;
+use kube::ResourceExt;
+use vanyline_crds::Sandbox;
+use vanyline_lib::k8s::VnlK8sClient;
+
+use crate::chat::GlobalOptions;
+use crate::exit_code::Outcome;
+use crate::owner_cmd::{connexion, echec, owner_de};
+
+/// Condition de la Sandbox qui signale qu'un changement de spec attend un redémarrage du pod (`vanyline.sdd`).
+const RESTART_PENDING: &str = "RestartPending";
+
+/// Vrai si la Sandbox porte la condition `RestartPending` à `True` : la spec courante n'est pas encore active.
+fn redemarrage_requis(sandbox: &Sandbox) -> bool {
+    sandbox.status.as_ref().is_some_and(|status| {
+        status
+            .conditions
+            .iter()
+            .any(|c| c.type_ == RESTART_PENDING && c.status == "True")
+    })
+}
+
+/// Exécute `sandbox` et rend son issue : l'Owner est résolu avant tout appel au cluster (`target.sdd`).
+pub async fn run_sandbox(commande: Commands, global: &GlobalOptions) -> Outcome {
+    let connexion = match connexion(global).await {
+        Ok(connexion) => connexion,
+        Err(issue) => return issue,
+    };
+    let owner = match owner_de(global, &connexion.settings) {
+        Ok(owner) => owner,
+        Err(issue) => return issue,
+    };
+    match executer(&connexion.client, &owner, commande).await {
+        Ok(()) => Outcome::Success,
+        Err(issue) => issue,
+    }
+}
+
+/// Exécution des sous-commandes `sandbox` dans le namespace de l'Owner ; le premier échec rend son issue.
+// objets (`dsd/cli/objets.md`, « Conception ») : un dispatch par famille de commandes, sans logique propre.
+#[allow(clippy::too_many_lines)]
+async fn executer(client: &VnlK8sClient, owner: &str, commande: Commands) -> Result<(), Outcome> {
+    let mut sortie = std::io::stdout();
+    match commande {
+        Commands::List => {
+            let sandboxes = client.list_sandboxes(owner).await.map_err(echec)?;
+            if sandboxes.is_empty() {
+                let _ = writeln!(sortie, "No sandboxes found.");
+            } else {
+                for s in &sandboxes {
+                    let phase = s
+                        .status
+                        .as_ref()
+                        .and_then(|st| st.phase.as_deref())
+                        .unwrap_or("-");
+                    let _ = writeln!(
+                        sortie,
+                        "  {} | project={} | branch={} | phase={}",
+                        s.name_any(),
+                        s.spec.project,
+                        s.spec.branch,
+                        phase
+                    );
+                }
+            }
+        }
+        Commands::Show { name } => {
+            let sandbox = client.get_sandbox(owner, &name).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Sandbox: {}", sandbox.name_any());
+            let _ = writeln!(sortie, "  project: {}", sandbox.spec.project);
+            let _ = writeln!(sortie, "  branch: {}", sandbox.spec.branch);
+            let _ = writeln!(
+                sortie,
+                "  image: {}",
+                sandbox.spec.image.as_deref().unwrap_or("-")
+            );
+            if sandbox.spec.toolchains.is_empty() {
+                let _ = writeln!(sortie, "  toolchains: -");
+            } else {
+                let _ = writeln!(sortie, "  toolchains:");
+                for tc in &sandbox.spec.toolchains {
+                    let _ = writeln!(sortie, "    - {} = {}", tc.name, tc.image);
+                }
+            }
+            let _ = writeln!(sortie, "Status:");
+            if redemarrage_requis(&sandbox) {
+                let _ = writeln!(sortie, "  redémarrage requis");
+            }
+            match &sandbox.status {
+                Some(status) => {
+                    let _ = writeln!(
+                        sortie,
+                        "  phase: {}",
+                        status.phase.as_deref().unwrap_or("-")
+                    );
+                    let _ = writeln!(
+                        sortie,
+                        "  service: {}",
+                        status.service.as_deref().unwrap_or("-")
+                    );
+                    if status.conditions.is_empty() {
+                        let _ = writeln!(sortie, "  conditions: -");
+                    } else {
+                        let _ = writeln!(sortie, "  conditions:");
+                        for c in &status.conditions {
+                            let _ = writeln!(
+                                sortie,
+                                "    - {} status={} message={}",
+                                c.type_, c.status, c.message
+                            );
+                        }
+                    }
+                }
+                None => {
+                    let _ = writeln!(sortie, "  (not yet reconciled)");
+                }
+            }
+        }
+        Commands::Create {
+            name,
+            project,
+            branch,
+            toolchains,
+            image,
+        } => {
+            let spec = vanyline_crds::SandboxSpec {
+                project,
+                branch,
+                toolchains,
+                image,
+                resources: None,
+                egress: Vec::new(),
+                suspended: false,
+            };
+            client
+                .create_sandbox(owner, &name, spec)
+                .await
+                .map_err(echec)?;
+            let _ = writeln!(sortie, "Created sandbox: {name}");
+        }
+        Commands::Delete { name } => {
+            client.delete_sandbox(owner, &name).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Deleted sandbox: {name}");
+        }
+        Commands::Stop { name } => {
+            client
+                .set_sandbox_suspended(owner, &name, true)
+                .await
+                .map_err(echec)?;
+            let _ = writeln!(sortie, "Stopped sandbox: {name}");
+        }
+        Commands::Start { name } => {
+            client
+                .set_sandbox_suspended(owner, &name, false)
+                .await
+                .map_err(echec)?;
+            let _ = writeln!(sortie, "Started sandbox: {name}");
+        }
+    }
+    Ok(())
+}
 
 /// Parse `NAME=IMAGE` (ex. `rust=rust:slim-trixie`) en `Toolchain` avec un
 /// env vide — le controller applique un preset d'environnement connu pour
@@ -135,6 +297,39 @@ mod tests {
         let tc = parse_toolchain(" rust = img ").unwrap();
         assert_eq!(tc.name, " rust ");
         assert_eq!(tc.image, " img ");
+    }
+
+    // Contrat `sandbox show` (FR-5, AC-5) : « redémarrage requis » quand la condition RestartPending est à True
+    #[test]
+    fn redemarrage_requis_suit_la_condition_restart_pending() {
+        let spec = vanyline_crds::SandboxSpec {
+            project: "depot".to_owned(),
+            branch: "main".to_owned(),
+            toolchains: Vec::new(),
+            image: None,
+            resources: None,
+            egress: Vec::new(),
+            suspended: false,
+        };
+        let mut sandbox = vanyline_crds::Sandbox::new("depot-main", spec);
+        assert!(!super::redemarrage_requis(&sandbox));
+        // Statut lu comme le cluster le renvoie (pas de type de condition importé dans ce crate).
+        let statut = |valeur: &str| -> vanyline_crds::SandboxStatus {
+            serde_json::from_value(serde_json::json!({
+                "conditions": [{
+                    "type": "RestartPending",
+                    "status": valeur,
+                    "lastTransitionTime": "2026-01-01T00:00:00Z",
+                    "reason": "",
+                    "message": ""
+                }]
+            }))
+            .expect("statut de sandbox valide")
+        };
+        sandbox.status = Some(statut("False"));
+        assert!(!super::redemarrage_requis(&sandbox));
+        sandbox.status = Some(statut("True"));
+        assert!(super::redemarrage_requis(&sandbox));
     }
 
     fn sandbox(args: &[&str]) -> Option<Commands> {

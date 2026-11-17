@@ -47,5 +47,7 @@ Scenario: brouillon invalide
   Then code 1, l'actif inchangé
 
 Tasks:
-  [ ] `toolset_cmd.rs` et ses tests — E9.
+  [x] `toolset_cmd.rs` et ses tests — E9 (lot 5). Écart : les brouillons se listent par leurs dossiers (`DraftEntry`
+    ne porte pas le niveau de lymaille) ; les exigences affichées sont les clés de `type_requirements`, `roles` et
+    `dependencies` (les minimums ne sont pas exposés par lymaille 0.3.0).
   [x] Décidé 2026-11-17 : les commandes `models`, `skills`, `mcp`, `agents`, `providers` sont retirées (E11) ; la configuration s'édite dans les fichiers des niveaux et `config check` la vérifie.

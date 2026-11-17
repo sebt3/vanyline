@@ -167,7 +167,7 @@ Must not:
     flag (kebab-case implicite clap), renommer un champ renomme le flag.
 
 Tasks:
-  [ ] Dispatch `run_owner` dans ce module, résolution par `./target.sdd` (E9).
+  [x] Dispatch `run_owner` dans ce module, résolution par `./target.sdd` (E9, lot 2).
   [ ] Créer le module de tests de ./owner_cmd.rs (aucun aujourd'hui) : parse via le @Cli de
     ./main.rs ou @clap::Subcommand::command, un test par Scenario taggé par son titre.
   [?] `Show` n'affiche JAMAIS `homeAccessMode` ni `projectDefaults.storageAccessMode` alors

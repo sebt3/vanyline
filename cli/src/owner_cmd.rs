@@ -1,4 +1,206 @@
+use std::fmt::Display;
+use std::io::Write;
+use std::path::Path;
+
 use clap::Subcommand;
+use kube::ResourceExt;
+use vanyline_lib::k8s::VnlK8sClient;
+
+use crate::chat::GlobalOptions;
+use crate::exit_code::Outcome;
+use crate::host::layers::Layers;
+use crate::target::{self, Settings, TargetError};
+
+/// Client K8s et réglages d'une commande d'objets (`target.sdd`, `objets#FR-8`).
+pub(crate) struct Connexion {
+    /// Client K8s, namespace d'application résolu.
+    pub(crate) client: VnlK8sClient,
+    /// Réglages du niveau utilisateur (`defaults.owner`, `defaults.namespace`).
+    pub(crate) settings: Settings,
+}
+
+/// Ouvre la connexion : réglages utilisateur, namespace d'application (`--namespace`, `defaults.namespace`, puis le
+/// kubeconfig), client K8s. Une erreur est écrite sur la sortie d'erreur et rendue comme issue.
+pub(crate) async fn connexion(global: &GlobalOptions) -> Result<Connexion, Outcome> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let layers = Layers::discover(&home, &cwd, global.repo.as_deref(), Path::exists);
+    let settings = Settings::load(&layers).map_err(echec)?;
+    let kubeconfig = kube::Config::infer()
+        .await
+        .ok()
+        .map(|config| config.default_namespace);
+    let namespace = target::resolve_namespace(
+        global.namespace.as_deref(),
+        &settings,
+        kubeconfig.as_deref(),
+    );
+    let client = VnlK8sClient::discover(Some(namespace))
+        .await
+        .map_err(echec)?;
+    Ok(Connexion { client, settings })
+}
+
+/// Owner de la commande : `--owner`, puis `defaults.owner`. Son absence est une erreur d'usage (code 2, `AC-7`).
+pub(crate) fn owner_de(global: &GlobalOptions, settings: &Settings) -> Result<String, Outcome> {
+    target::resolve_owner(global.owner.as_deref(), settings).map_err(|erreur| match erreur {
+        TargetError::Usage(message) => {
+            ecrire_erreur(&message);
+            Outcome::Usage
+        }
+        autre => echec(autre),
+    })
+}
+
+/// Écrit une erreur sur la sortie d'erreur et rend l'issue d'échec (code 1).
+pub(crate) fn echec(erreur: impl Display) -> Outcome {
+    ecrire_erreur(&erreur.to_string());
+    Outcome::Failure
+}
+
+/// Écrit un message sur la sortie d'erreur ; une écriture impossible n'a pas d'issue utile.
+fn ecrire_erreur(message: &str) {
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
+/// Exécute `owner` et rend son issue (`objets` : `owner list|show|create|delete`).
+pub async fn run_owner(commande: Commands, global: &GlobalOptions) -> Outcome {
+    let connexion = match connexion(global).await {
+        Ok(connexion) => connexion,
+        Err(issue) => return issue,
+    };
+    match executer(&connexion.client, commande).await {
+        Ok(()) => Outcome::Success,
+        Err(issue) => issue,
+    }
+}
+
+/// Exécution des sous-commandes `owner` sur le client ; le premier échec rend son issue.
+// objets (`dsd/cli/objets.md`, « Conception ») : un dispatch par famille de commandes, sans logique propre.
+#[allow(clippy::too_many_lines)]
+async fn executer(client: &VnlK8sClient, commande: Commands) -> Result<(), Outcome> {
+    let mut sortie = std::io::stdout();
+    match commande {
+        Commands::List => {
+            let owners = client.list_owners().await.map_err(echec)?;
+            if owners.is_empty() {
+                let _ = writeln!(sortie, "No owners found.");
+            } else {
+                for o in &owners {
+                    let _ = writeln!(
+                        sortie,
+                        "  {} | {} | {}",
+                        o.name_any(),
+                        o.status
+                            .as_ref()
+                            .and_then(|s| s.pvc_name.as_deref())
+                            .unwrap_or("-"),
+                        o.status
+                            .as_ref()
+                            .and_then(|s| s.service_account.as_deref())
+                            .unwrap_or("-")
+                    );
+                }
+            }
+        }
+        Commands::Show { name } => {
+            let owner = client.get_owner(&name).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Owner: {}", owner.name_any());
+            let _ = writeln!(
+                sortie,
+                "  homeSize: {}",
+                owner.spec.home_size.as_deref().unwrap_or("-")
+            );
+            let _ = writeln!(
+                sortie,
+                "  homeStorageClass: {}",
+                owner.spec.home_storage_class.as_deref().unwrap_or("-")
+            );
+            if let Some(pd) = &owner.spec.project_defaults {
+                let _ = writeln!(sortie, "  projectDefaults:");
+                let _ = writeln!(
+                    sortie,
+                    "    storageSize: {}",
+                    pd.storage_size.as_deref().unwrap_or("-")
+                );
+                let _ = writeln!(
+                    sortie,
+                    "    storageClass: {}",
+                    pd.storage_class.as_deref().unwrap_or("-")
+                );
+            } else {
+                let _ = writeln!(sortie, "  projectDefaults: -");
+            }
+            let _ = writeln!(sortie, "Status:");
+            match &owner.status {
+                Some(status) => {
+                    let _ = writeln!(
+                        sortie,
+                        "  pvcName: {}",
+                        status.pvc_name.as_deref().unwrap_or("-")
+                    );
+                    let _ = writeln!(
+                        sortie,
+                        "  serviceAccount: {}",
+                        status.service_account.as_deref().unwrap_or("-")
+                    );
+                    if status.conditions.is_empty() {
+                        let _ = writeln!(sortie, "  conditions: -");
+                    } else {
+                        let _ = writeln!(sortie, "  conditions:");
+                        for c in &status.conditions {
+                            let _ = writeln!(
+                                sortie,
+                                "    - {} status={} message={}",
+                                c.type_, c.status, c.message
+                            );
+                        }
+                    }
+                }
+                None => {
+                    let _ = writeln!(sortie, "  (not yet reconciled)");
+                }
+            }
+        }
+        Commands::Create {
+            name,
+            home_size,
+            home_storage_class,
+            home_access_mode,
+            project_default_storage_size,
+            project_default_storage_class,
+            project_default_storage_access_mode,
+        } => {
+            let project_defaults = if project_default_storage_size.is_some()
+                || project_default_storage_class.is_some()
+                || project_default_storage_access_mode.is_some()
+            {
+                Some(vanyline_crds::ProjectDefaults {
+                    storage_size: project_default_storage_size,
+                    storage_class: project_default_storage_class,
+                    storage_access_mode: project_default_storage_access_mode,
+                })
+            } else {
+                None
+            };
+            let spec = vanyline_crds::OwnerSpec {
+                home_size,
+                home_storage_class,
+                home_access_mode,
+                project_defaults,
+                application_ref: None,
+                egress: Vec::new(),
+            };
+            client.create_owner(&name, spec).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Created owner: {name}");
+        }
+        Commands::Delete { name } => {
+            client.delete_owner(&name).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Deleted owner: {name}");
+        }
+    }
+    Ok(())
+}
 
 #[derive(Subcommand)]
 pub enum Commands {

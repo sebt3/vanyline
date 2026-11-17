@@ -40,7 +40,7 @@ const SANDBOX: &str = "VNL-CLI-SES-003";
 /// Marqueur du refus de résumé au débordement.
 const COMPACTION: &str = "VNL-CLI-SES-004";
 /// Taille maximale du rendu d'un résultat, en caractères (budget du contexte).
-const RENDU_MAX_CARACTERES: u64 = 12_000;
+pub const RENDU_MAX_CARACTERES: u64 = 12_000;
 
 /// Résumé refusé au débordement du contexte : aucun résumé n'est produit (`session_open.sdd`, `RefusingSummarizer`).
 pub struct RefusingSummarizer;

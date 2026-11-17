@@ -234,6 +234,8 @@ Tasks:
   [ ] Variants `apply` et `edit`, dispatch `run_sandbox` dans ce module, `show` avec signalement de
     redémarrage (E9). Les `[?]` sur `--image`, `Toolchain.env`/`lsp`, `resources`/`egress`/`suspended` sont
     soldés par `apply -f` (DEC-1 de `dsd/cli/objets.md`).
+    Écart (lot 2) : le dispatch `run_sandbox` et le signalement « redémarrage requis » de `show` (lu sur la condition
+    `RestartPending`) sont livrés ; `apply` et `edit` attendent `./spec_edit.sdd` (voir sa Tasks).
   [ ] Étendre le module de tests de ./sandbox_cmd.rs (les quatre tests existants ne
     couvrent que @parse_toolchain) : parse de surface via @Cli de ./main.rs, un test par
     Scenario taggé par son titre.

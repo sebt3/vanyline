@@ -74,6 +74,9 @@ Scenario: edit sans EDITOR
   Then `SpecError::Usage`
 
 Tasks:
-  [ ] `spec_edit.rs` et ses tests (client K8s simulé) — E9.
+  [ ] `spec_edit.rs` et ses tests (client K8s simulé) — E9. Écart (lot 1) : seuls `parse_spec` et `check_immutable` sont
+    livrés, avec leurs tests. `apply` et `edit` restent à faire : ils exigent un remplacement (PUT) de Project et de
+    Sandbox dans le client K8s de la lib (`VnlK8sClient` n'en a pas, son `kube::Client` est privé), et le signalement
+    « redémarrage requis » lit la condition `RestartPending`, que le contrôleur ne pose pas encore.
   [?] `edit` d'un Owner (`dsd/cli/objets.md#OI-1`) : pas d'`apply`/`edit` pour les Owners (réservés à
     l'administrateur), à ajouter si un besoin apparaît.

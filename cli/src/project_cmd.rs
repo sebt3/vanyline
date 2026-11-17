@@ -1,4 +1,163 @@
+use std::io::Write;
+
 use clap::Subcommand;
+use kube::ResourceExt;
+use vanyline_lib::k8s::VnlK8sClient;
+
+use crate::chat::GlobalOptions;
+use crate::exit_code::Outcome;
+use crate::owner_cmd::{connexion, echec, owner_de};
+
+/// Exécute `project` et rend son issue : l'Owner est résolu avant tout appel au cluster (`target.sdd`).
+pub async fn run_project(commande: Commands, global: &GlobalOptions) -> Outcome {
+    let connexion = match connexion(global).await {
+        Ok(connexion) => connexion,
+        Err(issue) => return issue,
+    };
+    let owner = match owner_de(global, &connexion.settings) {
+        Ok(owner) => owner,
+        Err(issue) => return issue,
+    };
+    match executer(&connexion.client, &owner, commande).await {
+        Ok(()) => Outcome::Success,
+        Err(issue) => issue,
+    }
+}
+
+/// Exécution des sous-commandes `project` dans le namespace de l'Owner ; le premier échec rend son issue.
+// objets (`dsd/cli/objets.md`, « Conception ») : un dispatch par famille de commandes, sans logique propre.
+#[allow(clippy::too_many_lines)]
+async fn executer(client: &VnlK8sClient, owner: &str, commande: Commands) -> Result<(), Outcome> {
+    let mut sortie = std::io::stdout();
+    match commande {
+        Commands::List => {
+            let projects = client.list_projects(owner).await.map_err(echec)?;
+            if projects.is_empty() {
+                let _ = writeln!(sortie, "No projects found.");
+            } else {
+                for p in &projects {
+                    let cloned = p.status.as_ref().is_some_and(|s| s.cloned);
+                    let _ = writeln!(
+                        sortie,
+                        "  {} | owner={} | {} | cloned={}",
+                        p.name_any(),
+                        p.spec.owner,
+                        p.spec.repo_url,
+                        cloned
+                    );
+                }
+            }
+        }
+        Commands::Show { name } => {
+            let project = client.get_project(owner, &name).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Project: {}", project.name_any());
+            let _ = writeln!(sortie, "  owner: {}", project.spec.owner);
+            let _ = writeln!(sortie, "  repoUrl: {}", project.spec.repo_url);
+            let _ = writeln!(
+                sortie,
+                "  defaultBranch: {}",
+                project.spec.default_branch.as_deref().unwrap_or("-")
+            );
+            let _ = writeln!(
+                sortie,
+                "  storageSize: {}",
+                project.spec.storage_size.as_deref().unwrap_or("-")
+            );
+            let _ = writeln!(
+                sortie,
+                "  storageClass: {}",
+                project.spec.storage_class.as_deref().unwrap_or("-")
+            );
+            let _ = writeln!(
+                sortie,
+                "  gitSecret: {}",
+                project.spec.git_secret.as_deref().unwrap_or("-")
+            );
+            match &project.spec.caches {
+                Some(c) if !c.is_empty() => {
+                    let _ = writeln!(sortie, "  caches: {}", c.join(", "));
+                }
+                _ => {
+                    let _ = writeln!(sortie, "  caches: -");
+                }
+            }
+            let _ = writeln!(
+                sortie,
+                "  fetchInterval: {}",
+                project.spec.fetch_interval.as_deref().unwrap_or("-")
+            );
+            let _ = writeln!(sortie, "Status:");
+            match &project.status {
+                Some(status) => {
+                    let _ = writeln!(
+                        sortie,
+                        "  pvcName: {}",
+                        status.pvc_name.as_deref().unwrap_or("-")
+                    );
+                    let _ = writeln!(sortie, "  cloned: {}", status.cloned);
+                    if status.worktrees.is_empty() {
+                        let _ = writeln!(sortie, "  worktrees: -");
+                    } else {
+                        let _ = writeln!(sortie, "  worktrees: {}", status.worktrees.join(", "));
+                    }
+                    if status.conditions.is_empty() {
+                        let _ = writeln!(sortie, "  conditions: -");
+                    } else {
+                        let _ = writeln!(sortie, "  conditions:");
+                        for c in &status.conditions {
+                            let _ = writeln!(
+                                sortie,
+                                "    - {} status={} message={}",
+                                c.type_, c.status, c.message
+                            );
+                        }
+                    }
+                }
+                None => {
+                    let _ = writeln!(sortie, "  (not yet reconciled)");
+                }
+            }
+        }
+        Commands::Create {
+            name,
+            repo_url,
+            default_branch,
+            storage_size,
+            storage_class,
+            storage_access_mode,
+            git_secret,
+            caches,
+            fetch_interval,
+        } => {
+            let spec = vanyline_crds::ProjectSpec {
+                owner: owner.to_owned(),
+                repo_url,
+                default_branch,
+                storage_size,
+                storage_class,
+                storage_access_mode,
+                git_secret,
+                caches: if caches.is_empty() {
+                    None
+                } else {
+                    Some(caches)
+                },
+                fetch_interval,
+                egress: Vec::new(),
+            };
+            client
+                .create_project(owner, &name, spec)
+                .await
+                .map_err(echec)?;
+            let _ = writeln!(sortie, "Created project: {name}");
+        }
+        Commands::Delete { name } => {
+            client.delete_project(owner, &name).await.map_err(echec)?;
+            let _ = writeln!(sortie, "Deleted project: {name}");
+        }
+    }
+    Ok(())
+}
 
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
