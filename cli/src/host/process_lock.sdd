@@ -1,0 +1,52 @@
+Spec: Process lock — exclusion d'une session entre processus de la CLI
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Lymaille garantit un tour actif par session au sein d'un processus seulement ; entre deux
+  processus de la CLI, la dernière écriture gagnerait en silence (`hote#FR-10`). Ce module refuse
+  d'ouvrir une session déjà ouverte par un autre processus de la CLI.
+
+Owns:
+  ./process_lock.rs
+
+References:
+  /dsd/cli/hote.md — `FR-10`
+  ./session_store.sdd ./layers.sdd
+
+Exposes:
+  @SessionLock — garde RAII : @SessionLock::acquire(layers: &Layers, id: &SessionId) ->
+    `Result<SessionLock, HostError>` (@HostError::Locked si déjà prise) ; libérée à la chute.
+
+Handles:
+  Verrou : fichier `<state>/locks/<id>.lock` pris par verrou consultatif du système (`flock`) ; un
+    processus mort libère son verrou (pas de verrou orphelin à nettoyer). Le message d'erreur
+    nomme la session et le PID inscrit dans le fichier, à titre indicatif.
+  Une session neuve prend son verrou à la création ; `--continue` et `--resume` le prennent avant de
+    charger l'état.
+
+Must:
+  Être pris AVANT la lecture de l'état et gardé jusqu'à la fin de la session.
+  Ne jamais bloquer : un verrou déjà pris est un refus immédiat.
+
+Must not:
+  Verrouiller autre chose qu'une session ; laisser un fichier `.lock` rendre une session
+    inutilisable après un arrêt brutal.
+
+Scenario: seconde ouverture refusée
+  Given une session ouverte par un processus
+  When un second `acquire` sur le même identifiant
+  Then @HostError::Locked
+
+Scenario: libération à la chute
+  Given un verrou pris puis lâché
+  When un nouvel `acquire`
+  Then il réussit
+
+Scenario: processus mort
+  Given un verrou d'un processus terminé brutalement
+  When `acquire`
+  Then il réussit
+
+Tasks:
+  [ ] `process_lock.rs` et ses tests.

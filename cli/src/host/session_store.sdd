@@ -1,0 +1,61 @@
+Spec: Session store — SessionStore de lymaille sur des fichiers
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`SessionStore`)
+
+Purpose:
+  Persiste l'état d'une session lymaille dans `$HOME/.local/state/vanyline/sessions/<id>.json`,
+  un fichier par session, écrit atomiquement (`hote#FR-1`, `AC-1`). Lymaille ne fait aucune
+  E/S : le chargement et la sauvegarde passent par ce store ; le listage et la suppression, que
+  le trait ne porte pas (`hote#CON-2`), sont des méthodes propres du store.
+
+Owns:
+  ./session_store.rs
+
+References:
+  /dsd/cli/hote.md — `FR-1`, `CON-1`, `CON-2`, `AC-1`
+  ./files.sdd ./layers.sdd ./process_lock.sdd
+
+Exposes:
+  @FileSessionStore — `new(layers: &Layers)` ; implémente `lymaille::SessionStore` (`load`,
+    `save`) ; @list_ids() -> `Vec<SessionId>` (triées par date de modification décroissante) ;
+    @delete(id) -> `Result<bool, HostError>`.
+
+Handles:
+  Format : le JSON de `SessionState` tel que lymaille le produit (`format.sdd` de lymaille, version
+    incluse) ; la CLI n'ajoute aucun champ. Un fichier d'une version que lymaille ne lit pas est
+    @HostError::Format avec son chemin.
+  `load` d'un identifiant inconnu rend `Ok(None)` ; un fichier illisible @HostError::Format.
+  `save` : la dernière écriture gagne (`session#DEC-1` de lymaille) ; l'exclusion entre
+    processus est le rôle de ./process_lock.sdd, pas de ce store.
+  Les anciennes conversations de `store.rs` ne sont pas reprises (`hote` « Compatibilité »).
+
+Must:
+  Écrire par @write_atomic (mode 0600).
+  Ne jamais écrire la valeur d'un secret : l'état est celui de lymaille, qui ne les contient pas
+    (`agent-sessions#CON-3`) ; la CLI ne transforme pas l'état.
+
+Must not:
+  Écrire hors de `<state>/sessions/` ; interpréter ou modifier le contenu d'un état.
+
+Scenario: aller-retour entre deux processus
+  Given une session sauvegardée puis un nouveau @FileSessionStore sur le même répertoire
+  When `load` est appelé
+  Then l'état est identique
+
+Scenario: écriture interrompue
+  Given un état sauvegardé puis une sauvegarde dont le renommage échoue
+  When `load` est appelé
+  Then l'état précédent est rendu, intact
+
+Scenario: identifiant inconnu et fichier corrompu
+  Given un identifiant sans fichier, puis un fichier contenant du JSON invalide
+  When `load` est appelé pour chacun
+  Then `Ok(None)` puis @HostError::Format avec le chemin
+
+Scenario: listage et suppression
+  Given trois sessions
+  When @list_ids puis @delete d'une session
+  Then les trois puis deux identifiants, le plus récent d'abord
+
+Tasks:
+  [ ] `session_store.rs` et ses tests (aller-retour, écriture interrompue par injection d'échec).

@@ -1,0 +1,72 @@
+Spec: Context derive — ToolsetContext éphémère depuis le cluster
+
+Platform: Rust/vanyline-cli — lymaille 0.3, vanyline-lib (feature `k8s`), vanyline-crds
+
+Purpose:
+  À l'ouverture d'une session sur `--context <projet> [--sandbox <nom>]`, lit les CR Project et
+  Sandbox avec le kubeconfig de l'utilisateur et construit le `ToolsetContext` éphémère de la
+  session (`hote#FR-7`, `cli#DEC-6`) : paramètres tirés du projet, de la branche et du namespace,
+  rôle MCP « sandbox » lié au Service de la sandbox. Le ContextType correspondant est livré avec
+  la CLI ; son agent principal par défaut sert au démarrage (`resolve_start` de lymaille). Rien
+  à maintenir à la main.
+
+Owns:
+  ./context_derive.rs
+
+References:
+  /dsd/cli/hote.md — `FR-7`, `AC-4`
+  /dsd/cli.md — `DEC-5`, `DEC-6`, `BR-2`
+  ./owner_auth.sdd
+  /lib/src/k8s.sdd — client Kubernetes, `sandbox_mcp_url`, nommage
+  /crds/src/lib.sdd — nommage `<projet>-<nom>`
+
+Exposes:
+  @derive_context(client: &VnlK8sClient, owner: &str, projet: &str, sandbox: Option<&str>) ->
+    `Result<DerivedContext, HostError>` (async) ; @DerivedContext { @context: `ToolsetContext`,
+    @context_type: `ContextType`, @mcp_url: `Option<String>` }.
+  @cli_context_type() -> `ContextType` : le type livré avec la CLI (constante compilée) : nom
+    `vanyline-cli`, paramètres `project`, `branch`, `namespace`, rôle `sandbox` (MCP), agent par
+    défaut `vanyline-cli` (agent livré aussi avec la CLI).
+
+Handles:
+  Sans `--sandbox` : le contexte porte les paramètres du projet et AUCUN rôle MCP ; la session n'a
+    aucune action sur le code (`cli#FR-2`). Avec `--sandbox` : la sandbox doit appartenir au
+    projet (`<projet>-<nom>` par le nommage de `vanyline-crds`, jamais recopié) et être `Running` ;
+    sinon @HostError::Cluster qui le dit, avant toute session.
+  Projet ou sandbox absent du cluster, ou interdit par le RBAC : @HostError::Cluster avec la cause
+    de l'apiserver (`K8sNotFound` → « introuvable »).
+  Le rôle « sandbox » est lié à l'URL MCP du Service de la sandbox (`sandbox_mcp_url` de la lib) ;
+    l'authentification de chaque appel est ./owner_auth.sdd.
+  Les paramètres ne contiennent que des noms et des identifiants publics (jamais un jeton).
+
+Must:
+  Utiliser le nommage de `vanyline-crds` (`cli#BR-2`).
+  Lire le cluster avec l'identité du kubeconfig de l'utilisateur, jamais un autre compte.
+
+Must not:
+  Écrire sur le cluster ; persister le contexte dérivé (il est recalculé à chaque ouverture).
+
+Scenario: contexte de projet sans sandbox
+  Given un projet existant
+  When @derive_context sans sandbox
+  Then un contexte avec `project`, `branch`, `namespace` et aucun rôle MCP
+
+Scenario: contexte avec sandbox
+  Given un projet et une sandbox `Running` du projet
+  When @derive_context avec `--sandbox`
+  Then le rôle « sandbox » est lié à l'URL MCP de la sandbox (`AC-4`)
+
+Scenario: sandbox d'un autre projet ou arrêtée
+  Given une sandbox d'un autre projet, puis une sandbox suspendue
+  When @derive_context
+  Then @HostError::Cluster dans les deux cas, avant toute session
+
+Scenario: projet introuvable
+  Given un projet absent
+  When @derive_context
+  Then @HostError::Cluster « introuvable »
+
+Tasks:
+  [ ] `context_derive.rs` et ses tests (client K8s simulé par le seam de la lib si disponible).
+  [?] Nom et prompt de l'agent par défaut livré avec la CLI (`vanyline-cli`) : à rédiger avec le
+    développeur ; contenu minimal au départ.

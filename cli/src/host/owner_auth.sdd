@@ -1,0 +1,56 @@
+Spec: Owner auth — jeton d'Owner pour les appels MCP à la sandbox
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`McpAuth`), vanyline-lib (feature `k8s`)
+
+Purpose:
+  Fournit à lymaille l'authentification des appels MCP vers la sandbox : chaque appel présente le
+  jeton du ServiceAccount de l'Owner (TokenRequest, audience `vanyline-sandbox`), renouvelé avant
+  son expiration pendant une session longue sans interrompre le tour en cours (`hote#FR-8`,
+  `AC-5`, `cli#BR-1`).
+
+Owns:
+  ./owner_auth.rs
+
+References:
+  /dsd/cli/hote.md — `FR-8`, `AC-5`
+  /dsd/cli.md — `BR-1`
+  /lib/src/k8s.sdd — `owner_token` (cache, marge de renouvellement)
+
+Exposes:
+  @OwnerAuth — `new(client: VnlK8sClient, owner: String)` ; implémente `lymaille::McpAuth`
+    (`headers()` rend l'en-tête `Authorization: Bearer <jeton>`). Réutilisé par `script` et par le
+    client de la sandbox de `sync` (`../sync/`).
+
+Handles:
+  Le jeton vient de @VnlK8sClient::owner_token, dont le cache et la marge de renouvellement sont
+    ceux de la lib (aucun second cache ni second chemin de TokenRequest) ; `headers()` est
+    appelée à chaque requête MCP, donc un jeton proche de l'expiration est renouvelé à l'appel
+    suivant.
+  Échec de TokenRequest (cluster injoignable, Owner inconnu, droits insuffisants) : erreur
+    d'authentification MCP sans le texte du jeton ; la session continue sans le rôle jusqu'à
+    l'appel suivant (échec fermé), le TUI affiche la notice.
+
+Must:
+  Ne jamais journaliser, persister ni afficher le jeton (`Debug` opaque).
+  Fournir un jeton valide à chaque appel d'une session plus longue que sa validité.
+
+Must not:
+  Mettre le jeton en cache hors de la lib ; le transmettre à autre chose qu'à la sandbox.
+
+Scenario: jeton ajouté à chaque appel
+  Given un @OwnerAuth sur un client simulé
+  When `headers()` est appelée deux fois
+  Then deux en-têtes `Authorization: Bearer …` ; le jeton n'apparaît pas dans `Debug`
+
+Scenario: renouvellement en session longue
+  Given un jeton qui expire pendant la session
+  When `headers()` est appelée après l'expiration
+  Then un nouveau jeton, l'appel réussit (`AC-5`)
+
+Scenario: échec de TokenRequest
+  Given un cluster qui refuse la TokenRequest
+  When `headers()` est appelée
+  Then une erreur sans jeton ni URL
+
+Tasks:
+  [ ] `owner_auth.rs` et ses tests (seam sur le client K8s).

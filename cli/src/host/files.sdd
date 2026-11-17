@@ -1,0 +1,65 @@
+Spec: Files — lecture et écriture atomique de fichiers de l'hôte
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Les deux opérations de fichier que tous les stores de l'hôte partagent : l'écriture atomique
+  (un état n'est jamais visible à moitié écrit, `hote#FR-1`) et la lecture qui signale chemin et
+  cause sans interrompre les autres lectures (`hote#FR-4`). Un seul endroit pour ces deux
+  comportements, donc un seul endroit à tester.
+
+Owns:
+  ./files.rs
+
+References:
+  /dsd/cli/hote.md — `FR-1`, `FR-4`, `AC-1`
+  ./mod.sdd — @HostError
+
+Exposes:
+  @write_atomic(chemin: `&Path`, octets: `&[u8]`) -> `Result<(), HostError>` : crée les répertoires
+    parents, écrit dans un fichier temporaire du MÊME répertoire, synchronise, puis renomme sur
+    la cible.
+  @read_text(chemin: `&Path`) -> `Result<Option<String>, HostError>` : `None` si le fichier
+    n'existe pas ; @HostError::Io avec chemin et cause sinon ; @HostError::Format si le contenu
+    n'est pas de l'UTF-8.
+  @list_files(répertoire: `&Path`, extension: `&str`) -> `Vec<Result<PathBuf, HostError>>` :
+    fichiers réguliers de l'extension donnée, triés par nom ; un répertoire absent rend une
+    liste vide ; une entrée illisible rend un `Err` à sa place sans arrêter les autres.
+  @remove_file(chemin: `&Path`) -> `Result<bool, HostError>` : `true` si le fichier existait.
+
+Handles:
+  Droits d'un fichier créé : 0600 pour les fichiers du niveau utilisateur et de l'état, 0644 pour
+    ceux du niveau partagé (versionnés) ; décidé par l'appelant via un paramètre de mode.
+  Une écriture interrompue (processus tué) laisse la cible dans son état précédent ; un fichier
+    temporaire orphelin porte le préfixe `.tmp-` et est ignoré par @list_files.
+
+Must:
+  Renommer dans le même système de fichiers que la cible (atomicité).
+  Ne jamais écrire dans le fichier cible directement.
+  Ne rien journaliser du contenu des fichiers.
+
+Must not:
+  Suivre un lien symbolique en cible d'écriture.
+
+Scenario: écriture atomique
+  Given une cible existante et une écriture dont le renommage échoue
+  When @write_atomic est appelée
+  Then la cible garde son contenu précédent et aucune erreur ne la laisse tronquée
+
+Scenario: lecture d'un fichier absent
+  Given un chemin inexistant
+  When @read_text est appelée
+  Then `Ok(None)`
+
+Scenario: un fichier illisible n'arrête pas les autres
+  Given trois fichiers dont un non UTF-8
+  When @list_files puis @read_text sur chacun
+  Then deux lectures réussissent, la troisième rend @HostError::Format avec son chemin
+
+Scenario: fichiers temporaires ignorés
+  Given un fichier `.tmp-x.yaml` orphelin
+  When @list_files est appelée
+  Then il n'apparaît pas
+
+Tasks:
+  [ ] `files.rs` et ses tests (`tempfile`).

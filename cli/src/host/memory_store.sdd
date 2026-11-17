@@ -1,0 +1,56 @@
+Spec: Memory store — MemoryStore de lymaille sur des fichiers
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`MemoryStore`)
+
+Purpose:
+  Implémente `MemoryStore` (`list`, `get`, `put`, `delete`) : les mémoires qu'un agent écrit, lues
+  par portée (niveau et référence) puis identifiant, en markdown lisible à la main.
+
+Owns:
+  ./memory_store.rs
+
+References:
+  /dsd/cli/hote.md — `FR-2`, `OI-1`
+  ./layers.sdd ./files.sdd
+
+Exposes:
+  @FileMemories — `new(layers: &Layers)` ; implémente `lymaille::MemoryStore`.
+
+Handles:
+  Disposition (proposition de `hote#OI-1`) : `memories/<référence>/<id>.md` sous le niveau de la
+    portée, corps en markdown, métadonnées dans un frontmatter YAML. Le niveau d'une portée
+    désigne le répertoire de niveau (utilisateur ou partagé) ; une portée « session » n'est pas
+    écrite en `memories/` mais dans l'état de session (lymaille).
+  `list(scope)` rend les résumés sans lire les corps ; `put` remplace ; `delete` rend `true` si la
+    mémoire existait.
+  Références et identifiants validés comme les noms de ./catalog_store.sdd (aucune sortie du
+    répertoire).
+  Un niveau partagé absent : une portée de ce niveau est une erreur @HostError::Invalid explicite,
+    jamais une écriture au niveau utilisateur par défaut.
+
+Must:
+  Écrire par @write_atomic.
+  Ne jamais journaliser le corps d'une mémoire.
+
+Must not:
+  Écrire hors de `memories/` ; deviner le niveau d'une portée.
+
+Scenario: aller-retour
+  Given une mémoire de portée projet
+  When `put`, `list`, `get`
+  Then le résumé, puis la mémoire identique ; le fichier est `memories/<ref>/<id>.md`
+
+Scenario: suppression
+  Given une mémoire existante
+  When `delete` deux fois
+  Then `true` puis `false`
+
+Scenario: portée sans niveau partagé
+  Given aucun dépôt et une portée de niveau partagé
+  When `put`
+  Then @HostError::Invalid, aucun fichier
+
+Tasks:
+  [ ] `memory_store.rs` et ses tests.
+  [?] `hote#OI-1` : la disposition `memories/<référence>/<id>.md` est une proposition du DSD, non
+    validée.

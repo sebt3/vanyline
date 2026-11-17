@@ -1,0 +1,68 @@
+Spec: Layers — niveaux de stockage et chemins
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Résout les trois racines de fichiers de l'hôte (`dsd/cli.md#DEC-7`, `DEC-10`) : le niveau
+  utilisateur `$HOME/.config/vanyline/`, le niveau partagé `.vanyline/` du dépôt courant et le
+  répertoire d'état `$HOME/.local/state/vanyline/`. Ce sont les seuls chemins que les autres
+  modules de l'hôte construisent.
+
+Owns:
+  ./layers.rs
+
+References:
+  /dsd/cli/hote.md — `FR-2`, `FR-3`, « Structure et disposition des fichiers »
+  /dsd/cli.md — `DEC-7`, `DEC-10`
+  ./files.sdd — écriture et lecture
+
+Exposes:
+  @Level — `User` | `Shared` (niveaux de configuration ; la session est un troisième niveau
+    porté par l'état d'une session, pas par un répertoire de configuration).
+  @Layers — { @user: `PathBuf`, @shared: `Option<PathBuf>`, @state: `PathBuf` } ;
+    @Layers::discover(@home: `&Path`, @cwd: `&Path`, @repo: `Option<&Path>`) -> `Layers`
+    (pure : aucune E/S hors la recherche du dépôt, passée en paramètre sous forme de fonction
+    d'existence injectée) ; @Layers::root(@level) -> `Option<&Path>`.
+  @Category — `Agents` | `Profiles` | `Providers` | `Toolsets` | `ToolsetDrafts` | `ContextTypes` |
+    `Contexts` | `Memories` ; @Layers::dir(@level, @category) -> `Option<PathBuf>` (répertoire de la
+    catégorie : `agents/`, `profiles/`, `providers/`, `toolsets/`, `toolsets-drafts/`,
+    `context-types/`, `contexts/`, `memories/`).
+
+Handles:
+  Niveau partagé : `.vanyline/` à la racine du dépôt du répertoire courant (le plus proche
+    ancêtre contenant `.git`) ; l'option globale `--repo <chemin>` (nom fixé ici, `DEC-10`) désigne
+    un autre répertoire de dépôt et l'emporte. Sans dépôt ni option, `shared` vaut `None` et seul le
+    niveau utilisateur existe, sans erreur (`hote#FR-3`).
+  `$HOME` absent : @Layers::discover ne devine rien, l'appelant (la commande) rend l'erreur
+    d'usage ; aucune valeur par défaut hors de `$HOME`.
+  La création d'un répertoire de niveau est faite à la première écriture, jamais à la découverte.
+
+Must:
+  Ne jamais lire ni écrire hors des trois racines.
+  Ne pas suivre un lien symbolique qui sortirait d'une racine pour une catégorie.
+
+Must not:
+  Créer des répertoires ou des fichiers à la découverte.
+
+Scenario: dépôt trouvé depuis un sous-répertoire
+  Given un dépôt avec `.git` à sa racine et un répertoire courant dans `src/a/b`
+  When @Layers::discover est appelée sans `--repo`
+  Then `shared` est `<racine>/.vanyline`
+
+Scenario: option de dépôt prioritaire
+  Given un répertoire courant dans un dépôt A et `--repo` désignant un dépôt B
+  When @Layers::discover est appelée
+  Then `shared` est `<B>/.vanyline`
+
+Scenario: aucun dépôt
+  Given un répertoire courant hors de tout dépôt et sans `--repo`
+  When @Layers::discover est appelée
+  Then `shared` vaut `None`, `dir(Shared, …)` vaut `None`, le niveau utilisateur est inchangé
+
+Scenario: répertoires des catégories
+  Given un @Layers avec les deux niveaux
+  When @Layers::dir est appelée pour chaque @Category
+  Then les noms sont `agents`, `profiles`, `providers`, `toolsets`, `toolsets-drafts`, `context-types`, `contexts`, `memories`
+
+Tasks:
+  [ ] `layers.rs` et ses tests (système de fichiers simulé par la fonction d'existence injectée).

@@ -1,0 +1,60 @@
+Spec: Audit — journal d'audit des scripts
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Écrit le journal d'audit des scripts exécutés (`hote#FR-9`, `cli#DEC-8`) : un enregistrement par
+  script, avec la session, l'agent, le texte complet et le résultat. Le journal est la source des
+  lignes de statut du TUI (le script y est replié, déplié à la demande) et du listage des
+  erreurs de script.
+
+Owns:
+  ./audit.rs
+
+References:
+  /dsd/cli/hote.md — `FR-9`, `FR-6`
+  /dsd/cli.md — `DEC-8`
+  ./files.sdd ./layers.sdd
+
+Exposes:
+  @AuditLog — `new(layers: &Layers)` ; @record(enregistrement: &ScriptRecord) -> `Result<(), HostError>` ;
+    @for_session(id: &SessionId) -> `Vec<ScriptRecord>`. L'enregistrement est le `ScriptRecord` de
+    lymaille (événement `EventKind::Script`).
+  @AuditSink — implémente `lymaille::EventSink` : ne retient que `EventKind::Script`, les écrit par
+    @AuditLog::record, laisse passer les autres événements à un sink suivant.
+
+Handles:
+  Un fichier JSONL par session : `<state>/audit/<id>.jsonl`, une ligne par enregistrement, ajout en
+    fin de fichier (le journal est append-only ; un ajout n'est pas atomique au sens de
+    @write_atomic, une ligne tronquée par un arrêt brutal est ignorée à la relecture).
+  `script` (sans session) écrit dans `<state>/audit/script-<horodatage>.jsonl`.
+  Aucune valeur de secret n'est écrite : le texte d'un script et son résultat arrivent déjà
+    masqués par lymaille (`agent-sessions#CON-3`) ; la CLI ne réécrit rien et ne rapporte jamais
+    les variables d'environnement ni les secrets résolus.
+
+Must:
+  Écrire le texte COMPLET du script (le TUI le replie, le journal le garde entier).
+  Ne jamais perdre silencieusement un enregistrement : un échec d'écriture est une erreur de
+    l'appelant, visible dans le TUI et sur la sortie d'erreur.
+
+Must not:
+  Écrire dans le journal autre chose que des enregistrements de script.
+  Ouvrir le journal d'une session en écriture pour une autre session.
+
+Scenario: un enregistrement par script
+  Given une session qui exécute deux scripts
+  When les événements passent par @AuditSink
+  Then `@for_session` rend deux enregistrements, dans l'ordre, au texte complet
+
+Scenario: ligne tronquée ignorée
+  Given un journal dont la dernière ligne est tronquée
+  When @for_session est appelée
+  Then les lignes complètes sont rendues, sans erreur
+
+Scenario: aucun secret écrit
+  Given un script dont le résultat porte une valeur masquée par lymaille
+  When il est audité
+  Then le fichier ne contient que la forme masquée
+
+Tasks:
+  [ ] `audit.rs` et ses tests.

@@ -1,0 +1,55 @@
+Spec: Context store — types de contexte et contextes
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`ContextTypeStore`, `ContextStore`)
+
+Purpose:
+  Implémente `ContextTypeStore` et `ContextStore` sur des fichiers YAML, en deux niveaux avec
+  lecture en couches (`hote#FR-2`). Les contextes de travail d'une session ouverte avec
+  `--context/--sandbox` sont DÉRIVÉS à la volée (./context_derive.sdd) et ne passent pas par ce
+  store ; celui-ci porte les contextes et types définis à la main ou reçus par `.vanyline/`.
+
+Owns:
+  ./context_store.rs
+
+References:
+  /dsd/cli/hote.md — `FR-2`, `FR-4`, `CON-3`
+  ./layers.sdd ./files.sdd ./catalog_store.sdd ./secrets.sdd
+
+Exposes:
+  @FileContexts — `new(layers: &Layers)` ; implémente `lymaille::ContextTypeStore` (`get_type`,
+    `put_type`) et `ContextStore` (`get_context`, `put_context`) ; @put_type_at / @put_context_at
+    (niveau explicite) ; @list_types, @list_contexts ; @delete_type, @delete_context.
+
+Handles:
+  Fichiers : `context-types/<nom>.yaml`, `contexts/<nom>.yaml` (types `serde` de lymaille). Mêmes
+    règles que ./catalog_store.sdd pour la lecture en couches, l'écriture explicite, les noms et les
+    fichiers illisibles.
+  Un contexte ne contient que des paramètres et des références : une valeur que le détecteur de
+    secrets de lymaille reconnaît est refusée à l'écriture (`hote#CON-3`, `FR-4`).
+  Le ContextType de la CLI (celui du contexte dérivé, `cli#DEC-6`) est LIVRÉ avec la CLI
+    (constante compilée, ./context_derive.sdd) : il n'est jamais écrit sur disque.
+
+Must:
+  Écrire par @write_atomic ; rendre exactement ce qui a été écrit.
+  Refuser une définition invalide par la validation de lymaille.
+
+Must not:
+  Écrire le type de contexte livré avec la CLI dans les niveaux de configuration.
+
+Scenario: aller-retour d'un contexte
+  Given un ContextType et un ToolsetContext valides
+  When `put_*` puis `get_*`
+  Then identiques, fichiers lisibles à la main
+
+Scenario: couches
+  Given un contexte aux deux niveaux
+  When `get_context`
+  Then celui du niveau partagé
+
+Scenario: secret refusé
+  Given un contexte dont un paramètre ressemble à une clé d'API
+  When `put_context`
+  Then @HostError::Invalid, aucun fichier
+
+Tasks:
+  [ ] `context_store.rs` et ses tests.

@@ -1,0 +1,60 @@
+Spec: Session index — SessionIndex de lymaille et reprise de session
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`SessionIndex`)
+
+Purpose:
+  Implémente `lymaille::SessionIndex` (listage des sessions filtrées, erreurs de script d'une
+  session) à partir des fichiers de session et du journal d'audit (`hote#FR-9`), et porte les
+  deux requêtes dont le chat et `run` ont besoin pour reprendre : la dernière session d'un
+  contexte et le listage des sessions d'un contexte (`chat#FR-9`, `batch#FR-1`).
+
+Owns:
+  ./session_index.rs
+
+References:
+  /dsd/cli/hote.md — `FR-9`
+  /dsd/cli/chat.md — `FR-9`
+  ./session_store.sdd ./audit.sdd
+
+Exposes:
+  @FileSessionIndex — `new(store: &FileSessionStore, audit: &AuditLog)` ; implémente
+    `lymaille::SessionIndex` (`list(filter)`, `script_errors(id)`).
+  @latest_for_context(contexte: `&str`) -> `Option<SessionId>` ; @sessions_for_context(contexte:
+    `&str`) -> `Vec<SessionSummary>` (identifiant, titre, nombre de tours, date, plus récent d'abord).
+
+Handles:
+  Le contexte d'une session est celui de son état (`ToolsetContext` ouvert) : une session est
+    « du contexte X » quand l'état l'indique, jamais d'après un nom de fichier.
+  Un fichier de session illisible est ignoré du listage et signalé par une entrée d'erreur dans
+    le résultat de l'appelant, sans interrompre le listage (`hote#FR-4`).
+  `script_errors` lit les enregistrements du journal ./audit.sdd de la session ; un journal
+    absent rend une liste vide.
+
+Must:
+  Rester cohérent avec ./session_store.sdd : une session supprimée disparaît du listage.
+  Ne rien écrire.
+
+Must not:
+  Charger l'historique complet d'une session pour la lister : seuls le titre, le contexte, le
+    compteur de tours et la date sont lus (index léger).
+
+Scenario: reprise de la dernière session d'un contexte
+  Given deux sessions du contexte A et une du contexte B
+  When @latest_for_context("A")
+  Then la plus récente de A
+
+Scenario: session supprimée absente du listage
+  Given une session supprimée par le store
+  When @sessions_for_context est appelée
+  Then elle n'y figure plus
+
+Scenario: erreurs de script
+  Given trois scripts audités dont un en erreur
+  When `script_errors` est appelée
+  Then une seule erreur, avec sa classe et sa position
+
+Tasks:
+  [ ] `session_index.rs` et ses tests.
+  [?] Index léger : relire chaque fichier d'état pour en extraire titre et compteurs, ou tenir un
+    fichier d'index `sessions/index.json` mis à jour à la sauvegarde ? Départ : relecture (pas
+    d'état dérivé à tenir cohérent), à revoir si le listage devient lent.

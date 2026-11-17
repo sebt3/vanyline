@@ -1,0 +1,46 @@
+Spec: Host — hôte lymaille de la CLI
+
+Platform: Rust/vanyline-cli — lymaille 0.3
+
+Purpose:
+  Le module `cli/src/host/` fait de la CLI un hôte permanent et autonome de lymaille
+  (`dsd/cli.md#DEC-2`, `dsd/cli/hote.md`) : il implémente sur des fichiers les traits de
+  stockage de lymaille (sessions, agents, profils, providers, toolsets, types de contexte,
+  contextes, mémoires), résout les secrets, dérive le contexte de travail depuis le cluster,
+  authentifie les appels MCP à la sandbox et tient le journal d'audit. Ce fichier ne porte que
+  la déclaration des sous-modules et les types partagés par eux ; le comportement vit dans les
+  enfants.
+
+Owns:
+  ./mod.rs
+
+References:
+  /dsd/cli/hote.md — `FR-1` à `FR-10`, `DEC-1`, `DEC-2`
+  /dsd/cli.md — `DEC-2`, `DEC-3`, `DEC-7`, `DEC-9`, `DEC-10`
+  ./layers.sdd ./files.sdd ./session_store.sdd ./session_index.sdd ./audit.sdd ./catalog_store.sdd
+  ./toolset_store.sdd ./context_store.sdd ./memory_store.sdd ./secrets.sdd ./context_derive.sdd
+  ./owner_auth.sdd ./process_lock.sdd — enfants
+
+Exposes:
+  Déclarations `pub mod audit; pub mod catalog_store; pub mod context_derive; pub mod
+    context_store; pub mod files; pub mod layers; pub mod memory_store; pub mod owner_auth;
+    pub mod process_lock; pub mod secrets; pub mod session_index; pub mod session_store; pub mod
+    toolset_store;` (ordre alphabétique).
+  @HostError — `pub enum` (`thiserror`) commune aux enfants : @Io { chemin, cause },
+    @Format { chemin, cause } (fichier illisible ou invalide), @Invalid { cause } (refus par la
+    validation de lymaille), @Secret { cause }, @Cluster { cause }, @Locked { session }. Aucune
+    variante ne porte la valeur d'un secret. Marqueurs `VNL-CLI-HST-NNN`, un par cause, définis
+    dans l'enfant qui la lève.
+
+Must:
+  N'être qu'un point de déclaration : aucune logique, aucune E/S ici.
+  Utiliser les traits de lymaille par paramètre générique, jamais en objet de trait
+    (`dsd/cli/hote.md#CON-1`) ; les futures sont `Send`.
+
+Must not:
+  Dépendre de `vanyline-cfgstore` ni de `vanyline-lib` hors de son client Kubernetes
+    (`k8s`) : le stockage de la CLI ne reprend aucun code de `cfgstore`.
+
+Tasks:
+  [ ] `mod.rs` : déclarations, @HostError ; dépendances de la crate `cli` (`lymaille`, `serde_yaml`
+    ou équivalent maintenu, `sha2`, `tempfile` ou écriture atomique maison).

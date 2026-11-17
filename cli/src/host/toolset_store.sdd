@@ -1,0 +1,69 @@
+Spec: Toolset store — toolsets actifs et brouillons en répertoires
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`ToolsetStore`, `DraftStore`)
+
+Purpose:
+  Implémente `ToolsetStore` et `DraftStore` : un toolset s'écrit en répertoire lisible et
+  relisible en revue de diff (`hote#DEC-2`), un brouillon vit dans un répertoire frère
+  (`hote#DEC-1`). Seule la promotion d'un brouillon le rend actif, et elle est une action
+  humaine de la CLI.
+
+Owns:
+  ./toolset_store.rs
+
+References:
+  /dsd/cli/hote.md — `FR-2`, `DEC-1`, `DEC-2`, « Structure et disposition des fichiers »
+  ./layers.sdd ./files.sdd ./catalog_store.sdd
+
+Exposes:
+  @FileToolsets — `new(layers: &Layers)` ; implémente `lymaille::ToolsetStore` (`get_active`,
+    `get_draft`, `put_draft`) et `DraftStore` (`list_drafts`, `delete_draft`, `put_type_draft`, …) ;
+    @promote(niveau: @Level, nom: `&str`) -> `Result<(), HostError>` ; @list_active() ->
+    `Vec<Entrée>`.
+
+Handles:
+  Disposition d'un toolset : `toolsets/<nom>/toolset.yaml` (métadonnées, version, exigences),
+    `module.rhai` (le code), `skills/<skill>/SKILL.md` (un skill et ses annexes) ; la CLI convertit
+    vers et depuis le `Toolset` de lymaille. Un brouillon a la même forme sous
+    `toolsets-drafts/<nom>/`.
+  Un toolset écrit par un agent ou arrivé par synchronisation est un BROUILLON (`put_draft`) :
+    @FileToolsets n'écrit jamais dans `toolsets/` par un trait. @promote est le seul chemin qui
+    rend actif un brouillon : il valide le toolset (validation de lymaille), copie le répertoire
+    de `toolsets-drafts/` vers `toolsets/`, puis supprime le brouillon.
+  Lecture en couches comme ./catalog_store.sdd (partagé d'abord).
+  Un `SKILL.md` est lu par `Skill::parse` ; sa taille maximale est celle de lymaille.
+
+Must:
+  Écrire chaque fichier du répertoire par @write_atomic ; une promotion interrompue laisse le
+    brouillon intact et aucun toolset actif partiel (copie dans un répertoire temporaire puis
+    renommage du répertoire).
+  Refuser la promotion d'un toolset invalide (@HostError::Invalid), sans modifier l'actif.
+
+Must not:
+  Activer un toolset par un chemin de session : la promotion n'est appelée que par la commande
+    humaine `vanyline toolset promote` (`../toolset_cmd.sdd`).
+
+Scenario: un agent écrit un brouillon
+  Given un `put_draft`
+  When `get_active` puis `get_draft`
+  Then rien d'actif, le brouillon présent sous `toolsets-drafts/<nom>/`
+
+Scenario: promotion
+  Given un brouillon valide
+  When @promote
+  Then `toolsets/<nom>/` contient `toolset.yaml`, `module.rhai`, `skills/…` ; le brouillon a disparu
+
+Scenario: promotion interrompue
+  Given un brouillon valide et un échec au renommage final
+  When @promote
+  Then le brouillon est intact, aucun toolset actif n'existe
+
+Scenario: brouillon invalide
+  Given un brouillon dont le module Rhai est refusé par la validation
+  When @promote
+  Then @HostError::Invalid, l'actif inchangé
+
+Tasks:
+  [ ] `toolset_store.rs` et ses tests.
+  [?] Le brouillon comme répertoire frère `toolsets-drafts/<nom>/` est une ASSUMPTION du DSD
+    (`hote` « Structure ») : à confirmer.

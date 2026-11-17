@@ -1,0 +1,81 @@
+Spec: Catalog store — agents, profils et providers sur des fichiers
+
+Platform: Rust/vanyline-cli — lymaille 0.3 (`AgentStore`, `ProfileStore`, `ProviderStore`)
+
+Purpose:
+  Implémente les trois stores du catalogue de lymaille sur des fichiers lisibles à la main, répartis
+  en deux niveaux (utilisateur et partagé) avec lecture en couches (`hote#FR-2`, `AC-2`). Un agent
+  est un fichier `.md` (frontmatter YAML puis prompt), un profil et un provider un fichier YAML. Le
+  listage, que les traits ne portent pas (`hote#CON-2`), est propre au store.
+
+Owns:
+  ./catalog_store.rs
+
+References:
+  /dsd/cli/hote.md — `FR-2`, `FR-4`, `CON-3`, `AC-2`, « Structure et disposition des fichiers »
+  ./layers.sdd ./files.sdd ./secrets.sdd
+
+Exposes:
+  @FileCatalog — `new(layers: &Layers)` ; implémente `lymaille::AgentStore` (`get_agent`,
+    `put_agent`), `ProfileStore` (`get_profile`, `put_profile`) et `ProviderStore`
+    (`get_provider`, `put_provider`) ; @put_agent_at, @put_profile_at, @put_provider_at(niveau:
+    @Level, définition) pour une écriture à niveau explicite ; @list_agents, @list_profiles,
+    @list_providers() -> `Vec<Entrée>` avec le niveau d'où vient chaque entrée ; @delete_agent,
+    @delete_profile, @delete_provider(niveau, nom) -> `Result<bool, HostError>`.
+
+Handles:
+  Lecture en couches (`Layered` de lymaille) : le niveau partagé d'abord, puis le niveau
+    utilisateur ; une définition supprimée du partagé redevient celle de l'utilisateur
+    (`AC-2`). Sans niveau partagé (`layers#shared = None`), seul le niveau utilisateur existe.
+  Écriture par les traits (`put_*`) : niveau utilisateur ; l'écriture au niveau partagé passe par
+    les méthodes `*_at`, jamais implicite.
+  Fichiers : `agents/<id>.md` (`AgentDefinition::to_text` / `from_text`), `profiles/<nom>.yaml`,
+    `providers/<nom>.yaml` (types `serde` de lymaille). Un provider ne contient que des RÉFÉRENCES
+    d'authentification, jamais une valeur : @put_provider refuse (@HostError::Invalid) une valeur que
+    le `SecretDetector` de lymaille reconnaît ; la résolution du nom est dans ./secrets.sdd.
+  Une définition invalide est refusée à l'écriture par la validation de lymaille
+    (@HostError::Invalid avec sa cause) ; un fichier illisible à la lecture rend @HostError::Format
+    avec son chemin et n'empêche pas la lecture des autres.
+  Le nom d'un fichier est dérivé du nom de l'entité (validé : lettres, chiffres, `-`, `_`) ; un nom
+    qui sortirait du répertoire (`..`, `/`) est refusé avant tout accès disque.
+
+Must:
+  Écrire par @write_atomic ; mode 0644 au niveau partagé, 0600 au niveau utilisateur.
+  Ne jamais écrire une valeur secrète (provider) ni la journaliser.
+  Rendre exactement ce que la définition contient (aller-retour sans perte).
+
+Must not:
+  Activer quoi que ce soit au-delà de ce que la définition d'un agent accorde : lire un fichier du
+    niveau partagé ne change aucun droit (`hote` « Sécurité »).
+  Reprendre du code ou des fichiers de `vanyline-cfgstore` (`hote#OI-3` : aucune migration).
+
+Scenario: lecture en couches
+  Given un agent `a` défini aux deux niveaux avec des prompts différents
+  When `get_agent("a")`
+  Then celui du niveau partagé ; une fois supprimé du partagé, celui de l'utilisateur (`AC-2`)
+
+Scenario: aller-retour d'un agent
+  Given un agent avec frontmatter et prompt multi-lignes
+  When `put_agent` puis `get_agent`
+  Then la définition est identique, le fichier est `agents/<id>.md` lisible à la main
+
+Scenario: provider avec un secret refusé
+  Given un provider dont un champ ressemble à une clé d'API
+  When `put_provider`
+  Then @HostError::Invalid, aucun fichier écrit
+
+Scenario: nom hostile
+  Given un nom `../x`
+  When `put_agent` ou `get_agent`
+  Then refus avant tout accès disque
+
+Scenario: fichier illisible
+  Given deux agents dont un fichier au YAML cassé
+  When @list_agents
+  Then l'agent valide est listé, l'autre signalé avec son chemin et sa cause
+
+Tasks:
+  [ ] `catalog_store.rs` et ses tests.
+  [?] Version du format de `.vanyline/` (`hote#OI-4`) : un champ `version:` dans les fichiers YAML
+    de profil/provider/ContextType/ToolsetContext, ou seulement le format de lymaille ? Départ : le
+    seul format de lymaille ; ajout d'un champ si un changement incompatible l'exige.
