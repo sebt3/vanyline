@@ -25,7 +25,9 @@ Exposes:
   @Cli — @clap::Parser, nom `vanyline`, `version`. Options globales (`global = true`, acceptées avant
     comme après toute sous-commande) :
       `--repo <chemin>` — dépôt dont le `.vanyline/` est le niveau partagé (`dsd/cli.md#DEC-10`) ;
-      `-n/--namespace <ns>` — namespace d'application (`objets#FR-8`).
+      `-n/--namespace <ns>` — namespace d'application (`objets#FR-8`) ;
+      `--owner <nom>` — Owner K8s des commandes qui parlent au cluster (`chat`, `run`, `script`, `sync`,
+      objets) ; sinon `defaults.owner` (`./target.sdd`, `objets#FR-7`).
     `command` est obligatoire : sans sous-commande, clap affiche l'aide et sort en 2.
   @Commands — @clap::Subcommand :
     `chat --context <projet> [--sandbox <nom>] [-c/--continue] [--resume <id>]` ;
@@ -71,6 +73,11 @@ Scenario: options globales avant et après
   Given `vanyline --repo /r project list` et `vanyline project list --repo /r`
   When elles sont parsées
   Then `repo` vaut `/r` dans les deux cas
+
+Scenario: option --owner globale
+  Given `vanyline chat --context p --owner a` et `vanyline --owner a sync push …`
+  When elles sont parsées
+  Then `owner` vaut `a` dans les deux cas
 
 Scenario: grammaire de chat
   Given `vanyline chat --context p --sandbox s -c`

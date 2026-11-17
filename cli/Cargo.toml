@@ -39,7 +39,8 @@ unicode-width = "0.2.2"
 pulldown-cmark = "0.13.4"
 crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui = "0.30.2"
-lymaille = { version = "0.3", default-features = false, features = ["mcp-http"] }
+lymaille = { version = "0.3", default-features = false, features = ["mcp-http", "rig"] }
+rhai = { version = "1", features = ["sync"] }
 yaml_serde = { version = "0.10", default-features = false }
 sha2 = "0.10"
 thiserror = "2"

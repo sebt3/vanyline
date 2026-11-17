@@ -8975,6 +8975,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reqwest 0.12.28",
+ "rhai",
  "rig-core 0.38.1",
  "rmcp 1.7.0",
  "serde",

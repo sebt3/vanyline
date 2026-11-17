@@ -145,17 +145,17 @@ fn ajouter(chemin: &Path, entree: &AuditEntry) -> Result<(), HostError> {
 /// autres événements à `suivant`. Un échec d'écriture ne peut pas remonter à la bibliothèque : il est retenu et se
 /// récupère par [`AuditSink::take_failures`].
 #[derive(Debug)]
-pub struct AuditSink<'a, N: EventSink> {
-    journal: &'a AuditLog,
+pub struct AuditSink<N: EventSink> {
+    journal: AuditLog,
     suivant: N,
     tours: Mutex<BTreeMap<SessionId, u64>>,
     echecs: Mutex<Vec<HostError>>,
 }
 
-impl<'a, N: EventSink> AuditSink<'a, N> {
-    /// Puits qui écrit dans `journal` et transmet le reste à `suivant`.
+impl<N: EventSink> AuditSink<N> {
+    /// Puits qui écrit dans `journal` (qu'il possède) et transmet le reste à `suivant`.
     #[must_use]
-    pub const fn new(journal: &'a AuditLog, suivant: N) -> Self {
+    pub const fn new(journal: AuditLog, suivant: N) -> Self {
         Self {
             journal,
             suivant,
@@ -172,7 +172,7 @@ impl<'a, N: EventSink> AuditSink<'a, N> {
     }
 }
 
-impl<N: EventSink> EventSink for AuditSink<'_, N> {
+impl<N: EventSink> EventSink for AuditSink<N> {
     fn emit(&self, event: Event) {
         if let EventKind::TurnStarted { turn } = &event.kind {
             let numero = turn.get();
@@ -263,7 +263,7 @@ mod tests {
         let long_script = format!("let x = \"{}\";", "a".repeat(400));
         let premier = entree(1, "let x = 1;", "1", &redactor);
         let second = entree(2, &long_script, "ok", &redactor);
-        let puits = AuditSink::new(&log, RecordingSink::new());
+        let puits = AuditSink::new(log.clone(), RecordingSink::new());
 
         puits.emit(tour_commence("s-1", 1));
         puits.emit(Event::new(
@@ -299,10 +299,30 @@ mod tests {
     }
 
     #[test]
+    fn the_sink_is_shareable_as_a_static_event_sink() {
+        // lymaille impose `Arc<dyn EventSink>` (`'static`) : le puits possède son journal (`audit.sdd`, `@AuditSink`).
+        let home = tempfile::tempdir().expect("a temporary home must be created");
+        let (_layers, log) = journal(home.path());
+        let redactor = Redactor::new();
+        let puits: std::sync::Arc<dyn EventSink> =
+            std::sync::Arc::new(AuditSink::new(log.clone(), RecordingSink::new()));
+        puits.emit(tour_commence("s-1", 1));
+        puits.emit(Event::new(
+            session("s-1"),
+            Timestamp::from_millis(2),
+            EventKind::Script(enregistrement("let x = 1;", "1", &redactor)),
+        ));
+        let lues = log
+            .for_session(&session("s-1"))
+            .expect("the journal must be readable");
+        assert_eq!(lues, vec![entree(1, "let x = 1;", "1", &redactor)]);
+    }
+
+    #[test]
     fn events_other_than_scripts_go_to_the_next_sink() {
         let home = tempfile::tempdir().expect("a temporary home must be created");
         let (_layers, log) = journal(home.path());
-        let puits = AuditSink::new(&log, RecordingSink::new());
+        let puits = AuditSink::new(log.clone(), RecordingSink::new());
 
         puits.emit(Event::new(
             session("s-1"),
@@ -395,7 +415,7 @@ mod tests {
             .expect("the state directory must be created for the fixture");
         fs::write(layers.state().join("audit"), "pas un répertoire")
             .expect("a blocking file must be written");
-        let puits = AuditSink::new(&log, RecordingSink::new());
+        let puits = AuditSink::new(log.clone(), RecordingSink::new());
 
         puits.emit(tour_commence("s-1", 1));
         puits.emit(Event::new(

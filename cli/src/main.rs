@@ -23,6 +23,14 @@ mod store;
 #[allow(dead_code)]
 mod host;
 
+// Codes de sortie (exit_code.sdd) : aucun consommateur avant les Solutions run et script.
+#[allow(dead_code)]
+mod exit_code;
+
+// Ouverture de session lymaille (session_open.sdd) : aucun consommateur avant les Solutions chat et run.
+#[allow(dead_code)]
+mod session_open;
+
 mod tools;
 
 mod mcp_cmd;

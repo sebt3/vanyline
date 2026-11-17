@@ -19,7 +19,7 @@ References:
   ./host/session_store.sdd ./host/session_index.sdd ./host/process_lock.sdd ./host/audit.sdd
 
 Exposes:
-  @SessionRequest — { @context: `String` (projet), @sandbox: `Option<String>`, @resume: @Resume,
+  @SessionRequest — { @owner: `String` (Owner K8s, résolu par l'appelant avec `./target.sdd` : `--owner`, puis `defaults.owner`), @context: `String` (projet), @sandbox: `Option<String>`, @resume: @Resume,
     @profile: `Option<String>` (`-m`), @repo: `Option<PathBuf>`, @namespace: `Option<String>` } ;
     @Resume — `New` | `Last` (`-c`) | `Id(SessionId)` (`--resume`).
   @OpenedSession — session lymaille prête (état, `TurnRunner`, handle d'annulation, `EventSink`
@@ -27,6 +27,14 @@ Exposes:
   @open(demande: @SessionRequest, sink: impl EventSink) -> `Result<OpenedSession, OpenError>` (async).
 
 Handles:
+  Dépendances (décidé 2026-11-17) : lymaille avec les features `mcp-http` et `rig` (inférence compatible
+    OpenAI, `RigProvider`), `rhai` pour les modules accordés. L'environnement est un seam @OpenEnv
+    (types associés : source du cluster, fournisseur d'inférence, connecteur MCP) : l'implémentation de
+    production (`VnlK8sClient`, `RigProvider`, connecteur MCP authentifié par @OwnerAuth) est séparée
+    de celle des tests (cluster, inférence et connecteur simulés).
+  Compaction : la CLI n'a pas encore de `Summarizer` de production ; le résumé REFUSE avec une erreur
+    explicite au débordement du contexte (la session reste sauvegardée, l'utilisateur est prévenu par
+    une notice) — voir le `[?]` des Tasks.
   Ordre : (1) `Layers::discover` ; (2) client Kubernetes du kubeconfig (échec ⇒ `OpenError::Cluster`
     avec la cause, `VNL-K8S-001`) ; (3) @derive_context ; (4) résolution de la session
     (`Last` ⇒ @latest_for_context ; `Id` ⇒ chargement ; `New` ⇒ identifiant neuf) ; (5)
@@ -36,7 +44,9 @@ Handles:
   `Last` sans session pour ce contexte : une session neuve (pas d'erreur) avec une notice ;
     `Id` inconnu ou d'un autre contexte : `OpenError::Unknown` qui nomme l'identifiant.
   Le profil `-m` désigne un profil de modèle du catalogue (`batch` « Compatibilité ») ; absent, celui
-    de l'agent. Profil inconnu : `OpenError::Unknown`.
+    de l'agent s'il en a un, sinon le profil nommé `default` (même convention qu'`app`) ; aucun profil
+    utilisable : `OpenError::Unknown` (VNL-CLI-SES-001) qui nomme le profil attendu. Un profil de
+    production doit définir la taille de contexte (lymaille refuse sans). Profil inconnu : `OpenError::Unknown`.
   Les relais `fs` et `shell` de lymaille restent désactivés : toute action sur le code passe par le
     MCP de la sandbox (`dsd/cli.md#DEC-2`).
   Aucune approbation de commande en session (`chat#FR-10`).
@@ -75,4 +85,7 @@ Scenario: cluster injoignable
   Then `OpenError::Cluster` (`VNL-K8S-001`), aucun verrou conservé
 
 Tasks:
-  [ ] `session_open.rs` et ses tests (hôte simulé par les seams des stores ; cluster simulé).
+  [x] `session_open.rs` et ses tests (hôte simulé par les seams des stores ; cluster simulé).
+  [?] Compaction : le `Summarizer` refuse au débordement du contexte (départ prudent, aucun résumé par
+    le modèle). Une compaction par le fournisseur d'inférence est à concevoir : à décider avec le
+    développeur.

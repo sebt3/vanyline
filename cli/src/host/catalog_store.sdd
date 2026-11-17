@@ -27,6 +27,11 @@ Handles:
   Lecture en couches (`Layered` de lymaille) : le niveau partagé d'abord, puis le niveau
     utilisateur ; une définition supprimée du partagé redevient celle de l'utilisateur
     (`AC-2`). Sans niveau partagé (`layers#shared = None`), seul le niveau utilisateur existe.
+  Agent LIVRÉ avec la CLI : `get_agent("vanyline-cli")` rend l'agent compilé (@shipped_agent, prompt d'une
+    phrase, nature `Work`, profil par défaut) quand aucun fichier d'aucun niveau ne le définit ; un fichier
+    du niveau partagé, puis utilisateur, l'emporte (`dsd/cli.md#DEC-6`). L'agent livré n'est jamais écrit
+    sur disque ni listé comme fichier. `resolve_start` de lymaille trouve ainsi l'agent par défaut du type
+    livré (`./context_derive.sdd`).
   Écriture par les traits (`put_*`) : niveau utilisateur ; l'écriture au niveau partagé passe par
     les méthodes `*_at`, jamais implicite.
   Fichiers : `agents/<id>.md` (`AgentDefinition::to_text` / `from_text`), `profiles/<nom>.yaml`,
@@ -54,6 +59,11 @@ Scenario: lecture en couches
   Given un agent `a` défini aux deux niveaux avec des prompts différents
   When `get_agent("a")`
   Then celui du niveau partagé ; une fois supprimé du partagé, celui de l'utilisateur (`AC-2`)
+
+Scenario: agent livré et surcharge
+  Given aucun fichier d'agent, puis un `agents/vanyline-cli.md` au niveau utilisateur
+  When `get_agent("vanyline-cli")`
+  Then l'agent compilé, puis celui du fichier
 
 Scenario: aller-retour d'un agent
   Given un agent avec frontmatter et prompt multi-lignes

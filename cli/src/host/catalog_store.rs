@@ -5,11 +5,12 @@ use std::future::{self, Future};
 use std::path::Path;
 
 use lymaille::{
-    AgentDefinition, AgentStore, AgentsError, AgentsResult, DefaultSecretDetector, ModelProfile,
-    ProfileStore, Provider, ProviderStore,
+    AgentDefinition, AgentKind, AgentStore, AgentsError, AgentsResult, DefaultSecretDetector,
+    ModelProfile, ProfileStore, Provider, ProviderStore,
 };
 
 use super::HostError;
+use super::context_derive::CLI_AGENT;
 use super::files;
 use super::layers::{Category, Layers, Level};
 
@@ -333,6 +334,17 @@ pub(super) fn store(erreur: &HostError) -> AgentsError {
     AgentsError::Store(erreur.to_string())
 }
 
+/// Agent livré avec la CLI (`catalog_store.sdd`, `@shipped_agent`) : nature `Work`, prompt d'une phrase, sans profil
+/// nommé. Il n'est jamais écrit ni listé ; un fichier d'un niveau le remplace.
+fn shipped_agent() -> AgentDefinition {
+    AgentDefinition::new(
+        CLI_AGENT.to_owned(),
+        AgentKind::Work,
+        "Tu es l'agent de développement de la CLI vanyline : tu travailles dans la sandbox de la session, par ses outils."
+            .to_owned(),
+    )
+}
+
 impl AgentStore for FileCatalog {
     fn get_agent(
         &self,
@@ -340,6 +352,7 @@ impl AgentStore for FileCatalog {
     ) -> impl Future<Output = AgentsResult<Option<AgentDefinition>>> + Send {
         future::ready(
             lire(&self.layers, Category::Agents, AGENT_EXT, id, decode_agent)
+                .map(|trouve| trouve.or_else(|| (id == CLI_AGENT).then(shipped_agent)))
                 .map_err(|erreur| store(&erreur)),
         )
     }
@@ -497,6 +510,72 @@ mod tests {
             repli.prompt(),
             "utilisateur",
             "once removed from shared, the user definition must come back"
+        );
+    }
+
+    #[tokio::test]
+    async fn shipped_agent_is_served_until_a_file_overrides_it() {
+        // Scenario « agent livré et surcharge » (`catalog_store.sdd`). Ordre de lecture : partagé, puis utilisateur (`lire`),
+        // puis l'agent livré en repli. Le partagé l'emporte sur l'utilisateur, qui redevient actif quand le partagé est supprimé.
+        let home = tempfile::tempdir().expect("a temporary home must be created");
+        let racine = tempfile::tempdir().expect("a temporary repository must be created");
+        let depot = avec_depot(home.path(), racine.path());
+        let catalogue = FileCatalog::new(&depot);
+
+        let livre = catalogue
+            .get_agent("vanyline-cli")
+            .await
+            .expect("the lookup must succeed")
+            .expect("the shipped agent must be served without any file");
+        assert_eq!(livre.id(), "vanyline-cli");
+        assert_eq!(livre.kind(), AgentKind::Work);
+        assert!(!livre.prompt().trim().is_empty());
+
+        catalogue
+            .put_agent_at(Level::User, &agent("vanyline-cli", "surcharge utilisateur"))
+            .expect("the user level must accept the agent");
+        let utilisateur = catalogue
+            .get_agent("vanyline-cli")
+            .await
+            .expect("the lookup must succeed")
+            .expect("the user agent must be found");
+        assert_eq!(utilisateur.prompt(), "surcharge utilisateur");
+
+        catalogue
+            .put_agent_at(
+                Level::Shared,
+                &agent("vanyline-cli", "agent partagé du dépôt"),
+            )
+            .expect("the shared level must accept the agent");
+        let partage = catalogue
+            .get_agent("vanyline-cli")
+            .await
+            .expect("the lookup must succeed")
+            .expect("the shared agent must be found");
+        assert_eq!(partage.prompt(), "agent partagé du dépôt");
+    }
+
+    #[tokio::test]
+    async fn shipped_agent_is_never_written_nor_listed() {
+        let home = tempfile::tempdir().expect("a temporary home must be created");
+        let layers = sans_depot(home.path());
+        let catalogue = FileCatalog::new(&layers);
+
+        let _ = catalogue
+            .get_agent("vanyline-cli")
+            .await
+            .expect("the lookup must succeed");
+
+        assert!(
+            catalogue.list_agents().is_empty(),
+            "the shipped agent must not be listed as a file"
+        );
+        assert!(
+            !home
+                .path()
+                .join(".config/vanyline/agents/vanyline-cli.md")
+                .exists(),
+            "the shipped agent must never be written on disk"
         );
     }
 

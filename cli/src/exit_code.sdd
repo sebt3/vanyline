@@ -48,4 +48,4 @@ Scenario: issues de lymaille
   Then `Success` et `Failure`
 
 Tasks:
-  [ ] `exit_code.rs` et ses tests.
+  [x] `exit_code.rs` et ses tests.
