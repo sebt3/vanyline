@@ -6,7 +6,8 @@ use vanyline_lib::k8s::VnlK8sClient;
 
 use crate::chat::GlobalOptions;
 use crate::exit_code::Outcome;
-use crate::owner_cmd::{connexion, echec, owner_de};
+use crate::owner_cmd::{connexion, echec, echec_spec, owner_de, rendre_apply};
+use crate::spec_edit::{EnvEditor, Kind, apply, edit, lire_fichier_apply};
 
 /// Exécute `project` et rend son issue : l'Owner est résolu avant tout appel au cluster (`target.sdd`).
 pub async fn run_project(commande: Commands, global: &GlobalOptions) -> Outcome {
@@ -151,6 +152,27 @@ async fn executer(client: &VnlK8sClient, owner: &str, commande: Commands) -> Res
                 .map_err(echec)?;
             let _ = writeln!(sortie, "Created project: {name}");
         }
+        Commands::Apply { fichier } => {
+            let texte = std::fs::read_to_string(&fichier)
+                .map_err(|erreur| echec(format!("{}: {erreur}", fichier.display())))?;
+            let (nom, voulu) = lire_fichier_apply(Kind::Project, &texte).map_err(echec_spec)?;
+            let issue = apply(client, Kind::Project, owner, &nom, &voulu)
+                .await
+                .map_err(echec_spec)?;
+            rendre_apply(&mut sortie, "project", &nom, issue);
+        }
+        Commands::Edit { name } => {
+            let issue = edit(
+                client,
+                Kind::Project,
+                owner,
+                &name,
+                &EnvEditor::depuis_env(),
+            )
+            .await
+            .map_err(echec_spec)?;
+            rendre_apply(&mut sortie, "project", &name, issue);
+        }
         Commands::Delete { name } => {
             client.delete_project(owner, &name).await.map_err(echec)?;
             let _ = writeln!(sortie, "Deleted project: {name}");
@@ -187,6 +209,17 @@ pub enum Commands {
         #[arg(long)]
         fetch_interval: Option<String>,
     },
+    /// Applique la spécification complète d'un fichier (`name` et spécification) : création ou mise à jour
+    Apply {
+        /// Fichier YAML ou JSON
+        #[arg(short = 'f', long = "file")]
+        fichier: std::path::PathBuf,
+    },
+    /// Édite la spécification complète dans `$EDITOR`
+    Edit {
+        /// Nom de l'objet
+        name: String,
+    },
     /// Delete a Project
     Delete { name: String },
 }
@@ -205,6 +238,20 @@ mod tests {
             Some(RootCommands::K8sProject(cmd)) => Some(cmd),
             _ => None,
         }
+    }
+
+    // Grammaire E9 (`project_cmd.sdd`) : `apply -f <fichier>` et `edit <nom>` ; `apply` sans fichier est refusé
+    #[test]
+    fn project_apply_et_edit_se_parsent() {
+        assert!(matches!(
+            project(&["vanyline", "project", "apply", "-f", "p.yaml"]),
+            Some(ProjectCmd::Apply { fichier }) if fichier.to_str() == Some("p.yaml")
+        ));
+        assert!(matches!(
+            project(&["vanyline", "project", "edit", "depot"]),
+            Some(ProjectCmd::Edit { name }) if name == "depot"
+        ));
+        assert!(project(&["vanyline", "project", "apply"]).is_none());
     }
 
     // Scenario: `project list` se parse sans argument

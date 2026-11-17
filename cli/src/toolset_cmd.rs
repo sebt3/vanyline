@@ -11,7 +11,6 @@ use crate::chat::GlobalOptions;
 use crate::exit_code::Outcome;
 use crate::host::layers::{Category, Layers, Level};
 use crate::host::toolset_store::FileToolsets;
-use crate::session_open::RENDU_MAX_CARACTERES;
 
 /// Niveau de promotion, en ligne de commande (`--level`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -69,6 +68,9 @@ pub async fn run_toolset(commande: Commands, global: &GlobalOptions) -> Outcome 
     }
 }
 
+/// Plafond de rendu des toolsets à la validation (`host/toolset_store.sdd`, 262 144 caractères).
+pub const PLAFOND_RENDU_TOOLSET: u64 = 262_144;
+
 /// Marqueur d'un brouillon absent au niveau de la promotion.
 const SANS_BROUILLON: &str = "VNL-CLI-TSC-001";
 /// Marqueur d'un brouillon refusé par l'hôte (lecture ou validation).
@@ -97,7 +99,7 @@ struct Ligne {
 pub fn lister(layers: &Layers, json: bool, sortie: &mut impl Write) -> Outcome {
     let mut lignes = Vec::new();
     let mut echec = false;
-    for entree in FileToolsets::new(layers, RENDU_MAX_CARACTERES).list_active() {
+    for entree in FileToolsets::new(layers, PLAFOND_RENDU_TOOLSET).list_active() {
         match entree {
             Ok(entree) => lignes.push(Ligne {
                 niveau: nom_niveau(entree.niveau),
@@ -185,7 +187,7 @@ pub async fn promouvoir(
     yes: bool,
     sortie: &mut impl Write,
 ) -> Outcome {
-    let stock = FileToolsets::new(layers, RENDU_MAX_CARACTERES);
+    let stock = FileToolsets::new(layers, PLAFOND_RENDU_TOOLSET);
     let brouillon = match stock.get_draft(nom).await {
         Ok(Some(brouillon)) => brouillon,
         Ok(None) => {

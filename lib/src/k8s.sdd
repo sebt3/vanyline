@@ -174,6 +174,13 @@ Exposes:
     `owner: &str` (le CR vit dans `<app-ns>-<owner>`, calculé sans appel cluster).
   @VnlK8sClient::list_sandboxes / @VnlK8sClient::get_sandbox / @VnlK8sClient::create_sandbox /
     @VnlK8sClient::delete_sandbox — `pub` CRUD Sandbox, `owner` préfixé de même.
+  @VnlK8sClient::apply_project, @VnlK8sClient::apply_sandbox — `pub` : `apply_project(owner, name, spec: &ProjectSpec)
+    -> Result<Project, VnyError>` et `apply_sandbox(owner, name, spec: &SandboxSpec) -> Result<Sandbox, VnyError>`
+    (`dsd/cli/objets.md#FR-3`) : création ou mise à jour de la spécification COMPLÈTE par server-side apply
+    (`Patch::Apply`, gestionnaire de champs `vanyline-cli`, `force`), idempotent : rejouer la même spécification
+    ne change rien, un champ retiré de la spécification est retiré de l'objet (ce qu'un merge-patch ne fait
+    pas). Le corps de la requête est construit par une fonction pure (`apply_body`) couverte par des tests
+    unitaires ; l'appel API relève de l'intégration cluster. Un 404 de namespace ⇒ `K8sNotFound`.
   @VnlK8sClient::set_sandbox_suspended — `pub` : `set_sandbox_suspended(owner, name, suspended)`
     — merge patch de `spec.suspended`, retourne le @Sandbox patché.
   @VnlK8sClient::sandbox_mcp_url — `pub` : `sandbox_mcp_url(owner, name)` — URL MCP

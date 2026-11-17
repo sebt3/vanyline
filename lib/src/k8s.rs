@@ -353,6 +353,36 @@ impl VnlK8sClient {
         delete::<Sandbox>(&self.client, &ns, name).await
     }
 
+    /// Création ou mise à jour de la spécification complète d'un Project par server-side apply (`k8s.sdd`).
+    ///
+    /// # Errors
+    ///
+    /// `VnyError::K8sApiError` (`VNL-K8S-002`) si le nom d'Owner produit un namespace invalide ou si l'appel échoue ;
+    /// `VnyError::K8sNotFound` si le namespace de l'Owner n'existe pas.
+    pub async fn apply_project(
+        &self,
+        owner: &str,
+        name: &str,
+        spec: &ProjectSpec,
+    ) -> Result<Project, VnyError> {
+        let ns = self.owner_namespace(owner)?;
+        ssa(&self.client, &ns, "Project", name, spec).await
+    }
+    /// Création ou mise à jour de la spécification complète d'une Sandbox par server-side apply (`k8s.sdd`).
+    ///
+    /// # Errors
+    ///
+    /// Comme [`VnlK8sClient::apply_project`].
+    pub async fn apply_sandbox(
+        &self,
+        owner: &str,
+        name: &str,
+        spec: &SandboxSpec,
+    ) -> Result<Sandbox, VnyError> {
+        let ns = self.owner_namespace(owner)?;
+        ssa(&self.client, &ns, "Sandbox", name, spec).await
+    }
+
     /// Patch `spec.suspended` d'un Sandbox de l'Owner `owner` (merge patch
     /// JSON, pas de remplacement complet de la spec). Retourne l'objet patché
     /// (contrairement à `delete_sandbox` qui retourne `()`) — stop/start est
@@ -693,6 +723,42 @@ where
     api.get(name).await.map_err(|e| kube_error(&e))
 }
 
+/// Corps d'un server-side apply d'une CR (`k8s.sdd`, `apply_body`) : apiVersion, kind, nom et spécification complète.
+pub(crate) fn apply_body<S: serde::Serialize>(
+    kind: &str,
+    name: &str,
+    spec: &S,
+) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "vanyline.solidite.fr/v1alpha1",
+        "kind": kind,
+        "metadata": {"name": name},
+        "spec": serde_json::to_value(spec).unwrap_or(serde_json::Value::Null),
+    })
+}
+
+/// Server-side apply d'une CR dans `ns` (`Patch::Apply`, gestionnaire `vanyline-cli`, `force`).
+async fn ssa<K>(
+    client: &kube::Client,
+    ns: &str,
+    kind: &str,
+    name: &str,
+    spec: &impl serde::Serialize,
+) -> Result<K, VnyError>
+where
+    K: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+{
+    let api: kube::Api<K> = kube::Api::namespaced(client.clone(), ns);
+    let corps = apply_body(kind, name, spec);
+    let params = kube::api::PatchParams::apply("vanyline-cli").force();
+    api.patch(name, &params, &kube::api::Patch::Apply(&corps))
+        .await
+        .map_err(|e| kube_error(&e))
+}
+
 async fn create<K>(client: &kube::Client, ns: &str, obj: K) -> Result<K, VnyError>
 where
     K: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
@@ -725,6 +791,30 @@ where
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// Scenario `apply_body_construit_la_cr_complete` (`k8s.sdd`, `apply_body`) : le corps porte
+    /// l'apiVersion, le kind, le nom et la spécification complète, champs absents compris (null).
+    #[test]
+    fn apply_body_construit_la_cr_complete() {
+        let spec = ProjectSpec {
+            owner: "alice".to_owned(),
+            repo_url: "https://example.invalid/d.git".to_owned(),
+            default_branch: None,
+            storage_size: None,
+            storage_class: None,
+            storage_access_mode: None,
+            git_secret: None,
+            caches: None,
+            fetch_interval: None,
+            egress: Vec::new(),
+        };
+        let corps = apply_body("Project", "depot", &spec);
+        assert_eq!(corps["apiVersion"], "vanyline.solidite.fr/v1alpha1");
+        assert_eq!(corps["kind"], "Project");
+        assert_eq!(corps["metadata"]["name"], "depot");
+        assert_eq!(corps["spec"]["owner"], "alice");
+        assert_eq!(corps["spec"]["repoUrl"], "https://example.invalid/d.git");
+    }
     use crate::encode_git_path;
     use chrono::Duration;
 

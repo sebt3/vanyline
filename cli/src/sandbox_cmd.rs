@@ -2,25 +2,12 @@ use std::io::Write;
 
 use clap::Subcommand;
 use kube::ResourceExt;
-use vanyline_crds::Sandbox;
 use vanyline_lib::k8s::VnlK8sClient;
 
 use crate::chat::GlobalOptions;
 use crate::exit_code::Outcome;
-use crate::owner_cmd::{connexion, echec, owner_de};
-
-/// Condition de la Sandbox qui signale qu'un changement de spec attend un redémarrage du pod (`vanyline.sdd`).
-const RESTART_PENDING: &str = "RestartPending";
-
-/// Vrai si la Sandbox porte la condition `RestartPending` à `True` : la spec courante n'est pas encore active.
-fn redemarrage_requis(sandbox: &Sandbox) -> bool {
-    sandbox.status.as_ref().is_some_and(|status| {
-        status
-            .conditions
-            .iter()
-            .any(|c| c.type_ == RESTART_PENDING && c.status == "True")
-    })
-}
+use crate::owner_cmd::{connexion, echec, echec_spec, owner_de, rendre_apply};
+use crate::spec_edit::{EnvEditor, Kind, apply, edit, lire_fichier_apply, redemarrage_requis};
 
 /// Exécute `sandbox` et rend son issue : l'Owner est résolu avant tout appel au cluster (`target.sdd`).
 pub async fn run_sandbox(commande: Commands, global: &GlobalOptions) -> Outcome {
@@ -140,6 +127,27 @@ async fn executer(client: &VnlK8sClient, owner: &str, commande: Commands) -> Res
                 .map_err(echec)?;
             let _ = writeln!(sortie, "Created sandbox: {name}");
         }
+        Commands::Apply { fichier } => {
+            let texte = std::fs::read_to_string(&fichier)
+                .map_err(|erreur| echec(format!("{}: {erreur}", fichier.display())))?;
+            let (nom, voulu) = lire_fichier_apply(Kind::Sandbox, &texte).map_err(echec_spec)?;
+            let issue = apply(client, Kind::Sandbox, owner, &nom, &voulu)
+                .await
+                .map_err(echec_spec)?;
+            rendre_apply(&mut sortie, "sandbox", &nom, issue);
+        }
+        Commands::Edit { name } => {
+            let issue = edit(
+                client,
+                Kind::Sandbox,
+                owner,
+                &name,
+                &EnvEditor::depuis_env(),
+            )
+            .await
+            .map_err(echec_spec)?;
+            rendre_apply(&mut sortie, "sandbox", &name, issue);
+        }
         Commands::Delete { name } => {
             client.delete_sandbox(owner, &name).await.map_err(echec)?;
             let _ = writeln!(sortie, "Deleted sandbox: {name}");
@@ -205,6 +213,17 @@ pub enum Commands {
         /// Image du serveur sandbox. Omis: defaut du controller (env `SANDBOX_IMAGE`).
         #[arg(long)]
         image: Option<String>,
+    },
+    /// Applique la spécification complète d'un fichier (`name` et spécification) : création ou mise à jour
+    Apply {
+        /// Fichier YAML ou JSON
+        #[arg(short = 'f', long = "file")]
+        fichier: std::path::PathBuf,
+    },
+    /// Édite la spécification complète dans `$EDITOR`
+    Edit {
+        /// Nom de l'objet
+        name: String,
     },
     /// Delete a Sandbox
     Delete { name: String },
@@ -330,6 +349,20 @@ mod tests {
         assert!(!super::redemarrage_requis(&sandbox));
         sandbox.status = Some(statut("True"));
         assert!(super::redemarrage_requis(&sandbox));
+    }
+
+    // Grammaire E9 (`sandbox_cmd.sdd`) : `apply -f <fichier>` et `edit <nom>`
+    #[test]
+    fn sandbox_apply_et_edit_se_parsent() {
+        assert!(matches!(
+            sandbox(&["vanyline", "sandbox", "apply", "-f", "s.yaml"]),
+            Some(Commands::Apply { fichier }) if fichier.to_str() == Some("s.yaml")
+        ));
+        assert!(matches!(
+            sandbox(&["vanyline", "sandbox", "edit", "depot-main"]),
+            Some(Commands::Edit { name }) if name == "depot-main"
+        ));
+        assert!(sandbox(&["vanyline", "sandbox", "edit"]).is_none());
     }
 
     fn sandbox(args: &[&str]) -> Option<Commands> {

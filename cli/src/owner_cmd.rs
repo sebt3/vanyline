@@ -58,12 +58,51 @@ pub(crate) fn echec(erreur: impl Display) -> Outcome {
     Outcome::Failure
 }
 
+/// Issue d'une erreur de spécification (`apply`, `edit`) : usage (code 2) sans `$EDITOR`, échec (code 1) sinon.
+pub(crate) fn echec_spec(erreur: crate::spec_edit::SpecError) -> Outcome {
+    use crate::spec_edit::SpecError;
+    let issue = match erreur {
+        SpecError::Usage(_) => Outcome::Usage,
+        _ => Outcome::Failure,
+    };
+    ecrire_erreur(&match erreur {
+        SpecError::Invalid(cause) | SpecError::Immutable(cause) | SpecError::Usage(cause) => cause,
+    });
+    issue
+}
+
+/// Ligne de résultat d'un `apply` ou d'un `edit` ; « redémarrage requis » quand l'état de la sandbox le porte.
+pub(crate) fn rendre_apply(
+    sortie: &mut impl Write,
+    libelle: &str,
+    nom: &str,
+    issue: crate::spec_edit::ApplyOutcome,
+) {
+    use crate::spec_edit::ApplyOutcome;
+    match issue {
+        ApplyOutcome::Created => {
+            let _ = writeln!(sortie, "Created {libelle}: {nom}");
+        }
+        ApplyOutcome::Updated { redemarrage_requis } => {
+            let _ = writeln!(sortie, "Updated {libelle}: {nom}");
+            if redemarrage_requis {
+                let _ = writeln!(sortie, "redémarrage requis");
+            }
+        }
+        ApplyOutcome::Unchanged => {
+            let _ = writeln!(sortie, "Unchanged {libelle}: {nom}");
+        }
+    }
+}
+
 /// Écrit un message sur la sortie d'erreur ; une écriture impossible n'a pas d'issue utile.
 fn ecrire_erreur(message: &str) {
     let _ = writeln!(std::io::stderr(), "{message}");
 }
 
-/// Exécute `owner` et rend son issue (`objets` : `owner list|show|create|delete`).
+/// Exécute `owner` et rend son issue (`objets` : `owner list|show|create|delete`). Pas d'`apply` ni d'`edit` (`objets#OI-1`).
+///
+/// Helpers partagés avec `project` et `sandbox` (`pub(crate)`) : `connexion`, `owner_de`, `echec`, `echec_spec`, `rendre_apply`.
 pub async fn run_owner(commande: Commands, global: &GlobalOptions) -> Outcome {
     let connexion = match connexion(global).await {
         Ok(connexion) => connexion,

@@ -74,9 +74,13 @@ Scenario: edit sans EDITOR
   Then `SpecError::Usage`
 
 Tasks:
-  [ ] `spec_edit.rs` et ses tests (client K8s simulé) — E9. Écart (lot 1) : seuls `parse_spec` et `check_immutable` sont
-    livrés, avec leurs tests. `apply` et `edit` restent à faire : ils exigent un remplacement (PUT) de Project et de
-    Sandbox dans le client K8s de la lib (`VnlK8sClient` n'en a pas, son `kube::Client` est privé), et le signalement
-    « redémarrage requis » lit la condition `RestartPending`, que le contrôleur ne pose pas encore.
+  [x] `spec_edit.rs` et ses tests (client K8s simulé) — E9. Écarts : (a) le seam est le trait `SpecCluster` (et `Editor`
+    pour `$EDITOR`), implémenté par `VnlK8sClient` ; `apply` et `edit` sont génériques sur ce trait au lieu de prendre
+    `&VnlK8sClient`. (b) L'écriture passe par `apply_project` / `apply_sandbox` de la lib (server-side apply, `k8s.sdd`) :
+    seul le corps `apply_body` est testé unitairement, l'appel API relève de l'intégration cluster, non exécutée ici.
+    (c) `apply -f` lit un `name` de premier niveau, retiré avant `parse_spec` (le nom n'est pas dans la spécification).
+    (d) Le signalement « redémarrage requis » lit `RestartPending`, que le contrôleur ne pose pas encore (décision
+    du coordinateur : côté contrôleur).
   [?] `edit` d'un Owner (`dsd/cli/objets.md#OI-1`) : pas d'`apply`/`edit` pour les Owners (réservés à
     l'administrateur), à ajouter si un besoin apparaît.
+  [x] Décidé 2026-11-17 : le nom de l'objet d'un `apply -f` est un champ `name` de premier niveau du fichier (retiré avant l'analyse de la spécification).

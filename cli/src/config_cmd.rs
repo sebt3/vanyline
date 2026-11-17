@@ -13,7 +13,7 @@ use crate::host::catalog_store::FileCatalog;
 use crate::host::context_store::FileContexts;
 use crate::host::layers::Layers;
 use crate::host::toolset_store::FileToolsets;
-use crate::session_open::RENDU_MAX_CARACTERES;
+use crate::toolset_cmd::PLAFOND_RENDU_TOOLSET;
 
 /// Sous-commandes de `config` (grammaire : `config_cmd.sdd`).
 #[derive(Debug, Clone, Subcommand)]
@@ -104,7 +104,7 @@ pub async fn verifier(layers: &Layers) -> Vec<String> {
         }
     }
 
-    let toolsets = FileToolsets::new(layers, RENDU_MAX_CARACTERES);
+    let toolsets = FileToolsets::new(layers, PLAFOND_RENDU_TOOLSET);
     for entree in toolsets.list_active() {
         if let Err(erreur) = entree {
             problemes.push(format!("toolsets: {erreur}"));
