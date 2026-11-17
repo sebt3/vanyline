@@ -58,4 +58,4 @@ Scenario: reprise
 
 Tasks:
   [ ] `chat.rs` réduit à ce contrat (E7) ; tests de l'usage et du câblage avec un `TuiRunner` simulé.
-  [x] Implémenté 2026-11-17 (lot 2a) ; `--owner` requis tant que `defaults.owner` (`./target.sdd`) n'est pas implémenté (lot 2b). L'état du worktree vient de `GET {base}/git/status`, `base` = URL MCP de la sandbox sans `/mcp` (hypothèse à vérifier sur un cluster réel).
+  [x] Implémenté 2026-11-17 (lot 2a) ; l'Owner se résout par `--owner`, puis `defaults.owner` (`./target.sdd`, lot 2b), sinon erreur d'usage (code 2). L'état du worktree vient de `GET {base}/git/status`, `base` = URL MCP de la sandbox sans `/mcp` (hypothèse à vérifier sur un cluster réel).

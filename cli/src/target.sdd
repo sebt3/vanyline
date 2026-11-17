@@ -31,6 +31,8 @@ Exposes:
     appel au cluster (`BR-2`).
 
 Handles:
+  Sans option, sans réglage ni kubeconfig nommé, le namespace vaut `default` (convention de Kubernetes ; la
+    spec ne le disait pas, lot 2b).
   Aucune déduction de l'Owner depuis le kubeconfig, aucune recherche dans tous les namespaces
     (`DEC-2`).
   Fichier de réglages illisible ou invalide : `TargetError::Settings` avec chemin et cause.
@@ -64,4 +66,4 @@ Scenario: nom d'owner invalide
   Then `TargetError`, avant tout appel au cluster
 
 Tasks:
-  [ ] `target.rs` et ses tests — E9.
+  [x] `target.rs` et ses tests — E9 (lot 2b) ; `chat.rs` branché sur `defaults.owner`.

@@ -25,6 +25,7 @@ Exposes:
     d'émission.
 
 Handles:
+  `-t 0` vaut aucun délai, comme l'ancien `run` (ajout du lot 2b : la spec ne le disait pas).
   Message `-` : lu en entier sur l'entrée standard ; vide ⇒ erreur d'usage (code 2). Message
     vide en argument : idem.
   Un seul tour (`run_batch` n'est pas exposé, `DEC-1`) sur l'agent du contexte ; la session est
@@ -71,5 +72,6 @@ Scenario: message vide
   Then erreur d'usage, code 2, aucune session ouverte
 
 Tasks:
-  [ ] `run.rs` et ses tests (agent simulé ; sorties capturées) — E8.
+  [x] `run.rs` et ses tests (agent simulé ; sorties capturées) — E8 (lot 2b). Test d'intégration binaire
+    `one_shot.rs` retiré : remplacé par les tests unitaires de `run.rs` (le binaire ne joint pas de LLM sans cluster).
   [?] `-m` : profil de modèle du catalogue (ASSUMPTION du DSD `batch` « Compatibilité »).

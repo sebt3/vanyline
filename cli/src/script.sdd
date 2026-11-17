@@ -78,3 +78,4 @@ Scenario: échéance
 
 Tasks:
   [ ] `script.rs` et ses tests — E8.
+  [?] BLOQUÉ (2026-11-17) : lymaille 0.3.0 n'offre aucune API publique pour exécuter un script hors session avec des constantes Rhai en lecture seule (`Scratchpad::run` existe, pas les constantes ; préfixer le script par `const k = "v";` mettrait les valeurs dans le journal et décalerait les positions d'erreur). Option A : une API publique de constantes côté lymaille ; option B : amender `batch#FR-5` en une fonction Rhai `param("nom")` enregistrée par `with_registration`, valeurs absentes du texte et du journal. Décision du développeur requise.

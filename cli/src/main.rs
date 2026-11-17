@@ -31,6 +31,14 @@ mod exit_code;
 #[allow(dead_code)]
 mod session_open;
 
+// Commande `run` (run.sdd) : dispatch dans `main`.
+mod run;
+
+// Owner, namespace et réglages utilisateur (target.sdd) : consommé par chat et run ; `resolve_namespace`
+// attend les commandes d'objets (E9, suite). Retirer le allow quand il n'y a plus de code mort.
+#[allow(dead_code)]
+mod target;
+
 mod tools;
 
 mod mcp_cmd;
@@ -90,17 +98,30 @@ enum Commands {
     /// Lister ou supprimer les sessions
     #[command(subcommand)]
     Sessions(sessions_cmd::Commands),
-    /// One-shot message to an LLM agent (provisoire : voir lot 3)
+    /// Un tour de l'agent d'un projet, sans TUI (`run.sdd`)
     Run {
+        /// Message du tour ; `-` lit l'entrée standard en entier
         message: String,
-        /// Override du modèle de l'agent pour ce run (sans toucher la config)
+        /// Projet du contexte de travail
+        #[arg(long)]
+        context: String,
+        /// Sandbox de travail
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Reprendre la dernière session du projet
+        #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+        continue_: bool,
+        /// Reprendre une session précise
+        #[arg(long)]
+        resume: Option<String>,
+        /// Profil de modèle du catalogue (`-m`)
         #[arg(short = 'm', long = "model")]
         model: Option<String>,
-        /// Timeout global du run, en secondes (0 = aucune limite)
+        /// Délai du tour, en secondes (absent ou 0 : aucun délai)
         #[arg(short = 't', long = "timeout")]
         timeout: Option<u64>,
-        /// Sortie structurée : un objet JSON par événement
-        #[arg(short = 'j', long = "json")]
+        /// Sortie JSONL : un événement de session par ligne
+        #[arg(long)]
         json: bool,
     },
     /// Manage conversations
@@ -246,13 +267,32 @@ async fn main() -> std::process::ExitCode {
                 cli.repo.as_deref(),
             ));
         }
-        Some(Commands::Run { .. }) => {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "run : pas encore disponible dans cette version (voir lot 3)"
-            );
-            return std::process::ExitCode::from(1);
+        Some(Commands::Run {
+            message,
+            context,
+            sandbox,
+            continue_,
+            resume,
+            model,
+            timeout,
+            json,
+        }) => {
+            let args = run::RunArgs {
+                message,
+                context,
+                sandbox,
+                continue_,
+                resume,
+                model,
+                timeout,
+                json,
+            };
+            let global = chat::GlobalOptions {
+                owner: cli.owner.clone(),
+                repo: cli.repo.clone(),
+                namespace: cli.namespace.clone(),
+            };
+            return exit_code::from_outcome(run::run_run(args, global).await);
         }
         Some(Commands::Conversations(cmd)) => run_conversation(cmd),
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
@@ -1131,22 +1171,27 @@ async fn run_sandbox_k8s(
 mod tests {
     use super::*;
 
-    // 1. run_timeout_parses
+    // Grammaire de `run` (run.sdd, main.sdd) : `--context` obligatoire, `-c` et `--resume` exclusifs.
+
     #[test]
     fn run_timeout_parses() {
-        let cli = Cli::try_parse_from(["vanyline", "run", "hello", "-t", "5"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["vanyline", "run", "hello", "--context", "p", "-t", "5"]).unwrap();
         match cli {
             Cli {
                 command:
                     Some(Commands::Run {
                         message,
+                        context,
                         model,
                         timeout,
                         json,
+                        ..
                     }),
                 ..
             } => {
                 assert_eq!(message, "hello");
+                assert_eq!(context, "p");
                 assert_eq!(model, None);
                 assert_eq!(timeout, Some(5));
                 assert!(!json);
@@ -1155,23 +1200,22 @@ mod tests {
         }
     }
 
-    // 2. run_json_flag_parses
     #[test]
     fn run_json_flag_parses() {
-        let cli = Cli::try_parse_from(["vanyline", "run", "hello", "--json"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["vanyline", "run", "hello", "--context", "p", "--json"]).unwrap();
         match cli {
             Cli {
                 command:
                     Some(Commands::Run {
                         message,
-                        model,
                         timeout,
                         json,
+                        ..
                     }),
                 ..
             } => {
                 assert_eq!(message, "hello");
-                assert_eq!(model, None);
                 assert_eq!(timeout, None);
                 assert!(json);
             }
@@ -1179,22 +1223,28 @@ mod tests {
         }
     }
 
-    // 3. run_defaults_no_flags
     #[test]
     fn run_defaults_no_flags() {
-        let cli = Cli::try_parse_from(["vanyline", "run", "hello"]).unwrap();
+        let cli = Cli::try_parse_from(["vanyline", "run", "hello", "--context", "p"]).unwrap();
         match cli {
             Cli {
                 command:
                     Some(Commands::Run {
                         message,
+                        sandbox,
+                        continue_,
+                        resume,
                         model,
                         timeout,
                         json,
+                        ..
                     }),
                 ..
             } => {
                 assert_eq!(message, "hello");
+                assert_eq!(sandbox, None);
+                assert!(!continue_);
+                assert_eq!(resume, None);
                 assert_eq!(model, None);
                 assert_eq!(timeout, None);
                 assert!(!json);
@@ -1203,33 +1253,57 @@ mod tests {
         }
     }
 
-    // 4. run_rejects_unknown_flag
     #[test]
     fn run_rejects_unknown_flag() {
-        let result = Cli::try_parse_from(["vanyline", "run", "hello", "--nope"]);
+        let result = Cli::try_parse_from(["vanyline", "run", "hello", "--context", "p", "--nope"]);
         assert!(result.is_err());
     }
 
-    // 5. run_model_flag_parses
     #[test]
     fn run_model_flag_parses() {
-        let cli = Cli::try_parse_from(["vanyline", "run", "hello", "-m", "qwen"]).unwrap();
+        let cli = Cli::try_parse_from(["vanyline", "run", "hello", "--context", "p", "-m", "qwen"])
+            .unwrap();
         match cli {
             Cli {
-                command:
-                    Some(Commands::Run {
-                        message,
-                        model,
-                        timeout,
-                        json,
-                    }),
+                command: Some(Commands::Run { message, model, .. }),
                 ..
             } => {
                 assert_eq!(message, "hello");
                 assert_eq!(model, Some("qwen".to_string()));
-                assert_eq!(timeout, None);
-                assert!(!json);
             }
+            _ => panic!("expected Commands::Run"),
+        }
+    }
+
+    #[test]
+    fn run_exige_le_contexte() {
+        let result = Cli::try_parse_from(["vanyline", "run", "hello"]);
+        assert!(result.is_err(), "--context est obligatoire");
+    }
+
+    #[test]
+    fn run_continue_et_resume_exclusifs() {
+        let result = Cli::try_parse_from([
+            "vanyline",
+            "run",
+            "hello",
+            "--context",
+            "p",
+            "-c",
+            "--resume",
+            "s-1",
+        ]);
+        assert!(result.is_err(), "-c et --resume s'excluent");
+    }
+
+    #[test]
+    fn run_message_tiret_lit_l_entree() {
+        let cli = Cli::try_parse_from(["vanyline", "run", "-", "--context", "p"]).unwrap();
+        match cli {
+            Cli {
+                command: Some(Commands::Run { message, .. }),
+                ..
+            } => assert_eq!(message, "-"),
             _ => panic!("expected Commands::Run"),
         }
     }

@@ -25,6 +25,7 @@ use crate::host::session_store::FileSessionStore;
 use crate::session_open::{
     self, KubeEnv, OpenEnv, OpenError, OpenedSession, RefusingSummarizer, Resume, SessionRequest,
 };
+use crate::target::{Settings, TargetError, resolve_owner};
 use crate::tui::sink::TuiSink;
 use crate::tui::state::{TodoItem, TranscriptItem};
 use crate::tui::{
@@ -290,6 +291,12 @@ impl DirtyFiles for WorktreeSandbox {
     }
 }
 
+/// Owner de `chat` : `--owner`, puis `defaults.owner` du niveau utilisateur (`target.sdd`, `AC-7`).
+pub fn owner_du_chat(global: &GlobalOptions, layers: &Layers) -> Result<String, TargetError> {
+    let reglages = Settings::load(layers)?;
+    resolve_owner(global.owner.as_deref(), &reglages)
+}
+
 /// Point d'entrée de `vanyline chat` : rend le code de sortie de la commande.
 pub async fn run_chat(args: ChatArgs, global: GlobalOptions) -> ExitOutcome {
     if !terminal_requis(
@@ -299,11 +306,20 @@ pub async fn run_chat(args: ChatArgs, global: GlobalOptions) -> ExitOutcome {
         ecrire_erreur("VNL-CLI-CHT-001: chat exige un terminal sur l'entrée et la sortie standard");
         return ExitOutcome::Usage;
     }
-    let Some(owner) = global.owner.clone() else {
+    let Some(personnel) = dirs::home_dir() else {
         ecrire_erreur(
-            "VNL-CLI-CHT-002: --owner requis (la valeur par défaut n'est pas lue dans ce lot)",
+            "VNL-CLI-CHT-004: $HOME absent : les réglages utilisateur ne peuvent pas être lus",
         );
         return ExitOutcome::Usage;
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let layers = Layers::discover(&personnel, &cwd, global.repo.as_deref(), Path::exists);
+    let owner = match owner_du_chat(&global, &layers) {
+        Ok(owner) => owner,
+        Err(erreur) => {
+            ecrire_erreur(&erreur.to_string());
+            return ExitOutcome::Usage;
+        }
     };
     let resume = match choix_de_reprise(&args) {
         Ok(resume) => resume,
@@ -409,6 +425,38 @@ mod tests {
             Ok(Resume::Id(id)) if id.as_str() == "s-1"
         ));
         assert!(choix_de_reprise(&args(false, Some(""))).is_err());
+    }
+
+    /// Scenario `owner par l'option puis par le réglage` appliqué à `chat` : sans `--owner`, le réglage utilisateur
+    /// sert ; `--owner` l'emporte.
+    #[test]
+    fn owner_de_chat_par_l_option_puis_par_le_reglage() {
+        let home = tempfile::tempdir().expect("répertoire personnel temporaire");
+        let dossier = home.path().join(".config").join("vanyline");
+        std::fs::create_dir_all(&dossier).expect("niveau utilisateur");
+        std::fs::write(dossier.join("config.yaml"), "defaults:\n  owner: alice\n")
+            .expect("config.yaml utilisateur");
+        let layers = Layers::discover(home.path(), home.path(), None, |_| false);
+        let sans_option = GlobalOptions::default();
+        let avec_option = GlobalOptions {
+            owner: Some("bob".to_owned()),
+            ..GlobalOptions::default()
+        };
+
+        assert_eq!(owner_du_chat(&sans_option, &layers).as_deref(), Ok("alice"));
+        assert_eq!(owner_du_chat(&avec_option, &layers).as_deref(), Ok("bob"));
+    }
+
+    /// Scenario `aucun owner` : ni option ni réglage, erreur d'usage (code 2 côté `run_chat`).
+    #[test]
+    fn owner_de_chat_absent_est_une_erreur_d_usage() {
+        let home = tempfile::tempdir().expect("répertoire personnel temporaire");
+        let layers = Layers::discover(home.path(), home.path(), None, |_| false);
+
+        assert!(matches!(
+            owner_du_chat(&GlobalOptions::default(), &layers),
+            Err(TargetError::Usage(_))
+        ));
     }
 
     /// L'historique repris : messages utilisateur et textes de l'assistant seulement.
