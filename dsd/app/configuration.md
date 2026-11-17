@@ -178,7 +178,9 @@ Hors périmètre :
       vérifie la fraîcheur. Aucun miroir Rust n'est écrit par vanyline.
     - **Alternatives:** miroirs gardés par des tests de contrat (écartés dès que l'export amont existe) ; JSON brut sans types fins (écarté :
       formulaires peu guidés).
-    - **Consequences:** voir `OI-1` pour l'écart de bibliothèque de composants du générateur.
+    - **Consequences:** les écrans se composent avec **Nuxt UI** et Reka UI, la bibliothèque du frontend (décision du développeur
+      principal, 2026-11-17 : on colle à celle de la refonte visuelle, dont le rendu convient). Du générateur `scaffold` de `miryad` (qui
+      produit du shadcn-vue) on ne retient que l'IR et les types ; les listes et formulaires sont écrits à la main sur Nuxt UI.
     - **Source:** décision du développeur principal, 2026-11-13 (« miryad-core fournit le tooling, on doit arrimer »), précisée par la vérification de `CON-5`
 
 ## Réalisation SpecDD
@@ -207,9 +209,6 @@ Hors périmètre :
 
 ## Open Issues
 
-- **OI-1 - Bibliothèque de composants du générateur.** Le `scaffold` du template `miryad` génère des écrans List/Form/View en **shadcn-vue** ;
-  le frontend de vanyline utilise **Nuxt UI** et Reka UI. Brancher le générateur tel quel mélangerait deux bibliothèques. **TBD :** adapter
-  ou paramétrer ses templates pour Nuxt UI (côté `miryad`), ou n'en retenir que l'IR et les types et écrire les listes à la main.
 - **OI-2 - Essais de connexion.** Les écrans actuels testent un fournisseur (liste des modèles) et un serveur MCP (liste des outils) par des
   routes propres de l'ancien backend, retirées. **TBD :** une route de `app` qui fait cet essai sous les droits de l'utilisateur, ou s'en
   passer (l'échec se voit à l'usage).
