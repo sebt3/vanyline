@@ -33,6 +33,7 @@ Handles:
     `providers/<nom>.yaml` (types `serde` de lymaille). Un provider ne contient que des RÉFÉRENCES
     d'authentification, jamais une valeur : @put_provider refuse (@HostError::Invalid) une valeur que
     le `SecretDetector` de lymaille reconnaît ; la résolution du nom est dans ./secrets.sdd.
+  Un lien symbolique rencontré à la lecture (fichier d'une définition) est refusé (@HostError::Invalid), jamais suivi.
   Une définition invalide est refusée à l'écriture par la validation de lymaille
     (@HostError::Invalid avec sa cause) ; un fichier illisible à la lecture rend @HostError::Format
     avec son chemin et n'empêche pas la lecture des autres.
@@ -75,5 +76,5 @@ Scenario: fichier illisible
   Then l'agent valide est listé, l'autre signalé avec son chemin et sa cause
 
 Tasks:
-  [ ] `catalog_store.rs` et ses tests.
+  [x] `catalog_store.rs` et ses tests.
   [x] Décidé 2026-11-17 : aucun champ `version:` ; le seul format de lymaille (`hote#OI-4` soldé).

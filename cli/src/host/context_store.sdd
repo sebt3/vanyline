@@ -52,4 +52,4 @@ Scenario: secret refusé
   Then @HostError::Invalid, aucun fichier
 
 Tasks:
-  [ ] `context_store.rs` et ses tests.
+  [x] `context_store.rs` et ses tests.

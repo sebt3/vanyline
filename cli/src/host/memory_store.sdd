@@ -27,6 +27,9 @@ Handles:
     répertoire).
   Un niveau partagé absent : une portée de ce niveau est une erreur @HostError::Invalid explicite,
     jamais une écriture au niveau utilisateur par défaut.
+  Une portée de session n'est pas rangée dans `memories/` : toute opération sur elle est refusée
+    (@HostError::Invalid). Un fichier de mémoire illisible fait échouer `list` en entier, le nom du
+    fichier dans l'erreur (le trait ne rend pas de résultat partiel).
 
 Must:
   Écrire par @write_atomic.
@@ -51,5 +54,5 @@ Scenario: portée sans niveau partagé
   Then @HostError::Invalid, aucun fichier
 
 Tasks:
-  [ ] `memory_store.rs` et ses tests.
+  [x] `memory_store.rs` et ses tests.
   [x] Décidé 2026-11-17 : disposition `memories/<référence>/<id>.md` (`hote#OI-1` soldé).

@@ -16,7 +16,7 @@ References:
   ./layers.sdd ./files.sdd ./catalog_store.sdd
 
 Exposes:
-  @FileToolsets — `new(layers: &Layers)` ; implémente `lymaille::ToolsetStore` (`get_active`,
+  @FileToolsets — `new(layers: &Layers, render_cap_chars: u64)` (plafond passé à la validation de lymaille, `Skill::check_size` ; la CLI passe `262_144`, la plus grande limite de lymaille pour un `SKILL.md`, `dsd/cli/sync.md`) ; implémente `lymaille::ToolsetStore` (`get_active`,
     `get_draft`, `put_draft`) et `DraftStore` (`list_drafts`, `delete_draft`, `put_type_draft`, …) ;
     @promote(niveau: @Level, nom: `&str`) -> `Result<(), HostError>` ; @list_active() ->
     `Vec<Entrée>`.
@@ -31,7 +31,16 @@ Handles:
     rend actif un brouillon : il valide le toolset (validation de lymaille), copie le répertoire
     de `toolsets-drafts/` vers `toolsets/`, puis supprime le brouillon.
   Lecture en couches comme ./catalog_store.sdd (partagé d'abord).
-  Un `SKILL.md` est lu par `Skill::parse` ; sa taille maximale est celle de lymaille.
+  Brouillons de type de contexte (`put_type_draft`, …) : un fichier `toolsets-drafts/<nom>.type.yaml`
+    (aucune collision avec les répertoires de toolsets, dont les noms sont des identifiants sans point).
+  `put_draft` et `delete_draft` n'opèrent qu'au niveau utilisateur : un brouillon du niveau partagé est
+    lisible (`get_draft`) mais ni écrit ni supprimé par les traits (écriture partagée explicite, comme
+    ./catalog_store.sdd). Un répertoire de toolset qui est un lien symbolique est refusé.
+  Un `SKILL.md` est lu par `Skill::parse` et ÉCRIT par un rendu propre à la CLI (lymaille n'offre pas de
+    rendu) : frontmatter YAML (`name`, `description`, `license`, `compatibility`, `metadata`) puis corps ;
+    l'aller-retour parse → rendu → parse est vérifié. Un `Toolset` se construit par désérialisation (la
+    CLI dépend de `vynil-core` pour `Semver`, déjà dans le graphe par lymaille). Sa taille maximale est
+    celle de lymaille.
 
 Must:
   Écrire chaque fichier du répertoire par @write_atomic ; une promotion interrompue laisse le
@@ -58,11 +67,16 @@ Scenario: promotion interrompue
   When @promote
   Then le brouillon est intact, aucun toolset actif n'existe
 
+Scenario: aller-retour d'un skill
+  Given un `SKILL.md` avec frontmatter complet et corps multi-lignes
+  When parse, rendu, parse
+  Then le skill est identique
+
 Scenario: brouillon invalide
   Given un brouillon dont le module Rhai est refusé par la validation
   When @promote
   Then @HostError::Invalid, l'actif inchangé
 
 Tasks:
-  [ ] `toolset_store.rs` et ses tests.
+  [x] `toolset_store.rs` et ses tests.
   [x] Décidé 2026-11-17 : brouillons dans le répertoire frère `toolsets-drafts/<nom>/`.

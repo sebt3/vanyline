@@ -4,11 +4,16 @@
 use std::path::PathBuf;
 
 pub mod audit;
+pub mod catalog_store;
+pub mod context_store;
 pub mod files;
 pub mod layers;
+pub mod memory_store;
 pub mod process_lock;
+pub mod secrets;
 pub mod session_index;
 pub mod session_store;
+pub mod toolset_store;
 
 /// Erreur commune aux modules de l'hôte (`host/mod.sdd`, `HostError`).
 ///

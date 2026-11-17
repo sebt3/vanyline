@@ -8991,7 +8991,9 @@ dependencies = [
  "vanyline-crds",
  "vanyline-lib",
  "vanyline-tools",
+ "vynil-core",
  "yaml_serde",
+ "zeroize",
 ]
 
 [[package]]
