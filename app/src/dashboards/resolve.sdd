@@ -46,7 +46,10 @@ Accepts:
     `VNL-APP-DSH-010` (jamais un défaut à la place).
   - Écran sandbox : `scope=sandbox` + `sandbox` non vide, nom d'une sandbox de l'appelant ;
     `project` ignoré : la vue d'ensemble est celle du PROJET de la sandbox, déduit d'elle.
-    Sandbox absente, vide ou inconnue de l'appelant → `VNL-APP-DSH-010`.
+    Sandbox absente, vide ou inconnue de l'appelant → `VNL-APP-DSH-010`. Le nom n'est unique que
+    par projet (deux owners ont des namespaces distincts, la recherche est bornée à l'appelant) :
+    si deux projets de l'appelant portent une sandbox de ce nom, l'écran est ambigu →
+    `VNL-APP-DSH-010` (échec fermé, jamais un choix arbitraire).
   - `scope` inconnu (`"global"`, casse fausse) → `VNL-APP-DSH-010`.
 
 Returns:

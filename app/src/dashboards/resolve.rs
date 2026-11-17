@@ -154,19 +154,24 @@ async fn projet_de_sandbox(
     owner: i32,
     nom: &str,
 ) -> Result<(i32, String), AppError> {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
     use crate::db::entities::{
         projects,
         sandboxes::{Column, Entity},
     };
 
-    let sandbox = Entity::find()
+    // Le nom n'est unique que par projet : deux correspondances = écran ambigu (échec fermé).
+    let mut trouvees = Entity::find()
         .filter(Column::OwnerId.eq(owner))
         .filter(Column::Name.eq(nom))
-        .one(db)
-        .await?
-        .ok_or_else(ecran_impossible)?;
+        .limit(2)
+        .all(db)
+        .await?;
+    if trouvees.len() != 1 {
+        return Err(ecran_impossible());
+    }
+    let sandbox = trouvees.remove(0);
     let projet = projects::Entity::find_by_id(sandbox.project_id)
         .one(db)
         .await?
@@ -578,6 +583,43 @@ mod tests {
                 "le marqueur 010 doit être rendu pour {query}, obtenu {json}"
             );
         }
+    }
+
+    /// Une sandbox de même nom dans deux projets de l'appelant : écran ambigu, 010.
+    #[tokio::test]
+    async fn sandbox_ambigue_refuse_010() {
+        let state = state_with(real_db().await);
+        let cookie = session_cookie(&state, "alice").await;
+        let alice = resolve_user(&state.auth.db, "alice", None)
+            .await
+            .expect("alice")
+            .id;
+        let p1 = projet_de_test(&state.auth.db, alice, "p1").await;
+        let p2 = projet_de_test(&state.auth.db, alice, "p2").await;
+        sandbox_de_test(&state.auth.db, alice, p1, "s1").await;
+        crate::db::entities::sandboxes::Entity::insert(
+            crate::db::entities::sandboxes::ActiveModel {
+                id: NotSet,
+                owner_id: Set(alice),
+                project_id: Set(p2),
+                name: Set("s1".to_string()),
+                cr_name: Set("cr-s1-bis".to_string()),
+                missing_since: NotSet,
+                created_at: NotSet,
+            },
+        )
+        .exec(&state.auth.db)
+        .await
+        .expect("la seconde sandbox s'insère");
+        let app = router(state);
+        let (status, json) = resolve(&app, &cookie, "scope=sandbox&sandbox=s1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("VNL-APP-DSH-010")),
+            "{json}"
+        );
     }
 
     /// Scenario: `un défaut livré absent est une faute du serveur` — 500 avec `VNL-APP-DSH-008`
