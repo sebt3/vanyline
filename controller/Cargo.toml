@@ -29,6 +29,7 @@ thiserror = "2"
 futures = "0.3"
 rand = "0.8"
 base64 = "0.22"
+sha2 = "0.10"
 
 [dev-dependencies]
 # rustls en dev-dependency : les tests du controller construisent des Client

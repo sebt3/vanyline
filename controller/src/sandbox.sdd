@@ -239,7 +239,7 @@ Must:
     path `/` type `Prefix`, backend Service @service_name par NUMÉRO de port @MCP_PORT
     (`name` laissé `None`) ; ownerReference Sandbox.
   Calculer le status (@compute_status) : `phase` = la phase calculée telle quelle,
-    `service` = @service_name TOUJOURS, une unique condition `Ready` — `Running` ⇒
+    `service` = @service_name TOUJOURS, deux conditions : `Ready` (voir ci-dessous) puis `RestartPending` (voir « Détecter la dérive de spec ») ; `Ready` — `Running` ⇒
     `True`/`PodRunning`, `Suspended` ⇒ `False`/`Suspended`, TOUTE autre valeur (`Failed`,
     `Provisioning`, chaîne inconnue) ⇒ `False`/`NotRunning` — `message` =
     `phase=<phase>`, `observed_generation` = generation de la CR,
@@ -247,7 +247,7 @@ Must:
   Détecter la dérive de spec (condition `RestartPending`, `dsd/workspaces/sandboxes.md#DEC-10`, décidé
     2026-11-17) : le Pod porte l'annotation `vanyline.solidite.fr/spec-hash` = empreinte SHA-256 (hex) de la
     « spec utile » de la Sandbox au moment de sa création, calculée par @spec_hash : sérialisation JSON canonique
-    (clés triées) de `{toolchains, resources, image, branch, env}` de `spec` — les champs qui exigent un
+    (clés triées) de `{toolchains, resources, image, branch}` de `spec` (l'`env` vit dans `toolchains[].env`, déjà couvert) — les champs qui exigent un
     redémarrage du Pod ; `egress`, `suspended`, labels et annotations n'en font PAS partie. @compute_status
     ajoute une SECONDE condition `RestartPending` : `True`/`SpecDrift` (`message` = « spec modifiée depuis le
     démarrage du Pod ») quand un Pod existe ET que son annotation diffère de @spec_hash de la spec courante (ou
@@ -1288,7 +1288,7 @@ Scenario: ingress_annotation_certmanager_ecrase_celle_de_l_application
 Scenario: status_running_ready_true_pod_running
   Given la phase `"Running"` pour la Sandbox `demo-branch`
   When @compute_status calcule
-  Then `phase: Running`, `service: sandbox-demo-branch`, condition unique `Ready` =
+  Then `phase: Running`, `service: sandbox-demo-branch`, condition `Ready` =
     `True`/`PodRunning` (test existant `compute_status_running`)
 
 Scenario: status_provisioning_ready_false_not_running
@@ -1459,4 +1459,4 @@ Scenario: cleanup_job_remove_exist_non_succeeded_attente_cluster
   When le reconciler traite @Event::Cleanup
   Then l'observation du log/spacing (409 VNL-CTL-001 warn 30 s vs attente propre)
     départage le comportement réel du rappel de `create`
-  [ ] `@spec_hash`, annotation `vanyline.solidite.fr/spec-hash` du Pod, condition `RestartPending` de @compute_status (décidé 2026-11-17) ; l'affichage « redémarrage requis » de la CLI (`sandbox show`, `apply`) et de l'app lit cette condition. Reste hors de cette tâche : checkout de la nouvelle branche au redémarrage (`vanyline.sdd`, tâche « option C »).
+  [x] `@spec_hash`, annotation `vanyline.solidite.fr/spec-hash` du Pod, condition `RestartPending` de @compute_status (décidé 2026-11-17 ; FAIT lot 7b, 5 Scenarios verts) ; l'affichage « redémarrage requis » de la CLI (`sandbox show`, `apply`) et de l'app lit cette condition. Reste hors de cette tâche : checkout de la nouvelle branche au redémarrage (`vanyline.sdd`, tâche « option C »).

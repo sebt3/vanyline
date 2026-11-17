@@ -21,6 +21,8 @@ use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{Event, finalizer};
 use kube::{Client, Resource, ResourceExt};
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 use crate::application::APP_LABEL;
 use crate::error::ControllerError;
@@ -33,7 +35,7 @@ use crate::project::{
 };
 use vanyline_crds::{
     Application, EgressPort, EgressRule, LspSpec, MCP_PORT, OPS_PORT, Owner, Project, Sandbox,
-    SandboxStatus, Toolchain, service_name,
+    SandboxSpec, SandboxStatus, Toolchain, service_name,
 };
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
@@ -731,6 +733,10 @@ pub fn build_sandbox_pod(
             name: Some(pod_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
             labels: Some(labels),
+            annotations: Some(BTreeMap::from([(
+                SPEC_HASH_ANNOTATION.to_string(),
+                spec_hash(&sandbox.spec),
+            )])),
             owner_references: Some(vec![
                 sandbox
                     .controller_owner_ref(&())
@@ -778,6 +784,55 @@ pub fn build_sandbox_pod(
 
 const FINALIZER: &str = "vanyline.solidite.fr/sandbox-cleanup";
 const SERVICE_PORT_NAME: &str = "mcp";
+/// Annotation du Pod portant l'empreinte de la spec utile (sandbox.sdd, Must « Détecter la dérive de spec »).
+pub const SPEC_HASH_ANNOTATION: &str = "vanyline.solidite.fr/spec-hash";
+
+/// Empreinte SHA-256 (hex) de la « spec utile » (sandbox.sdd, Must « Détecter la dérive de spec ») :
+/// sérialisation JSON canonique (clés triées, récursivement) de `{toolchains, resources, image, branch}`.
+/// `env` n'est pas un champ de premier niveau de `SandboxSpec` : il vit dans `toolchains[].env`,
+/// donc déjà couvert. `egress`, `suspended`, labels et annotations n'en font pas partie.
+pub fn spec_hash(spec: &SandboxSpec) -> String {
+    let mut useful = serde_json::Map::new();
+    useful.insert("toolchains".to_string(), json_or_null(&spec.toolchains));
+    useful.insert("resources".to_string(), json_or_null(&spec.resources));
+    useful.insert("image".to_string(), json_or_null(&spec.image));
+    useful.insert("branch".to_string(), json_or_null(&spec.branch));
+    let canonical = canonical_json(&serde_json::Value::Object(useful));
+    // Un `Value` se sérialise sans échec (clés textuelles uniquement).
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    Sha256::digest(&bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, b| {
+            // Écriture dans un `String` : infaillible.
+            let _ = write!(hex, "{b:02x}");
+            hex
+        })
+}
+
+/// Sérialise une valeur de la spec utile ; `null` si la sérialisation échoue (jamais pour ces types).
+fn json_or_null<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// Recopie un `Value` avec les clés d'objet triées à chaque niveau, indépendamment de la feature
+/// `preserve_order` de `serde_json` (sans elle, `Map` est déjà un `BTreeMap`).
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<&String, &serde_json::Value> = map.iter().collect();
+            serde_json::Value::Object(
+                sorted
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), canonical_json(v)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonical_json).collect())
+        }
+        other => other.clone(),
+    }
+}
 
 pub struct Context {
     pub client: Client,
@@ -1375,26 +1430,59 @@ pub fn build_sandbox_egress_netpol(
     })
 }
 
-/// Status attendu : `service`, condition `Ready` reflétant `phase == "Running"`.
-pub fn compute_status(sandbox: &Sandbox, phase: &str) -> SandboxStatus {
+/// Status attendu : `service`, condition `Ready` reflétant `phase == "Running"`, puis condition
+/// `RestartPending` (sandbox.sdd, Must « Détecter la dérive de spec ») : `True`/`SpecDrift` quand
+/// `pod` existe et que son annotation d'empreinte diffère de `spec_hash(spec)` ou est absente ;
+/// `False`/`UpToDate` sinon. `pod` = Pod existant de la sandbox, `None` s'il est absent ou supprimé
+/// (suspension). La phase ne dépend jamais de `RestartPending`.
+pub fn compute_status(sandbox: &Sandbox, phase: &str, pod: Option<&Pod>) -> SandboxStatus {
     let (status, reason) = match phase {
         "Running" => ("True", "PodRunning"),
         "Suspended" => ("False", "Suspended"),
         _ => ("False", "NotRunning"),
     };
+    let current = spec_hash(&sandbox.spec);
+    let drift = pod.is_some_and(|p| {
+        p.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(SPEC_HASH_ANNOTATION))
+            != Some(&current)
+    });
+    let (restart_status, restart_reason, restart_message) = if drift {
+        (
+            "True",
+            "SpecDrift",
+            "spec modifiée depuis le démarrage du Pod",
+        )
+    } else {
+        ("False", "UpToDate", "pod à jour avec la spec courante")
+    };
     SandboxStatus {
         phase: Some(phase.to_string()),
         service: Some(service_name(&sandbox.name_any())),
-        conditions: vec![Condition {
-            type_: "Ready".to_string(),
-            status: status.to_string(),
-            reason: reason.to_string(),
-            message: format!("phase={phase}"),
-            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                k8s_openapi::jiff::Timestamp::now(),
-            ),
-            observed_generation: sandbox.meta().generation,
-        }],
+        conditions: vec![
+            Condition {
+                type_: "Ready".to_string(),
+                status: status.to_string(),
+                reason: reason.to_string(),
+                message: format!("phase={phase}"),
+                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    k8s_openapi::jiff::Timestamp::now(),
+                ),
+                observed_generation: sandbox.meta().generation,
+            },
+            Condition {
+                type_: "RestartPending".to_string(),
+                status: restart_status.to_string(),
+                reason: restart_reason.to_string(),
+                message: restart_message.to_string(),
+                last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    k8s_openapi::jiff::Timestamp::now(),
+                ),
+                observed_generation: sandbox.meta().generation,
+            },
+        ],
     }
 }
 
@@ -1508,10 +1596,12 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
 
     let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
     let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(ctx.client.clone(), ns);
+    // Pod existant, lu une fois : phase et condition `RestartPending` (sandbox.sdd, « Détecter la dérive de spec »).
+    let existing_pod = pods.get_opt(&pod_name(&sandbox.name_any())).await?;
     let phase = if sandbox.spec.suspended {
-        let name = pod_name(&sandbox.name_any());
-        if pods.get_opt(&name).await?.is_some() {
-            pods.delete(&name, &DeleteParams::default()).await?;
+        if existing_pod.is_some() {
+            pods.delete(&pod_name(&sandbox.name_any()), &DeleteParams::default())
+                .await?;
         }
         "Suspended".to_string()
     } else if !checked_out {
@@ -1532,10 +1622,10 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             lsp_image_docker: ctx.lsp_image_docker.clone(),
             lsp_image_python: ctx.lsp_image_python.clone(),
         };
-        if let Some(pod) = pods.get_opt(&pod_name(&sandbox.name_any())).await? {
-            match pod.status.and_then(|s| s.phase) {
-                Some(p) if p == "Running" => "Running".to_string(),
-                Some(p) if p == "Failed" => "Failed".to_string(),
+        if let Some(pod) = &existing_pod {
+            match pod.status.as_ref().and_then(|s| s.phase.as_deref()) {
+                Some("Running") => "Running".to_string(),
+                Some("Failed") => "Failed".to_string(),
                 _ => "Provisioning".to_string(),
             }
         } else {
@@ -1618,7 +1708,13 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
     }
 
     let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
-    let status = compute_status(sandbox, &phase);
+    // Suspendu : le Pod vient d'être supprimé, il ne porte plus d'empreinte à comparer.
+    let status_pod = if sandbox.spec.suspended {
+        None
+    } else {
+        existing_pod.as_ref()
+    };
+    let status = compute_status(sandbox, &phase, status_pod);
     let patch = serde_json::json!({ "status": status });
     sandboxes
         .patch_status(
@@ -3117,11 +3213,11 @@ mod tests {
     #[test]
     fn compute_status_running() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let status = compute_status(&sandbox, "Running");
+        let status = compute_status(&sandbox, "Running", None);
 
         assert_eq!(status.phase, Some("Running".to_string()));
         assert_eq!(status.service, Some("sandbox-demo-branch".to_string()));
-        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions.len(), 2);
         let cond = &status.conditions[0];
         assert_eq!(cond.status, "True");
         assert_eq!(cond.reason, "PodRunning");
@@ -3130,11 +3226,11 @@ mod tests {
     #[test]
     fn compute_status_provisioning() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let status = compute_status(&sandbox, "Provisioning");
+        let status = compute_status(&sandbox, "Provisioning", None);
 
         assert_eq!(status.phase, Some("Provisioning".to_string()));
         assert_eq!(status.service, Some("sandbox-demo-branch".to_string()));
-        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions.len(), 2);
         let cond = &status.conditions[0];
         assert_eq!(cond.status, "False");
         assert_eq!(cond.reason, "NotRunning");
@@ -3143,14 +3239,113 @@ mod tests {
     #[test]
     fn compute_status_suspended() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let status = compute_status(&sandbox, "Suspended");
+        let status = compute_status(&sandbox, "Suspended", None);
 
         assert_eq!(status.phase, Some("Suspended".to_string()));
         assert_eq!(status.service, Some("sandbox-demo-branch".to_string()));
-        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions.len(), 2);
         let cond = &status.conditions[0];
         assert_eq!(cond.status, "False");
         assert_eq!(cond.reason, "Suspended");
+    }
+
+    // ===== spec_hash / annotation / RestartPending (sandbox.sdd, Must « Détecter la dérive de spec ») =====
+
+    fn pod_annotated(hash: Option<&str>) -> Pod {
+        let annotations =
+            hash.map(|h| BTreeMap::from([(SPEC_HASH_ANNOTATION.to_string(), h.to_string())]));
+        Pod {
+            metadata: ObjectMeta {
+                annotations,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn condition<'a>(status: &'a SandboxStatus, type_: &str) -> &'a Condition {
+        status
+            .conditions
+            .iter()
+            .find(|c| c.type_ == type_)
+            .expect("condition présente")
+    }
+
+    #[test]
+    fn spec_hash_stable_et_sensible_aux_champs_utiles() {
+        let base = make_sandbox("demo-branch", vec![], None);
+        let same = make_sandbox("demo-branch", vec![], None);
+        let toolchains_changed =
+            make_sandbox("demo-branch", vec![make_rust_tc(BTreeMap::new())], None);
+        let mut egress_changed = make_sandbox("demo-branch", vec![], None);
+        egress_changed.spec.egress = vec![EgressRule {
+            description: "api".to_string(),
+            cidr: Some("10.0.0.0/8".to_string()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let h = spec_hash(&base.spec);
+        assert_eq!(h.len(), 64, "SHA-256 hex attendu : {h}");
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(h, spec_hash(&same.spec));
+        assert_ne!(h, spec_hash(&toolchains_changed.spec));
+        assert_eq!(h, spec_hash(&egress_changed.spec));
+    }
+
+    #[test]
+    fn pod_porte_l_empreinte_de_la_spec() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None);
+        let pod = build_sandbox_pod(&sandbox, &project, &make_ctx(), None);
+        let annotations = pod
+            .metadata
+            .annotations
+            .as_ref()
+            .expect("should have annotations");
+        assert_eq!(
+            annotations.get(SPEC_HASH_ANNOTATION),
+            Some(&spec_hash(&sandbox.spec))
+        );
+    }
+
+    #[test]
+    fn restart_pending_vrai_sur_derive() {
+        let old = make_sandbox("demo-branch", vec![], None);
+        let pod = pod_annotated(Some(&spec_hash(&old.spec)));
+        let new = make_sandbox("demo-branch", vec![make_rust_tc(BTreeMap::new())], None);
+        let status = compute_status(&new, "Running", Some(&pod));
+        assert_eq!(status.phase.as_deref(), Some("Running"));
+        let rp = condition(&status, "RestartPending");
+        assert_eq!(rp.status, "True");
+        assert_eq!(rp.reason, "SpecDrift");
+        assert_eq!(rp.message, "spec modifiée depuis le démarrage du Pod");
+    }
+
+    #[test]
+    fn restart_pending_faux_apres_redemarrage() {
+        let sandbox = make_sandbox("demo-branch", vec![make_rust_tc(BTreeMap::new())], None);
+        let pod = pod_annotated(Some(&spec_hash(&sandbox.spec)));
+        let running = compute_status(&sandbox, "Running", Some(&pod));
+        let rp = condition(&running, "RestartPending");
+        assert_eq!(rp.status, "False");
+        assert_eq!(rp.reason, "UpToDate");
+
+        let suspended = compute_status(&sandbox, "Suspended", None);
+        let rp = condition(&suspended, "RestartPending");
+        assert_eq!(rp.status, "False");
+        assert_eq!(rp.reason, "UpToDate");
+    }
+
+    #[test]
+    fn restart_pending_pod_sans_annotation() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let pod = pod_annotated(None);
+        let status = compute_status(&sandbox, "Running", Some(&pod));
+        let rp = condition(&status, "RestartPending");
+        assert_eq!(rp.status, "True");
+        assert_eq!(rp.reason, "SpecDrift");
     }
 
     // ===== bare_repo mount (tâche 00) =====
@@ -5037,7 +5232,7 @@ mod tests {
     #[test]
     fn status_failed_ready_false_not_running() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let status = compute_status(&sandbox, "Failed");
+        let status = compute_status(&sandbox, "Failed", None);
         assert_eq!(status.phase.as_deref(), Some("Failed"));
         let ready = &status.conditions[0];
         assert_eq!(ready.type_, "Ready");
@@ -5050,7 +5245,7 @@ mod tests {
         let mut sandbox = make_sandbox("demo-branch", vec![], None);
         sandbox.meta_mut().generation = Some(3);
         for phase in ["Provisioning", "Running", "Suspended", "Failed"] {
-            let status = compute_status(&sandbox, phase);
+            let status = compute_status(&sandbox, phase, None);
             assert_eq!(
                 status.service.as_deref(),
                 Some("sandbox-demo-branch"),
