@@ -379,7 +379,7 @@ impl VnlK8sClient {
             &kube::api::Patch::Merge(&patch),
         )
         .await
-        .map_err(|e| VnyError::K8sApiError(e.to_string()))
+        .map_err(|e| kube_error(&e))
     }
 
     /// URL MCP HTTP-streamable de la sandbox `name` de l'Owner `owner`, posée
@@ -669,8 +669,17 @@ where
     let list = api
         .list(&kube::api::ListParams::default())
         .await
-        .map_err(|e| VnyError::K8sApiError(e.to_string()))?;
+        .map_err(|e| kube_error(&e))?;
     Ok(list.items)
+}
+
+/// Convertisseur unique des erreurs kube (`k8s.sdd`) : la réponse 404 de l'apiserver devient
+/// `K8sNotFound`, tout le reste `K8sApiError`.
+fn kube_error(e: &kube::Error) -> VnyError {
+    match e {
+        kube::Error::Api(status) if status.code == 404 => VnyError::K8sNotFound(e.to_string()),
+        _ => VnyError::K8sApiError(e.to_string()),
+    }
 }
 
 async fn get<K>(client: &kube::Client, ns: &str, name: &str) -> Result<K, VnyError>
@@ -681,9 +690,7 @@ where
         + std::fmt::Debug,
 {
     let api: kube::Api<K> = kube::Api::namespaced(client.clone(), ns);
-    api.get(name)
-        .await
-        .map_err(|e| VnyError::K8sApiError(e.to_string()))
+    api.get(name).await.map_err(|e| kube_error(&e))
 }
 
 async fn create<K>(client: &kube::Client, ns: &str, obj: K) -> Result<K, VnyError>
@@ -697,7 +704,7 @@ where
     let api: kube::Api<K> = kube::Api::namespaced(client.clone(), ns);
     api.create(&kube::api::PostParams::default(), &obj)
         .await
-        .map_err(|e| VnyError::K8sApiError(e.to_string()))
+        .map_err(|e| kube_error(&e))
 }
 
 async fn delete<K>(client: &kube::Client, ns: &str, name: &str) -> Result<(), VnyError>
@@ -710,7 +717,7 @@ where
     let api: kube::Api<K> = kube::Api::namespaced(client.clone(), ns);
     api.delete(name, &kube::api::DeleteParams::default())
         .await
-        .map_err(|e| VnyError::K8sApiError(e.to_string()))?;
+        .map_err(|e| kube_error(&e))?;
     Ok(())
 }
 
@@ -720,6 +727,31 @@ mod tests {
     use super::*;
     use crate::encode_git_path;
     use chrono::Duration;
+
+    fn api_error(code: u16) -> kube::Error {
+        kube::Error::Api(Box::new(
+            kube::core::Status::failure("boom", "r").with_code(code),
+        ))
+    }
+
+    /// Scenario `erreur_kube_404_typee` : seule la réponse 404 de l'apiserver est `K8sNotFound`.
+    #[test]
+    fn erreur_kube_404_typee() {
+        assert!(matches!(
+            kube_error(&api_error(404)),
+            VnyError::K8sNotFound(_)
+        ));
+        assert!(matches!(
+            kube_error(&api_error(500)),
+            VnyError::K8sApiError(_)
+        ));
+        assert!(matches!(
+            kube_error(&api_error(409)),
+            VnyError::K8sApiError(_)
+        ));
+        let autre = kube::Error::LinesCodecMaxLineLengthExceeded;
+        assert!(matches!(kube_error(&autre), VnyError::K8sApiError(_)));
+    }
 
     #[test]
     fn encode_git_path_preserves_separators() {

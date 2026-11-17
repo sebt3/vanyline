@@ -229,17 +229,21 @@ Raises:
   @VnyError::K8sConfigError (marqueur `"VNL-K8S-001"`) dans @VnlK8sClient::discover si
     @kube::Config::infer ou @kube::Client::try_from échoue (ni cluster in-cluster, ni
     kubeconfig joignable) — y compris quand un namespace override est fourni.
-  @VnyError::K8sApiError (marqueur `"VNL-K8S-002"`) sur tout appel API en échec :
+  @VnyError::K8sNotFound (marqueur `"VNL-K8S-003"`) quand l'apiserver répond 404 (objet de
+    l'appel absent) sur les list/get/create/delete des CRD et sur le patch de
+    @VnlK8sClient::set_sandbox_suspended : c'est le typage, pas le texte du message, qui porte
+    « introuvable » vers `app`.
+  @VnyError::K8sApiError (marqueur `"VNL-K8S-002"`) sur tout autre appel API en échec :
     list/get/create/delete des trois CRD, @VnlK8sClient::get_application, patch de
     @VnlK8sClient::set_sandbox_suspended, et le @VnlK8sClient::get_sandbox de garde des
-    trois constructeurs d'URL (ressource absente = NotFound aplati dans ce marqueur).
+    trois constructeurs d'URL (ressource absente = `K8sNotFound`, ci-dessus).
   @VnyError::K8sApiError (même marqueur `"VNL-K8S-002"`) AUSSI sur REJET LOCAL d'un nom
     d'Owner produisant un namespace DNS-1123 invalide ou > 63 caractères, AVANT tout appel à
     l'apiserver (résolution `owner_namespace_name` du `Must`) ; l'affichage porte le gabarit
     kube (« Kubernetes API error: … ») bien que la cause soit locale — cosmétique connu, la
     variante dédiée serait du luxe pour un cas non atteignable par l'app (noms sanitizés).
-  Message d'erreur = l'affichage de l'erreur kube : aucun typage de la cause (NotFound,
-    conflit de patch, transport) — aplatissement contractuel, cf. `Tasks`.
+  Message d'erreur = l'affichage de l'erreur kube ; seule la réponse 404 de l'apiserver est typée
+    (`K8sNotFound`), le reste (conflit de patch, transport) reste `K8sApiError`.
   @VnlK8sClient::watch_sandboxes ne lève jamais : les erreurs du flux deviennent des items
     @WatchEvent::Error.
   Jamais de panic dans le code de production (harnais de `/tooling.sdd`).
@@ -247,8 +251,8 @@ Raises:
 Handles:
   Absence de config K8s : @VnlK8sClient::discover échoue sur `"VNL-K8S-001"` — aucun mode
     dégradé, même avec un namespace override.
-  Ressource absente en lecture/patch : erreur `"VNL-K8S-002"` dont le message porte
-    l'affichage de l'erreur kube (NotFound non typée) ; pour les URL, la vérification
+  Ressource absente en lecture/patch : erreur typée `K8sNotFound` (`"VNL-K8S-003"`) dont le
+    message porte l'affichage de l'erreur kube ; pour les URL, la vérification
     anticipée @VnlK8sClient::get_sandbox produit cette erreur claire plutôt qu'un échec de
     connexion confus sur l'URL formée à l'aveugle.
   @VnlK8sClient::set_sandbox_suspended deux fois avec la même valeur : merge patch
@@ -319,11 +323,9 @@ Tasks:
   [?] @VnlK8sClient::sandbox_git_url accepte `raw_path` vide (URL `/git/` avec slash
     final) sans validation : contrat de transcription verbatim assumé tel quel, ou
     rejet/normalisation attendue côté lib plutôt que côté `app::api::sandboxes::raw_git_tail` ?
-  [?] Erreurs kube aplatis en `String` derrière `"VNL-K8S-002"` : un appelant ne peut pas
-    distinguer NotFound d'une erreur de transport de façon programmatique (seuls les
-    constructeurs d'URL compensent par un pré-contrôle @VnlK8sClient::get_sandbox ;
-    @VnlK8sClient::set_sandbox_suspended et les CRUD ne compensent pas). Introduire une
-    variante typée (ex: NotFound) ou la chaîne suffit-elle ?
+  [x] `k8s.rs` : les erreurs kube passent par un convertisseur unique, 404 → `K8sNotFound`,
+    le reste → `K8sApiError` ; test unitaire du convertisseur (réponse d'API 404, 500, erreur
+    non-API).
   [?] Doc de @VnlK8sClient::watch_sandboxes : « l'appelant doit relancer la boucle
     externe en cas d'erreur » — or le watcher se reconnecte en interne et ne termine
     jamais le flux ; qui de la lib ou de l'appelant porte la reprise, et un item

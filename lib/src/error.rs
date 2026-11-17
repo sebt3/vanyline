@@ -81,6 +81,11 @@ pub enum VnyError {
     #[cfg(feature = "k8s")]
     #[error("VNL-K8S-002: Kubernetes API error: {0}")]
     K8sApiError(String),
+    /// VNL-K8S-003 : ressource Kubernetes introuvable (l'apiserver a répondu 404) ; gated par
+    /// la feature `k8s`.
+    #[cfg(feature = "k8s")]
+    #[error("VNL-K8S-003: Kubernetes resource not found: {0}")]
+    K8sNotFound(String),
 }
 
 /// Conversion depuis l'erreur de la couche config : les trois variantes aux
@@ -198,6 +203,10 @@ mod tests {
             assert_eq!(
                 VnyError::K8sApiError("boom".into()).to_string(),
                 "VNL-K8S-002: Kubernetes API error: boom"
+            );
+            assert_eq!(
+                VnyError::K8sNotFound("boom".into()).to_string(),
+                "VNL-K8S-003: Kubernetes resource not found: boom"
             );
         }
     }

@@ -117,11 +117,7 @@ impl From<vanyline_lib::VnyError> for AppError {
     fn from(e: vanyline_lib::VnyError) -> Self {
         match &e {
             vanyline_lib::VnyError::K8sConfigError(_) => Self::K8sConfigError(e.to_string()),
-            vanyline_lib::VnyError::K8sApiError(s)
-                if s.contains("404") || s.contains("NotFound") || s.contains("not found") =>
-            {
-                Self::K8sNotFound(e.to_string())
-            }
+            vanyline_lib::VnyError::K8sNotFound(_) => Self::K8sNotFound(e.to_string()),
             vanyline_lib::VnyError::K8sApiError(_) => Self::K8sApiError(e.to_string()),
             _ => Self::InternalError(e.to_string()),
         }
@@ -463,45 +459,32 @@ mod tests {
     }
 
     #[test]
-    fn conversion_vnyerror_k8s_api_avec_signature_not_found_vers_404() {
-        for payload in ["404", "NotFound", "not found"] {
-            let err = AppError::from(vanyline_lib::VnyError::K8sApiError(payload.into()));
-            assert!(matches!(err, AppError::K8sNotFound(_)), "payload {payload}");
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "VNL-K8S-003: Kubernetes resource not found: VNL-K8S-002: Kubernetes API error: {payload}"
-                )
-            );
-            assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
-        }
+    fn conversion_vnyerror_k8s_not_found_vers_404() {
+        let err = AppError::from(vanyline_lib::VnyError::K8sNotFound("x".into()));
+        assert!(matches!(err, AppError::K8sNotFound(_)));
+        assert_eq!(
+            err.to_string(),
+            "VNL-K8S-003: Kubernetes resource not found: VNL-K8S-003: Kubernetes resource not found: x"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
-    fn conversion_vnyerror_k8s_api_sans_signature_vers_500() {
+    fn conversion_vnyerror_k8s_api_vers_500_quel_que_soit_le_payload() {
+        for payload in ["boom", "port 4041, not found", "404", "NotFound"] {
+            let err = AppError::from(vanyline_lib::VnyError::K8sApiError(payload.into()));
+            assert!(matches!(err, AppError::K8sApiError(_)), "payload {payload}");
+            assert_eq!(
+                err.into_response().status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payload {payload}"
+            );
+        }
         let err = AppError::from(vanyline_lib::VnyError::K8sApiError("boom".into()));
-        assert!(matches!(err, AppError::K8sApiError(_)));
         assert_eq!(
             err.to_string(),
             "VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error: boom"
         );
-        assert_eq!(
-            err.into_response().status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    #[test]
-    fn heuristic_not_found_insensible_a_la_casse_et_a_faux_positifs() {
-        let casse = AppError::from(vanyline_lib::VnyError::K8sApiError("Not Found".into()));
-        assert_eq!(
-            casse.into_response().status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        let faux_positif = AppError::from(vanyline_lib::VnyError::K8sApiError(
-            "port 4041 ouvert".into(),
-        ));
-        assert_eq!(faux_positif.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

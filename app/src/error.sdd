@@ -379,7 +379,7 @@ Tasks:
     FAIT DIVERS 2026-10-14 : `VNL-SBX-004` N'EST PAS libre — plage `004..016` des erreurs
     git de la sandbox (`../../sandbox/src/git.sdd`) ; toute résolution prendra `017+`
     (`017` déjà pris par @AppError::SandboxRelayUnavailable de l'app).
-  [ ] `error.rs` : mapper @VnyError::K8sNotFound vers @AppError::K8sNotFound et retirer
+  [x] `error.rs` : mapper @VnyError::K8sNotFound vers @AppError::K8sNotFound et retirer
     l'heuristique de sous-chaînes ; tests des deux Scenarios ci-dessus (dépend de la variante
     typée de `../../lib/src/error.sdd`).
   [x] @AppError::UnprocessableReference sans marqueur propre — SOLDÉ en C3 du chantier

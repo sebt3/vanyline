@@ -168,7 +168,7 @@ Must not:
     l'état contractuel est la stringification dans le message (arbitrée en `Tasks`).
 
 Tasks:
-  [ ] `error.rs` : variante @VnyError::K8sNotFound (feature `k8s`) ; `k8s.rs` la produit sur une
+  [x] `error.rs` : variante @VnyError::K8sNotFound (feature `k8s`) ; `k8s.rs` la produit sur une
     réponse 404 de l'apiserver (la spec de `k8s.rs` porte ce comportement) ; Scenario
     `display_exhaustif_des_marqueurs_vnl` étendu à la variante.
   [ ] Ajouter les tests unitaires du module (aucun test n'existe dans ./error.rs ni dans
