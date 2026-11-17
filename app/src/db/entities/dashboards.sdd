@@ -49,6 +49,10 @@ Exposes:
     `read_policy = write_policy = AccessPolicy::OwnerOnly` ; `owner_column() =
     Column::OwnerId` ; hooks `before_create`/`before_update` (async, pattern
     `std::future::ready` de ./project_workflows.rs).
+    `filterable_columns() = [Scope, Kind, Project]` et `sortable_columns() = [Id, Title, Scope,
+    Kind]` (miryad-core 0.4.0, ticket #78) : la liste REST filtre par égalité sur ces colonnes
+    (`?scope=project&kind=complementary&project=web`) et trie par `sort`/`order` ; une colonne non
+    déclarée est refusée 400 par miryad-core.
 
 Structure:
   Table des marqueurs du hook (publication `FR-11` — l'appel HTTP rend 422 par la
@@ -153,6 +157,14 @@ Scenario: un type de widget inconnu refuse sans lire le registre du frontend
   When la création est tentée
   Then `VNL-APP-DSH-003` — avec le type `"markdown"` + `config: 3`, `VNL-APP-DSH-006` — et avec
     un widget `scripted` de `config` `{}`, `VNL-APP-DSH-011`
+
+Scenario: la liste filtre et trie par colonnes déclarées (#78)
+  Given trois lignes de l'appelante (un `custom` d'accueil, deux `complementary` de « web »
+    de titres « B » et « A »)
+  When `GET /api/v1/dashboards?kind=complementary&project=web&sort=title&order=asc`, puis un
+    filtre sur une colonne non déclarée (`?def=x`)
+  Then les deux `complementary` rendus dans l'ordre A puis B ; la colonne non déclarée est
+    refusée 400
 
 Scenario: deux personnalisations du même écran sont refusées 009
   Given une première ligne `custom` `scope=project` du projet « p1 » de l'appelante

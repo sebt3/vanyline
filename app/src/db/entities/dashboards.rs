@@ -57,6 +57,12 @@ impl MiryadResource for Entity {
     fn owner_column() -> Option<Column> {
         Some(Column::OwnerId)
     }
+    fn filterable_columns() -> Vec<Column> {
+        vec![Column::Scope, Column::Kind, Column::Project]
+    }
+    fn sortable_columns() -> Vec<Column> {
+        vec![Column::Id, Column::Title, Column::Scope, Column::Kind]
+    }
 
     /// Garde d'écriture FR-3 (règles a→f de `./dashboards.sdd`). Forme async à connexion
     /// générique : miryad-core 0.3.1 (hooks, DEC-2) — logique sans attente rendue par
@@ -594,6 +600,44 @@ mod tests {
             serde_json::json!([]),
             "aucune ligne d'ana ne filtre (OwnerOnly, AC-6)"
         );
+    }
+
+    /// Scenario « la liste filtre et trie par colonnes déclarées » (ticket #78).
+    #[tokio::test]
+    async fn la_liste_filtre_et_trie_par_colonnes_declarees() {
+        let (app, db) = app_with_token().await;
+        let alice = token(&db, "alice").await;
+        let mut accueil = body(&deux_widgets(), "home", "custom");
+        accueil["title"] = serde_json::json!("Accueil");
+        let (status, _) = ask(&app, "POST", "/api/v1/dashboards", &alice, Some(accueil)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        for titre in ["B", "A"] {
+            let mut ligne = body(&deux_widgets(), "project", "complementary");
+            ligne["project"] = serde_json::json!("web");
+            ligne["title"] = serde_json::json!(titre);
+            let (status, json) = ask(&app, "POST", "/api/v1/dashboards", &alice, Some(ligne)).await;
+            assert_eq!(status, StatusCode::CREATED, "{json}");
+        }
+
+        let (status, liste) = ask(
+            &app,
+            "GET",
+            "/api/v1/dashboards?kind=complementary&project=web&sort=title&order=asc",
+            &alice,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{liste}");
+        let titres: Vec<&str> = liste["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|l| l["title"].as_str())
+            .collect();
+        assert_eq!(titres, vec!["A", "B"]);
+
+        let (status, _) = ask(&app, "GET", "/api/v1/dashboards?def=x", &alice, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// Verrou de la forme sérialisée du payload (création du frontend sans `id`/`owner_id`).
