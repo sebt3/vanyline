@@ -1788,7 +1788,7 @@ mod tests {
             definition_name: Set("alice/demo/ci".to_string()),
             run_id: Set(run_id.to_string()),
             run_key: Set(format!("key-{run_id}")),
-            invocation_id: Set(format!("inv-{run_id}")),
+            invocation_id: Set(format!("inv_{}", run_id.replace('-', ""))),
             scope: Set("project".to_string()),
             triggered_by: Set("ui".to_string()),
             started_at: Set(chrono::Utc::now()),

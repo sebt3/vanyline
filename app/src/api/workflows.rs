@@ -39,7 +39,7 @@ use crate::db::entities::workflow_runs::{
 };
 use crate::workflow::WorkflowRuntime;
 use crate::workflow::run_context::{RunContext, RunScope, allowed_kinds, materialize};
-use crate::workflow::status::{self, RestateAdmin, RunState, RunStatus};
+use crate::workflow::status::{self, RunState, RunStatus};
 use crate::workflow::steps::{K8sLocator, RunInfo, SandboxAccess};
 use crate::{AppState, api::owners, error::AppError};
 
@@ -2054,7 +2054,9 @@ mod tests {
     const NO_ROWS: &str = r#"{"rows":[]}"#;
 
     fn invocation_row(id: &str, status: &str) -> String {
-        format!(r#"{{"id":"{id}","status":"{status}","created_at":"2026-10-10T12:00:00Z"}}"#)
+        format!(
+            r#"{{"id":"{id}","status":"{status}","target_service_name":"DagInterpreter","target_handler_name":"run","target_service_key":"k","created_at":"2026-10-10T12:00:00Z","completed_at":null,"retry_count":0,"completion_failure":null}}"#
+        )
     }
 
     fn rows(items: &[String]) -> String {
@@ -2645,10 +2647,10 @@ mod tests {
     #[tokio::test]
     async fn liste_des_runs_fenetree() {
         let recents: Vec<String> = (0..52)
-            .map(|i| invocation_row(&format!("inv_f_{i}"), "running"))
+            .map(|i| invocation_row(&format!("inv_f{i}"), "running"))
             .collect();
         let vieux: Vec<String> = (0..8)
-            .map(|j| invocation_row(&format!("inv_o_{j}"), "completed"))
+            .map(|j| invocation_row(&format!("inv_o{j}"), "completed"))
             .collect();
         let mut lignes = recents;
         lignes.extend(vieux);
@@ -2661,7 +2663,7 @@ mod tests {
                 "demo",
                 None,
                 &format!("r-f-{i}"),
-                &format!("inv_f_{i}"),
+                &format!("inv_f{i}"),
                 ago_hours(i64::from(i)),
             )
             .await;
@@ -2673,7 +2675,7 @@ mod tests {
                 "demo",
                 None,
                 &format!("r-o-{j}"),
-                &format!("inv_o_{j}"),
+                &format!("inv_o{j}"),
                 ago_days(20),
             )
             .await;
@@ -2747,8 +2749,8 @@ mod tests {
         let (state, alice_id, _bob_id, _fake) = seeded_state_runs(
             &rows(&[invocation_row("inv_live", "running")]),
             &rows(&[
-                r#"{"entry_type":"StartSideEffect","name":"a","completed":true,"appended_at":"2026-10-10T12:01:00Z"}"#.to_string(),
-                r#"{"entry_type":"StartSideEffect","name":"b","completed":false,"appended_at":"2026-10-10T12:02:00Z"}"#.to_string(),
+                r#"{"index":1,"entry_type":"Run","name":"step:a"}"#.to_string(),
+                r#"{"index":2,"entry_type":"Run","name":"step:b"}"#.to_string(),
             ]),
             None,
         )
@@ -2782,7 +2784,7 @@ mod tests {
         assert_eq!(detail.status.steps[0].step_id, "a");
         assert_eq!(detail.status.steps[0].state, "Succeeded");
         assert_eq!(detail.status.steps[1].step_id, "b");
-        assert_eq!(detail.status.steps[1].state, "Running");
+        assert_eq!(detail.status.steps[1].state, "Succeeded");
     }
 
     // ── Scenario: runs_d_une_sandbox ────────────────────────────────────────
@@ -3084,7 +3086,7 @@ mod tests {
     #[tokio::test]
     async fn bornes_des_listes_limit_et_since() {
         let lignes: Vec<String> = (0..53)
-            .map(|i| invocation_row(&format!("inv_b_{i}"), "running"))
+            .map(|i| invocation_row(&format!("inv_b{i}"), "running"))
             .collect();
         let (state, alice_id, _bob_id, _fake) =
             seeded_state_runs(&rows(&lignes), NO_ROWS, None).await;
@@ -3095,7 +3097,7 @@ mod tests {
                 "demo",
                 None,
                 &format!("r-b-{i}"),
-                &format!("inv_b_{i}"),
+                &format!("inv_b{i}"),
                 ago_hours(i64::from(i)),
             )
             .await;
@@ -3106,7 +3108,7 @@ mod tests {
             "demo",
             None,
             "r-vieux",
-            "inv_b_52",
+            "inv_b52",
             ago_days(20),
         )
         .await;

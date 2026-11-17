@@ -200,6 +200,18 @@ impl WorkflowRuntime {
         .await
     }
 
+    /// URL d'admin Restate — `runtime.sdd` `Exposes`.
+    #[must_use]
+    pub fn admin_url(&self) -> &str {
+        &self.app.admin_url
+    }
+
+    /// Client HTTP partagé du moteur — `runtime.sdd` `Exposes`.
+    #[must_use]
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     /// URL d'ingress Restate (déclenchement des runs) — `runtime.sdd` `Exposes`.
     #[allow(dead_code)] // W4 consommateurs (`api/workflows.sdd`) — tooling.sdd
     #[must_use]
@@ -208,14 +220,10 @@ impl WorkflowRuntime {
     }
 }
 
-/// L'interface de `status.rs` (lecture de statut, annulation) : URL d'admin et client HTTP
-/// partagé.
+/// L'interface de `status.rs` (lecture de statut, annulation) : la config Restate de l'app.
 impl RestateAdmin for WorkflowRuntime {
-    fn admin_url(&self) -> &str {
-        &self.app.admin_url
-    }
-    fn http(&self) -> &reqwest::Client {
-        &self.http
+    fn restate_config(&self) -> WorkflowConfig {
+        self.app.miryad_config()
     }
 }
 

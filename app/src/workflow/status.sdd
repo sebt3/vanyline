@@ -3,8 +3,10 @@ Spec: Status — statut et annulation des runs
 Platform: Rust/vanyline-app/reqwest
 
 Purpose:
-  Lit le statut des runs dans Restate et les annule. miryad-core ne fournit pas de lecture de
-  statut (décision : pas de duplication d'état) ; ce module la fournit côté app. Le statut n'est
+  Lit le statut des runs dans Restate et les annule. Le client d'administration Restate est celui
+  de miryad-core (`miryad_core::workflow::client`, depuis 0.4.0, ticket #80) ; ce module n'en est
+  que l'adaptateur : il projette les lectures de miryad-core sur @RunState/@RunStatus et pose
+  le délai de 5 s. Plus aucun SQL ni appel HTTP d'admin n'est écrit ici. Le statut n'est
   JAMAIS copié en base : l'index de runs (../db/entities/workflow_runs.sdd) ne garde que les
   métadonnées de lancement. La rétention des runs terminés suit les règles de Restate
   (décision 2026-10-04) ; si une purge de Restate devient un problème, on avisera. Fichier neuf,
@@ -27,30 +29,37 @@ Exposes:
   @RunState — enum `Pending` | `Running` | `Suspended` | `BackingOff` | `Succeeded` | `Failed` |
     `Cancelled` | `Unknown` (`Unknown` quand Restate ne connaît plus l'invocation : purgée).
   @RunStatus — `{ invocation_id, state: RunState, started_at: Option<…>, ended_at: Option<…>,
-    error: Option<String> (message d'échec d'exécution — `completion_failure`/
-    `last_failure` de l'invocation), steps: Vec<StepStatus> }`, `StepStatus`
-    `{ step_id, state, started_at, ended_at, error }` quand Restate expose le journal.
-    W1 2026-10-10 : @StepStatus.error est TOUJOURS `None` en l'état (le journal
-    introspecté ne porte pas de message par step) ; le peupler exige le format réel —
-    voir `[?]` formes.
+    error: Option<String> (échec terminal de l'invocation, `failure` de
+    miryad-core), steps: Vec<StepStatus> }`, `StepStatus`
+    `{ step_id, state, started_at, ended_at, error }` lu dans le journal. Un step n'est connu
+    que lorsque son `ctx.run` nommé `step:<id>` est journalisé, c'est-à-dire terminé : il est
+    alors `Succeeded`, `started_at`/`ended_at`/`error` valent `None` (le journal de miryad-core
+    ne porte que index, nature et nom). Les entrées `render:<id>` et les entrées sans nom ou
+    d'un autre nom ne sont pas des steps. Un step en cours n'est pas listé.
+  Projection de l'état Restate : `pending`/`scheduled`/`ready` ⇒ `Pending` ; `running` ⇒
+    `Running` ; `suspended`/`paused` ⇒ `Suspended` ; `backoff` (et `backing-off`) ⇒
+    `BackingOff` ; `completed` sans échec ⇒ `Succeeded` ; `completed` avec un échec dont le texte
+    contient `cancel` (casse ignorée) ⇒ `Cancelled`, avec tout autre échec ⇒ `Failed` ; toute autre
+    valeur ⇒ `Unknown`. `started_at` = `created_at` et `ended_at` = `completed_at` de
+    l'invocation, lus en RFC 3339 (autre forme ⇒ `None`).
   @fetch_statuses(runtime, invocation_ids: &[String]) -> Result<HashMap<String, RunStatus>,
-    WorkflowError> (async) — UNE requête groupée pour tous les ids (au plus 50 par appel), jamais
-    une requête par run.
+    WorkflowError> (async) — UNE requête groupée par tranche de 50 ids (`invocation_statuses`), jamais
+    une requête par run ; un id absent de la réponse rend `Unknown`.
   @fetch_status(runtime, invocation_id) -> Result<RunStatus, WorkflowError> (async) — avec le
     détail des steps.
   @RestateAdmin — trait local (déclaré ICI, ce fichier ne dépend pas de ./runtime.rs),
     @Send + @Sync (supertraits ratifiés W4b 2026-10-11 : sans eux, `&dyn @RestateAdmin`
-    rend les futures des handlers axum non-@Send — @fetch_* et l'annulation seraient
-    inconsommables depuis ./api/workflows.rs ; @WorkflowRuntime les satisfait déjà) :
-    `admin_url() -> &@str` + `http() -> &@reqwest::Client` (client partagé). Implémenté
-    par @WorkflowRuntime en W2 (runtime.sdd expose déjà « l'URL d'admin et le client
-    HTTP partagé ») ; le type du paramètre `runtime` des deux @fetch_* est ce trait.
+    rend les futures des handlers axum non-@Send) : `restate_config() -> @WorkflowConfig`
+    (la config miryad-core, URL d'admin comprise). Implémenté par @WorkflowRuntime ; le type du
+    paramètre `runtime` des deux @fetch_* et de @cancel est ce trait. Les appels partent d'un
+    client HTTP propre à ce module, créé une fois, avec le délai de 5 s.
   @cancel(runtime, invocation_id) -> Result<(), WorkflowError> (async).
 
 Handles:
-  Source : l'API d'introspection SQL de l'admin Restate (tables d'invocations et de journal),
-  filtrée par identifiants ; l'annulation passe par l'API d'annulation d'invocation de
-  l'admin. Un id absent de Restate rend `Unknown` (pas une erreur). Une indisponibilité de
+  Source : `invocation_statuses`, `invocation_journal` et `cancel_invocation` de
+  `miryad_core::workflow::client` (formes d'admin mesurées par miryad-core sur Restate 1.8.1 ;
+  l'état Restate est une chaîne `pending`, `scheduled`, `ready`, `running`, `suspended`,
+  `backoff`, `paused`, `completed`, l'échec terminal un texte `failure`). Un id absent de Restate rend `Unknown` (pas une erreur). Une indisponibilité de
   Restate est une erreur (`503` côté API), jamais « aucun run ».
   Annulation : l'invocation est annulée dans Restate ; l'appelant (../api/workflows.sdd) annule
   ensuite les jobs shell du run (`DELETE /jobs?prefix=<run_id>:`, /sandbox/src/jobs.sdd) —
@@ -69,24 +78,21 @@ Must not:
   Interpréter la sortie d'un run : `output` éventuel est transmis tel quel.
 
 Raises:
-  @miryad_core WorkflowError::RestateUnreachable (`MRD-WORKFLOW-001`) — admin injoignable
-    ou délai `ADMIN_TIMEOUT` (5 s) dépassé.
-  @WorkflowError::RestateRejected (`MRD-WORKFLOW-002`) — réponse hors 2xx. Tolérance :
-    `404` en lecture de DÉTAIL rend `Unknown` (jamais en lecture groupée : là, un id
-    absent est une absence de ligne, pré-positionnée `Unknown`).
-  @WorkflowError::Serialization (`MRD-WORKFLOW-003`) — réponse non desérialisable (le
-    classement transport-vs-décodage reproduit celui de miryad-core).
+  Les erreurs de miryad-core, remontées telles quelles :
+  @WorkflowError::RestateUnreachable (`MRD-WORKFLOW-001`) — admin injoignable ou délai de 5 s
+    dépassé.
+  @WorkflowError::RestateRejected (`MRD-WORKFLOW-002`) — réponse hors 2xx, ou de forme
+    inattendue. Tolérance : `404` en lecture du JOURNAL rend une liste de steps vide.
+  @WorkflowError::InvalidConfig (`MRD-WORKFLOW-007`) — identifiant hors de la grammaire `inv_` +
+    alphanumérique, refusé sans requête.
 
 Tasks:
-  [ ] Vérifier sur un Restate réel (DevStation ou Rennes) les formes d'admin implémentées sur
-    la doc Restate 1.7 et testées contre un faux admin : lecture groupée `POST /query` sur
-    `sys_invocation`, journal `sys_journal`, annulation `PATCH /invocations/{id}/cancel`,
-    vocabulaire de `sys_invocation.status` (`paused`⇒`Suspended`, `killed`⇒`Failed` ;
-    `cancelled` pourrait arriver en `completed` + failure ⇒ `Failed`), enveloppe
-    `{"rows": […]}`, horodatages RFC 3339 ou millisecondes epoch (parse tolérant, autre forme
-    ⇒ `None`), `404` ⇒ `Unknown` de la lecture de détail. Le format n'est contracté qu'après
-    cette vérification. Le @StepDispatcher de miryad-core 0.3.1 journalise dans un `ctx.run()`
-    sans nom : `steps` probablement vide en réel, jamais inventé.
+  [ ] Vérifier sur un Restate réel (DevStation ou Rennes) la forme du statut d'une invocation
+    annulée (`completed` + texte d'échec contenant `cancel` ?) ; la projection `Cancelled` est
+    une hypothèse tant que ce n'est pas mesuré.
+  [ ] Aligner le code et les tests sur ce contrat (client de miryad-core 0.4.0, #80) : trait
+    `RestateAdmin::restate_config`, projection ci-dessus, steps `step:<id>`, identifiants de
+    test conformes à la grammaire `inv_` + alphanumérique.
   [ ] Faire régler par le controller la rétention Restate des invocations terminées à au
     moins 14 jours (spec du controller, hors de celle-ci).
 
@@ -106,9 +112,20 @@ Scenario: restate_indisponible
   Then une erreur de disponibilité, pas une liste vide
 
 Scenario: detail_avec_steps
-  Given un run en cours dont le step `b` est en cours
+  Given un run en cours dont le journal porte `step:a` et `render:a`, et une entrée sans nom
   When @fetch_status
-  Then `state: Running` et un `StepStatus` par step connu
+  Then `state: Running` et un seul `StepStatus` (`a`, `Succeeded`)
+
+Scenario: etats_projetes
+  Given les états Restate `pending`, `running`, `suspended`, `backoff`, `completed` sans échec,
+    `completed` avec l'échec `[409] Cancelled`, `completed` avec une autre erreur, `inconnu`
+  When ils sont projetés
+  Then `Pending`, `Running`, `Suspended`, `BackingOff`, `Succeeded`, `Cancelled`, `Failed`, `Unknown`
+
+Scenario: identifiant_hors_grammaire
+  Given l'identifiant `inv_a_b`
+  When @fetch_statuses ou @cancel
+  Then erreur `MRD-WORKFLOW-007`, aucune requête émise
 
 Scenario: annulation
   Given un run en cours

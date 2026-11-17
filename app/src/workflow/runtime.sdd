@@ -65,8 +65,9 @@ Exposes:
     depuis l'API de l'app — les déclencheurs futurs prendront `session` ou `scheduler` ;
     @RunHandle porte `invocation_id`, la
     liaison persistée par ./../db/entities/workflow_runs.sdd), l'URL d'admin et d'ingress
-    (pour ./status.sdd), le client HTTP partagé. @WorkflowRuntime IMPLÉMENTE @RestateAdmin
-    de ./status.sdd (W3 2026-10-10).
+    (pour ./status.sdd), le client HTTP partagé (accesseurs `admin_url()` et `http()`). @WorkflowRuntime IMPLÉMENTE
+    @RestateAdmin de ./status.sdd (W3 2026-10-10) par `restate_config()`, la config
+    miryad-core de l'application.
   @start_runtime(state, config) -> Result<WorkflowRuntime, AppError> (async) — séquence : valider
     la config (`WorkflowConfig::validate` de miryad-core), poser la `WorkflowPolicy`, construire le
     registre — le step `subagent` de miryad-core y est monté avec un plafond d'application de
