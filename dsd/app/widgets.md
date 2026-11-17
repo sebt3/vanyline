@@ -42,7 +42,6 @@ Hors périmètre :
 - les widgets d'**action** (un bouton qui agit : valider une MR, relancer un run…) : voulus à terme, non ouverts ici (`OI-5`) ;
 - les types de graphique au-delà de `bar` et `pie` (séries temporelles, tables…) : le chemin existe (`DEC-5`), ils s'ouvrent un à un ;
 - un markdown ou un diagramme **calculé** par un script : en première version, ces deux widgets prennent leur contenu directement (`OI-8`) ;
-- les scripts des écrans projet et sandbox : ils attendent le réglage amont de `OI-1`.
 
 ## Contexte applicable du domaine
 
@@ -86,8 +85,10 @@ Hors périmètre :
 - **CON-3:** Les droits d'un script viennent du **type du contexte** (`script_grants` : toolsets et modules d'hôte accordables) et du
   principal qui l'exécute, jamais du script ni de son auteur. Le contexte d'un écran est celui que l'hôte applicatif résout pour lui :
   accueil → contexte stocké `G_home` ; projet → `H_project_<nom>` ; sandbox → `H_sandbox_<owner>_<nom>` (`app/sessions#DEC-6`,
-  `DEC-9`). Un contexte `H_…` n'a pas de type en base, donc pas de `script_grants` : le `ScriptRunner` échoue fermé, et la première version
-  n'exécute des scripts que sur l'écran d'accueil (`OI-1`).
+  `DEC-9`). Un contexte `H_…` n'a pas de type en base : l'hôte rend ses `script_grants` (miryad-core 0.4.0, #70) depuis des types de
+  catalogue dédiés, `G_project` et `G_sandbox` (`app/sessions`, `catalog.sdd`, `host.sdd`), que l'administrateur règle comme `G_home` ; les
+  trois écrans exécutent donc des scripts.
+    - **Verified by:** voir les specs `app/sessions`
     - **Source:** miryad-core `scripts-hote#FR-5`, `DEC-2`, `OI-6` ; `app/sessions` (`host.sdd`)
 - **CON-4:** L'application est mono-réplique pour les sessions (`app/sessions#DEC-1`) ; le cache de `FR-6` est donc en mémoire du
   processus et perdu au redémarrage.
@@ -162,9 +163,8 @@ Hors périmètre :
 
 - **FR-10 - MUST:** Le widget scripté a trois états visibles : **prêt** (résultat, ancienneté, durée du dernier calcul, actualisable),
   **en cours** (indicateur de travail, interruptible par l'utilisateur) et **échec** (erreur structurée de `FR-7`, relançable).
-  L'interruption par l'utilisateur ne laisse aucun résultat partiel ni entrée de cache. Le `ScriptRunner` n'offre aujourd'hui qu'un délai :
-  l'interruption est une demande amont (`OI-2`) ; d'ici là, elle abandonne le résultat côté application et le script s'arrête au plafond de
-  durée.
+  L'interruption par l'utilisateur ne laisse aucun résultat partiel ni entrée de cache. L'interruption passe par le jeton d'annulation de
+  `ScriptRunner::run_cancellable` (miryad-core 0.4.0, #71) : le script s'arrête entre deux opérations.
     - **Source:** décision du développeur principal, 2026-11-13
     - **Verified by:** `AC-8`
 
@@ -209,7 +209,7 @@ Hors périmètre :
       le plafond d'opérations que `scripts-hote#DEC-6` explique déjà ; son texte masqué et plafonné n'est pas une valeur) ; le kind
       `rhai` des workflows (écarté : pas de toolsets, pont MCP propre à vanyline).
     - **Consequences:** les toolsets et rôles MCP visibles sont ceux de `script_grants` du type de contexte (`CON-3`) ; l'interruption par
-      l'utilisateur dépend d'une évolution de la crate (`OI-2`).
+      l'utilisateur passe par `run_cancellable`.
     - **Source:** décision du développeur principal, 2026-11-13 (Rhai dans l'application, toolsets du contexte inclus) ; miryad-core
       `scripts-hote#DEC-1`, `DEC-6`
 
@@ -278,19 +278,9 @@ Specs à créer ou à amender (une spec par fichier) :
 
 ## Open Issues
 
-- **OI-1 (décidé le 2026-11-13) - Contextes `H_…` sans type (écrans projet et sandbox).** Un contexte fourni par l'hôte n'a pas de type en
-  base, donc pas de `script_grants` : le `ScriptRunner` échoue fermé (`Forbidden("script grants unavailable")`, miryad-core
-  `scripts-hote#OI-6`). **Décision :** on livre avec l'existant — seul l'écran d'accueil (contexte stocké `G_home`) exécute des scripts —
-  et l'application ne réimplémente pas ce qui revient à miryad-core : pas de repli qui exécuterait un script de sandbox dans le contexte
-  d'accueil. **Ticket amont à ouvrir :** l'hôte (`LymailleHost`) fournit les `script_grants` d'un contexte `H_…`. Les widgets des écrans projet
-  et sandbox (le taux de succès des tests d'une sandbox) s'ouvrent à sa résolution.
-- **OI-2 (décidé le 2026-11-13) - Interruption par l'utilisateur.** `ScriptRunner::run` ne prend ni jeton d'annulation ni autre délai que
-  `ScriptLimits`. **Décision :** on livre avec l'existant — l'interruption abandonne le résultat côté application et le script s'arrête au
-  plafond de durée — sans réimplémenter l'annulation. **Ticket amont à ouvrir :** `run` accepte un jeton d'annulation consulté par le
-  crochet de progression ; l'interruption devient alors réelle (entre deux opérations).
-- **OI-3 - `script_grants` des types de contexte et ressources visibles.** Le catalogue publié par l'application (`G_home`, `G_config`)
-  ne porte aujourd'hui aucun `script_grants` : sans eux, un script ne voit aucun toolset ni module d'hôte. À décider : ce que le type
-  `G_home` accorde par défaut (rien, ou des toolsets de base) ; quels `HostModule` l'application enregistre ; quelles entités le registre
+- **OI-3 - `script_grants` des types de contexte et ressources visibles.** Le catalogue publié par l'application (`G_home`, `G_config`,
+  `G_project`, `G_sandbox`) ne porte aucun `script_grants` : sans eux, un script ne voit aucun toolset ni module d'hôte. À décider : ce que
+  chaque type accorde par défaut (rien, ou des toolsets de base) ; quels `HostModule` l'application enregistre ; quelles entités le registre
   de ressources du `ScriptRunner` expose à la lecture et à l'écriture (un script y agit sous les droits de l'utilisateur).
 - **OI-4 - Jeton `forward`.** `ScriptRunner::run` accepte le jeton de l'utilisateur pour les serveurs MCP en mode `forward`. L'application
   détient-elle ce jeton lors d'une exécution déclenchée par l'affichage (session par cookie) ? Sinon ces serveurs restent inutilisables

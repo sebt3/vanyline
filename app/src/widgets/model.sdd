@@ -19,7 +19,10 @@ References:
 Exposes:
   @RunRequest — `pub struct` { @dashboard: `i32` (identifiant de ligne d'un tableau, celui que
     la résolution rend en `id`), @widget: `String` (identifiant du widget dans ce tableau),
-    `#[serde(default)]` @refresh: `bool` (relance malgré un résultat encore valide) } ;
+    `#[serde(default)]` @refresh: `bool` (relance malgré un résultat encore valide),
+    `#[serde(default)]` @sandbox: `Option<String>` (nom de la sandbox affichée, exigé pour un
+    tableau d'écran `sandbox` : le tableau se personnalise par projet, la sandbox vient de
+    l'écran ouvert) } ;
     `Deserialize`. Le script n'est JAMAIS un champ de la requête (`DEC-6`) : un champ inconnu
     est ignoré, jamais interprété.
   @WidgetOutput — `pub struct` { @widget_type: `String` (clé JSON `type`), @config:
@@ -41,11 +44,12 @@ Structure:
   Table des marqueurs de la Solution (aucun contenu de script, de jeton ni d'URL dans un message) :
     `VNL-APP-WDG-001` widget introuvable : tableau absent, d'un autre utilisateur, widget absent
       ou qui n'est pas de type `scripted` (404, aucune distinction) ·
-    `002` contexte non pris en charge : écran projet ou sandbox (422, `dsd/app/widgets.md#OI-1`) ·
+    `002` contexte d'écran incomplet : tableau `sandbox` sans nom de sandbox, ou tableau de projet
+      dont le projet n'existe plus, ou appelant sans owner lié (422) ·
     `003` script en échec : syntaxe, exécution ou outil MCP (dans la réponse, `Failed`) ·
     `004` plafond de durée atteint · `005` plafond d'opérations atteint · `006` résultat plus
       gros que le plafond · `007` sortie hors contrat · `008` droits refusés : contexte ou type
-      sans `script_grants`, module ou rôle refusé, sujet sans compte · `009` réservé ·
+      sans `script_grants`, module ou rôle refusé, sujet sans compte · `009` exécution annulée par le client (jamais rendue) ·
     `010` panne interne de l'exécuteur (lecture de définition, montage, configuration).
   `003`..`008` et `010` voyagent dans une réponse `Failed` de statut HTTP 200 : un script en
   échec est un résultat d'exécution, pas une panne de la route. `001` et `002` sont des erreurs

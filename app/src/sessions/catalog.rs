@@ -53,6 +53,24 @@ pub(crate) async fn ensure_catalog_version(
     )
     .await?;
     publier_contexte(db, &provenance, G_CONFIG).await?;
+    // Types d'écran sans contexte stocké : ils portent les `script_grants` des contextes `H_…`
+    // (`host.sdd`, ticket #70).
+    publier_type(
+        db,
+        &provenance,
+        G_PROJECT,
+        G_VANYLINE_PROJECT,
+        SessionKind::Work,
+    )
+    .await?;
+    publier_type(
+        db,
+        &provenance,
+        G_SANDBOX,
+        G_VANYLINE_SANDBOX,
+        SessionKind::Work,
+    )
+    .await?;
     for (id, nature, prompt) in [
         (
             G_VANYLINE_HOME,
@@ -174,6 +192,10 @@ fn panne_crate(cause: impl std::fmt::Display) -> AppError {
 pub(crate) const G_HOME: &str = "G_home";
 /// Identifiant du contexte de configuration (`DEC-7`).
 pub(crate) const G_CONFIG: &str = "G_config";
+/// Type de contexte porteur des `script_grants` des écrans projet (`host.sdd`, #70).
+pub(crate) const G_PROJECT: &str = "G_project";
+/// Type de contexte porteur des `script_grants` des écrans sandbox (`host.sdd`, #70).
+pub(crate) const G_SANDBOX: &str = "G_sandbox";
 /// Agent productif par défaut de l'accueil (`DEC-6`, `DEC-7`).
 pub(crate) const G_VANYLINE_HOME: &str = "G_vanyline_home";
 /// Agent de configuration par défaut (`DEC-7`).
@@ -196,8 +218,9 @@ mod tests {
     use sea_orm::QueryFilter;
     use sea_orm::{ActiveValue::NotSet, ActiveValue::Set, ColumnTrait};
 
-    /// Identifiants attendus au catalogue : deux types, deux contextes, quatre agents.
-    const TYPES_ATTENDUS: [&str; 2] = [G_HOME, G_CONFIG];
+    /// Identifiants attendus au catalogue : quatre types (dont `G_project`/`G_sandbox`, sans
+    /// contexte stocké), deux contextes, quatre agents.
+    const TYPES_ATTENDUS: [&str; 4] = [G_HOME, G_CONFIG, G_PROJECT, G_SANDBOX];
     const CONTEXTES_ATTENDUS: [&str; 2] = [G_HOME, G_CONFIG];
     const AGENTS_ATTENDUS: [&str; 4] = [
         G_VANYLINE_CONFIG,
@@ -258,7 +281,7 @@ mod tests {
                     .collect(),
             ),
             attendus(&TYPES_ATTENDUS),
-            "exactement deux types de contexte"
+            "exactement quatre types de contexte"
         );
         assert_eq!(
             noms(

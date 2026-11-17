@@ -53,6 +53,17 @@ Must:
     (valeur de mauvaise forme). Jamais mis en cache : changer le
     réglage joue à l'ouverture de session suivante, sans réécrire aucune ligne d'agent
     (`./catalog.sdd`).
+  Pour @script_grants (ticket #70, miryad-core 0.4.0) : pour un contexte `H_project_<nom>` ou
+    `H_sandbox_<owner>_<nom>`, rendre les `script_grants` de la version active du type de contexte
+    du catalogue `G_project` (projet) ou `G_sandbox` (sandbox) (`./catalog.sdd`), lus dans la table
+    des types de miryad-core à chaque appel, jamais mis en cache : `Some(ScriptGrants{toolsets,
+    modules})` ; type absent ou sans version active ⇒ `None` (échec fermé de miryad-core, aucun
+    droit) ; lecture en échec ⇒ @HostError journalisé `VNL-APP-SES-112` ; colonne qui n'est pas un
+    objet à exactement `toolsets` et `modules` (tableaux de chaînes) ⇒ @HostError journalisé
+    `VNL-APP-SES-113`. Tout autre identifiant (stocké `G_…`/privé, ou `H_` de forme inconnue) ⇒
+    `None` : les droits d'un contexte stocké viennent de sa ligne, pas de l'hôte. La visibilité du
+    contexte est déjà tranchée par @resolve_context avant l'appel de miryad-core : @script_grants
+    ne relit ni le lien d'owner ni l'entité K8s.
   Garder le jeton hors de tout chemin persistant : jamais écrit en base, jamais dans un log,
     jamais dans une réponse au navigateur ; @McpGrant porte un @Zeroizing, le `Debug` de la
     structure reste opaque ; le renouvellement suit le cache de @owner_token tel quel (`FR-4`,
@@ -65,7 +76,7 @@ Must not:
 
 Exposes:
   @VnlLymailleHost — fourni comme @SharedHost au montage (./mod.sdd) ; il implémente
-    @resolve_mcp, @resolve_context et @default_profile (les autres méthodes du trait gardent leur
+    @resolve_mcp, @resolve_context, @default_profile et @script_grants (les autres méthodes du trait gardent leur
     défaut).
 
 Depends on:
@@ -95,6 +106,13 @@ Scenario: profil par défaut relu à chaque appel
   When @default_profile est appelé après chaque état
   Then `Some("default")`, puis `Some("qwen")`, puis @HostError
 
+Scenario: droits de script des écrans projet et sandbox (#70)
+  Given le catalogue publié (types `G_project` et `G_sandbox`, grants vides), puis un
+    administrateur accorde `{"toolsets":["G_ops"],"modules":[]}` au type `G_sandbox`
+  When @script_grants est appelé pour `H_project_web`, `H_sandbox_ana_web`, `G_home` et `H_inconnu`
+  Then `Some` vide pour le projet, `Some` avec `G_ops` pour la sandbox, `None` pour `G_home` et
+    `H_inconnu` ; avec le type supprimé, `None` ; avec `script_grants` mal formé, @HostError
+
 Scenario: lien supprimé en cours de session (`AC-2`)
   Given une session ouverte sur `H_sandbox_ana_web` et un lien utilisateur↔`ana` supprimé depuis
   When @resolve_mcp est rappelé pour un appel d'outil
@@ -111,6 +129,9 @@ Scenario: H_ jamais écrit
   Then l'écriture est refusée — l'app ne propose aucun chemin d'écriture pour les `H_`
 
 Tasks:
+  [x] Lot 2 du retrait des contournements (tickets #70 et #82) : @script_grants ci-dessus et
+    son Scenario ; @forward_token reste le défaut du trait (`None`) tant que l'app ne détient
+    pas de jeton utilisateur hors session (`dsd/app/widgets.md#OI-4`).
   [x] Lot 1 du retrait des contournements (2026-11-16, miryad-core 0.4.0, tickets #75 et #76) :
     `host.rs` — identifiants `H_` sans encodage (suppression de `encode_k8s_name` /
     `decode_k8s_name`, `parse_sandbox_id` rend au plus une lecture), @default_profile ; scénarios

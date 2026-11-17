@@ -13,7 +13,7 @@ Owns:
   ./run.rs
 
 References:
-  /dsd/app/widgets.md — `FR-2` à `FR-7`, `FR-10`, `DEC-6`, `OI-1`
+  /dsd/app/widgets.md — `FR-2` à `FR-7`, `FR-10`, `DEC-6`
   ./model.sdd — requête, réponse, marqueurs
   ./runtime.sdd — @WidgetService, @ScriptExecutor
   ./output.sdd — @validate_output ; ./cache.sdd — @WidgetCache
@@ -27,7 +27,7 @@ Exposes:
     Result<@Json<@RunResponse>, @AppError>`.
 
 Accepts:
-  @RunRequest { dashboard, widget, refresh? } (`./model.sdd`) ; tout autre champ, `script`
+  @RunRequest { dashboard, widget, refresh?, sandbox? } (`./model.sdd`) ; tout autre champ, `script`
     compris, est ignoré.
 
 Returns:
@@ -38,20 +38,29 @@ Returns:
 Raises:
   @AppError::WidgetNotFound (404, `VNL-APP-WDG-001`) : tableau absent ou d'un autre utilisateur,
     widget absent ou dont le type n'est pas `scripted` — aucune distinction.
-  @AppError::WidgetContextUnsupported (422, `VNL-APP-WDG-002`) : tableau d'écran `project` ou
-    `sandbox` (première version : seul l'accueil exécute des scripts, `OI-1`).
+  @AppError::WidgetContextUnsupported (422, `VNL-APP-WDG-002`) : contexte d'écran impossible à
+    nommer — tableau `sandbox` sans `sandbox` dans la requête, projet du tableau disparu, ou
+    appelant sans owner lié.
   Erreur d'authentification par @AuthUser hors session (contrat `../auth`).
 
 Handles:
   Identité de l'appelant relue par `miryad_core::users::resolve_user` (jamais un identifiant de
     requête). Le tableau est relu avec `owner_id = appelant`.
-  Contexte : écran `home` → contexte `G_home` ; tout autre écran → `002`.
-  Clé de cache : (sujet authentifié, tableau, widget, empreinte du texte du script). `ttl_secs` de
+  Contexte : écran `home` → `G_home` ; écran `project` → `H_project_<nom>` (nom du projet du
+    tableau, relu dans `vanyline_projects` avec `owner_id = appelant`) ; écran `sandbox` →
+    `H_sandbox_<owner>_<sandbox>` (`<owner>` = l'owner K8s lié à l'appelant par
+    `vanyline_owner_links`, `<sandbox>` = le champ `sandbox` de la requête) ; formes de
+    `../sessions/host.sdd`. Les droits des écrans `H_…` sont ceux des types `G_project` /
+    `G_sandbox` (`../sessions/catalog.sdd`) que l'hôte rend (`script_grants`, miryad-core#70) ;
+    l'hôte revérifie la visibilité du contexte pour l'appelant (lien d'owner, entité K8s).
+  Clé de cache : (sujet authentifié, contexte, tableau, widget, empreinte du texte du script). `ttl_secs` de
     la `config` du widget, `3600` par défaut.
   Une définition stockée illisible ou dont la `config` du widget n'a pas de script →
     `Failed` `010` journalisé ; jamais un défaut silencieux.
-  Abandon du client (connexion fermée, bouton d'interruption) : l'attente prend fin, aucun
-    résultat n'est rendu ; la gestion du cache est celle de `./cache.sdd`.
+  Abandon du client (connexion fermée, bouton d'interruption) : le jeton d'annulation de
+    l'exécution est annulé (`ScriptRunner::run_cancellable`, miryad-core#71) — le script s'arrête
+    entre deux opérations, aucun résultat n'est rendu, aucune entrée de cache n'est écrite ; la
+    gestion du cache est celle de `./cache.sdd`.
 
 Must:
   Relire le script dans la définition de l'utilisateur authentifié, jamais dans la requête.
@@ -86,10 +95,22 @@ Scenario: le tableau ou le widget d'autrui est introuvable
   When la route est appelée pour chacun
   Then les trois rendent 404 `VNL-APP-WDG-001`
 
-Scenario: un écran projet ou sandbox n'est pas pris en charge
-  Given un tableau de l'appelant d'écran `project`
-  When la route est appelée
-  Then 422 `VNL-APP-WDG-002`
+Scenario: les écrans projet et sandbox s'exécutent dans leur contexte `H_…`
+  Given un tableau de l'appelant d'écran `project` du projet « web », puis un d'écran `sandbox`
+    avec `sandbox: "dev"` dans la requête, et un exécuteur factice qui capture le contexte
+  When la route est appelée pour chacun
+  Then le contexte capturé est `H_project_web`, puis `H_sandbox_<owner lié>_dev`
+
+Scenario: un contexte d'écran impossible à nommer est refusé
+  Given un tableau d'écran `sandbox` appelé sans `sandbox`, un tableau de projet dont le projet
+    est supprimé, et un appelant sans owner lié sur un écran `sandbox`
+  When la route est appelée pour chacun
+  Then 422 `VNL-APP-WDG-002` à chaque fois
+
+Scenario: l'abandon du client annule l'exécution
+  Given un exécuteur factice lent qui observe son jeton d'annulation
+  When le client abandonne la requête pendant l'exécution
+  Then le jeton est annulé, l'exécuteur s'arrête, et le cache ne contient aucune entrée
 
 Scenario: un script en échec et une sortie hors contrat sont rendus en échec, sans cache
   Given un exécuteur qui rend l'erreur `003`, puis un autre qui rend `{type: "markdown", config: {}}`
@@ -102,9 +123,8 @@ Depends on:
 
 Tasks:
   [ ] `run.rs` : @handler_run et ses tests (exécuteur factice ; base réelle `real_db`).
-  [ ] Les écrans projet et sandbox s'ouvrent quand miryad-core fournit les `script_grants` d'un
-    contexte `H_…` (miryad-core#70) : le contexte de ces écrans est alors `H_project_<nom>` /
-    `H_sandbox_<owner>_<nom>`.
+  [ ] Lot 2 (miryad-core 0.4.0, #70/#71) : les écrans projet et sandbox s'exécutent dans leur
+    `H_…`, l'abandon annule le jeton ; Scenarios ci-dessus.
 
 Done when:
-  Les six Scenarios ont leurs tests ; la route ne lit jamais le script dans la requête (grep).
+  Les huit Scenarios ont leurs tests ; la route ne lit jamais le script dans la requête (grep).

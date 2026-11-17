@@ -14,11 +14,15 @@ use lymaille::{ContextLevel, ToolsetsResult};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use zeroize::Zeroizing;
 
-use miryad_core::lymaille::host::{HostError, LymailleHost, McpDecision, McpGrant, McpRequest};
+use miryad_core::lymaille::host::{
+    HostError, LymailleHost, McpDecision, McpGrant, McpRequest, ScriptGrants,
+};
 use miryad_core::lymaille::identity::CallerPrincipal;
 use vanyline_lib::k8s::{OwnerToken, VnlK8sClient};
 
 use crate::db::entities::{app_settings, owner_links};
+use crate::sessions::catalog::{G_PROJECT, G_SANDBOX};
+use miryad_core::lymaille::definitions::context_type;
 
 /// Préfixe des identifiants de contexte projet (`FR-3`).
 pub(crate) const PROJECT_PREFIX: &str = "H_project_";
@@ -320,6 +324,27 @@ fn with_namespace(
     }
 }
 
+/// Lit la colonne `script_grants` d'un type : un objet à exactement `toolsets` et `modules`,
+/// tableaux de chaînes. Toute autre forme ⇒ `None`.
+fn lire_grants(valeur: &serde_json::Value) -> Option<ScriptGrants> {
+    let objet = valeur.as_object()?;
+    if objet.len() != 2 {
+        return None;
+    }
+    let liste = |cle: &str| -> Option<Vec<String>> {
+        objet
+            .get(cle)?
+            .as_array()?
+            .iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect()
+    };
+    Some(ScriptGrants {
+        toolsets: liste("toolsets")?,
+        modules: liste("modules")?,
+    })
+}
+
 #[async_trait]
 impl LymailleHost for VnlLymailleHost {
     async fn resolve_mcp(
@@ -428,6 +453,46 @@ impl LymailleHost for VnlLymailleHost {
             }
         };
         Ok(Some(sandbox_context(id, &owner, &name, &entity)?))
+    }
+
+    /// Droits de script des écrans projet et sandbox (`FR-2`, ticket #70) : ceux de la version
+    /// active du type de catalogue `G_project` / `G_sandbox`, relus à chaque appel. Tout autre
+    /// identifiant, type absent ou sans version active ⇒ `None` (échec fermé de miryad-core).
+    async fn script_grants(
+        &self,
+        context: &str,
+        _caller: &CallerPrincipal,
+    ) -> Result<Option<ScriptGrants>, HostError> {
+        let type_name = if parse_project_id(context).is_some() {
+            G_PROJECT
+        } else if parse_sandbox_id(context).is_some() {
+            G_SANDBOX
+        } else {
+            return Ok(None);
+        };
+        let ligne = context_type::Entity::find()
+            .filter(context_type::Column::Name.eq(type_name))
+            .one(&self.db)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "VNL-APP-SES-112: hôte lymaille — lecture du type {type_name} échouée: {e}"
+                );
+                HostError
+            })?;
+        let Some(ligne) = ligne else {
+            return Ok(None);
+        };
+        if ligne.active.as_ref().is_none_or(serde_json::Value::is_null) {
+            return Ok(None);
+        }
+        let Some(grants) = lire_grants(&ligne.script_grants) else {
+            tracing::warn!(
+                "VNL-APP-SES-113: hôte lymaille — script_grants du type {type_name} mal formés"
+            );
+            return Err(HostError);
+        };
+        Ok(Some(grants))
     }
 
     /// Profil par défaut des agents sans profil explicite (`FR-6`, ticket #75) : relu à chaque
@@ -1149,6 +1214,83 @@ mod tests {
         assert!(
             matches!(decision, McpDecision::Denied),
             "attendu Denied, obtenu : {decision:?}"
+        );
+    }
+
+    /// Scenario « droits de script des écrans projet et sandbox » (ticket #70).
+    #[tokio::test]
+    async fn script_grants_des_ecrans_projet_et_sandbox() {
+        use crate::sessions::catalog::{G_PROJECT, G_SANDBOX, ensure_catalog};
+        use miryad_core::lymaille::definitions::context_type;
+        let (host, _, ids, db) = host_with(&[("sub-ana", "ana")], |_| {}).await;
+        ensure_catalog(&db).await.expect("catalogue");
+        let ana = caller_for(&ids, "sub-ana");
+
+        // Droits vides par défaut pour les écrans projet et sandbox.
+        for contexte in [h_project_id("web"), h_sandbox_id("ana", "web")] {
+            let grants = host.script_grants(&contexte, &ana).await.expect("lecture");
+            assert_eq!(
+                grants.map(|g| (g.toolsets, g.modules)),
+                Some((Vec::new(), Vec::new())),
+                "{contexte}"
+            );
+        }
+
+        // L'administrateur accorde un toolset au type sandbox.
+        let type_sandbox = context_type::Entity::find()
+            .filter(context_type::Column::Name.eq(G_SANDBOX))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("type sandbox publié");
+        let mut active: context_type::ActiveModel = type_sandbox.into();
+        active.script_grants = Set(serde_json::json!({"toolsets": ["G_ops"], "modules": []}));
+        active.update(&db).await.unwrap();
+        let grants = host
+            .script_grants(&h_sandbox_id("ana", "web"), &ana)
+            .await
+            .unwrap()
+            .expect("grants sandbox");
+        assert_eq!(grants.toolsets, vec!["G_ops".to_string()]);
+        let projet = host
+            .script_grants(&h_project_id("web"), &ana)
+            .await
+            .unwrap()
+            .expect("grants projet");
+        assert!(projet.toolsets.is_empty(), "le type projet est distinct");
+
+        // Contextes qui ne sont pas des écrans projet/sandbox.
+        for autre in ["G_home", "H_inconnu", "U_x"] {
+            assert!(
+                host.script_grants(autre, &ana).await.unwrap().is_none(),
+                "{autre}"
+            );
+        }
+
+        // Grants mal formés ⇒ HostError ; type supprimé ⇒ None.
+        let type_projet = context_type::Entity::find()
+            .filter(context_type::Column::Name.eq(G_PROJECT))
+            .one(&db)
+            .await
+            .unwrap()
+            .expect("type projet publié");
+        let mut active: context_type::ActiveModel = type_projet.clone().into();
+        active.script_grants = Set(serde_json::json!({"toolsets": "x"}));
+        active.update(&db).await.unwrap();
+        assert!(
+            host.script_grants(&h_project_id("web"), &ana)
+                .await
+                .is_err()
+        );
+        context_type::Entity::delete_by_id(type_projet.id)
+            .exec(&db)
+            .await
+            .unwrap();
+        assert!(
+            host.script_grants(&h_project_id("web"), &ana)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

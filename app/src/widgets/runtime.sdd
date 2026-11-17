@@ -3,7 +3,7 @@ Spec: Runtime — exécution d'un script par le ScriptRunner de miryad-core
 Platform: Rust/vanyline-app — miryad-core (feature `lymaille`)
 
 Purpose:
-  L'enveloppe de l'app autour du `ScriptRunner` de miryad-core 0.3.1 (`dsd/app/widgets.md`
+  L'enveloppe de l'app autour du `ScriptRunner` de miryad-core 0.4.0 (`dsd/app/widgets.md`
   `FR-3`, `FR-5`, `FR-7`, `DEC-2`) : un exécuteur construit une fois au démarrage, des plafonds
   issus de la configuration, et la traduction des erreurs typées de la crate en marqueurs
   `VNL-APP-WDG-*`. Les droits (contexte, type du contexte, principal), le montage des toolsets et
@@ -14,7 +14,7 @@ Owns:
   ./runtime.rs
 
 References:
-  /dsd/app/widgets.md — `FR-3`, `FR-5`, `FR-7`, `CON-1`, `CON-3`, `CON-5`, `DEC-2`, `OI-1`, `OI-4`
+  /dsd/app/widgets.md — `FR-3`, `FR-5`, `FR-7`, `CON-1`, `CON-3`, `CON-5`, `DEC-2`, `OI-4`
   ../sessions/mod.sdd — précédent de construction des dépendances lymaille (registre de
     ressources vide, `EnvSecretResolver`, hôte fourni)
   ../config.sdd — plafonds `VNL_WIDGET_*`
@@ -22,7 +22,8 @@ References:
 
 Exposes:
   @ScriptExecutor — `pub trait` (`Send + Sync`, méthode asynchrone) : @execute(@context: `&str`,
-    @subject: `&str`, @source: `&str`) -> `Result<serde_json::Value, @RunError>`. La couture
+    @subject: `&str`, @source: `&str`, @cancel: `&CancelToken`) ->
+    `Result<serde_json::Value, @RunError>`. La couture
     d'exécution : l'implémentation de production est @CrateExecutor ci-dessous, les tests de
     `./run.sdd` injectent un exécuteur factice.
   @WidgetService — handle `Clone` (`Arc`) construit au démarrage : porte un @ScriptExecutor et le
@@ -30,13 +31,15 @@ Exposes:
     @CrateExecutor ; @WidgetService::with_executor(@executor, @cache) sert les tests.
   @CrateExecutor — l'implémentation de production : `ScriptRunner` construit par
     `ScriptDeps::new(db, ResourceRegistry vide, HostModules vide, EnvSecretResolver)` avec
-    `host`, et `ScriptLimits` de la configuration. Son @execute appelle `ScriptRunner::run(context, subject, source,
-    &limits, None)` — le jeton de l'utilisateur n'est pas transmis en première version (`OI-4`).
+    `host`, et `ScriptLimits` de la configuration. Son @execute appelle `ScriptRunner::run_cancellable(context, subject, source,
+    &limits, None, cancel)` (miryad-core#71) — le jeton de l'utilisateur n'est pas transmis
+    (`OI-4`). Une annulation rend `LymailleError::ScriptCancelled`, traduite en
+    @RunError `009` (annulé : jamais rendue au client, qui est parti).
   Traduction des erreurs de `LymailleError` (corps de message fixe, jamais le texte de la crate
   hors `ScriptFailed`, qui est déjà sans source, sans ligne, sans jeton ni URL) :
     `ScriptTimeout` → `VNL-APP-WDG-004` · `ScriptOperationLimit` → `005` ·
     `ScriptResultTooLarge` → `006` · `ScriptFailed` → `003` (message de la crate, borné) ·
-    `Forbidden` et `UnknownSubject` → `008` · `Store`, `Config`, `InvalidDefinition` et toute
+    `ScriptCancelled` → `009` · `Forbidden` et `UnknownSubject` → `008` · `Store`, `Config`, `InvalidDefinition` et toute
     autre variante → `010` (message fixe ; la cause est journalisée en `tracing::error!`, jamais
     rendue).
 
@@ -56,8 +59,8 @@ Must not:
     un second moteur Rhai : tout vient de la crate.
   Interrompre un appel natif en cours : la limite de durée coupe entre deux opérations
     (`CON-5`) ; le délai d'un appel MCP est celui de son connecteur.
-  Réimplémenter l'annulation par l'utilisateur : elle attend miryad-core#71 ; d'ici là,
-    l'abandon est côté appelant (./run.sdd).
+  Réimplémenter l'annulation : le jeton est celui de la crate, créé et annulé par l'appelant
+    (./run.sdd).
 
 Scenario: les erreurs typées de la crate deviennent des marqueurs
   Given des `LymailleError` `ScriptTimeout`, `ScriptOperationLimit`, `ScriptResultTooLarge`,

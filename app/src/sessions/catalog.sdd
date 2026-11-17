@@ -38,7 +38,12 @@ Must:
       d'une session échoue avec l'erreur de lymaille nommant le profil manquant ;
       un contexte publié référence son type par la forme que l'ouverture de session résout
       (`G_home`, `G_config`).
-  Publier les types de contexte `G_home` et `G_config` avec `script_grants` vides
+  Publier aussi les types de contexte `G_project` et `G_sandbox` (nature `Work`, agent par défaut
+    `G_vanyline_project` / `G_vanyline_sandbox`) SANS contexte stocké : ils ne servent qu'à porter
+    les `script_grants` des écrans projet et sandbox, que l'hôte rend pour les contextes `H_…`
+    (`./host.sdd`, @script_grants, ticket #70) — un type d'écran est édité par l'administrateur
+    comme `G_home`. Même provenance, mêmes règles `@ensure_*`.
+  Publier les types de contexte `G_home`, `G_config`, `G_project` et `G_sandbox` avec `script_grants` vides
     (`{"toolsets":[],"modules":[]}`) : aucun droit de script par défaut, c'est l'administrateur
     qui étend les toolsets accordés aux widgets scriptés de l'accueil (`dsd/app/widgets.md#OI-3`,
     `scripts-hote#DEC-2`). Pour `G_config` le droit vide est sans conséquence : un script ne
@@ -85,8 +90,8 @@ Scenario: les agents publiés ne désignent aucun profil
 
 Scenario: les types publiés portent les droits de script attendus
   Given une base vide puis @ensure_catalog
-  When les types de contexte `G_home` et `G_config` sont lus
-  Then les deux portent `script_grants` `{"toolsets":[],"modules":[]}`
+  When les types de contexte `G_home`, `G_config`, `G_project` et `G_sandbox` sont lus
+  Then les quatre portent `script_grants` `{"toolsets":[],"modules":[]}`
 
 Scenario: définition administrateur intacte
   Given un administrateur a redéfini l'agent `G_vanyline_config` avant le démarrage
@@ -107,6 +112,8 @@ Scenario: ouverture selon l'écran (`AC-4`)
     `H_` avec `G_vanyline_project` / `G_vanyline_sandbox`
 
 Tasks:
+  [x] Lot 2 (#70) : publier les types `G_project` et `G_sandbox` ; adapter le test des
+    `script_grants` des types (quatre types) ; l'hôte les lit (`./host.sdd`).
   [x] Lot 1 du retrait des contournements (2026-11-16, miryad-core 0.4.0, tickets #73, #74,
     #75) : `catalog.rs` publie par @ensure_agent / @ensure_context_type / @ensure_catalog_context
     (provenance `vanyline`, `CARGO_PKG_VERSION`), agents sans profil, `script_grants` vides des
