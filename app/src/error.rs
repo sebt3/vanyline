@@ -116,7 +116,6 @@ impl From<vanyline_lib::VnyError> for AppError {
             vanyline_lib::VnyError::K8sConfigError(_) => Self::K8sConfigError(e.to_string()),
             vanyline_lib::VnyError::K8sNotFound(_) => Self::K8sNotFound(e.to_string()),
             vanyline_lib::VnyError::K8sApiError(_) => Self::K8sApiError(e.to_string()),
-            _ => Self::InternalError(e.to_string()),
         }
     }
 }
@@ -487,33 +486,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error: boom"
-        );
-    }
-
-    #[test]
-    fn conversion_vnyerror_autres_variantes_degradees_en_500() {
-        let llm = AppError::from(vanyline_lib::VnyError::LlmError("x".into()));
-        assert!(matches!(llm, AppError::InternalError(_)));
-        assert_eq!(
-            llm.to_string(),
-            "VNL-INT-001: Internal error: VNL-LLM-001: LLM provider error: x"
-        );
-        let unknown = AppError::from(vanyline_lib::VnyError::UnknownReference(
-            "agent",
-            "ghost".into(),
-        ));
-        assert!(matches!(unknown, AppError::InternalError(_)));
-        assert_eq!(
-            unknown.to_string(),
-            "VNL-INT-001: Internal error: VNL-CFG-003: Unknown agent reference: 'ghost'"
-        );
-        assert_eq!(
-            llm.into_response().status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        assert_eq!(
-            unknown.into_response().status(),
-            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 

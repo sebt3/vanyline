@@ -30,7 +30,6 @@ Can read:
   ./api/owners.rs
   ../Cargo.toml
   ../../controller/src/application.rs
-  ../../cfgstore/src/error.sdd
 
 Exposes:
   @Config — @struct @pub @Clone aux 18 champs tous @pub, aucun @Default, aucun builder,

@@ -18,8 +18,7 @@ Must:
   Contenir les jobs : `test` (`cargo test --workspace`), `fmt` (`cargo fmt --all --check`),
   `clippy` (`cargo clippy --workspace --all-targets -- -D warnings`), `frontend`
   (check+test `@vanyline/protocol`, check+test `@vanyline/ui`, build+check+test `frontend`),
-  `tsrs` (`cargo test -p vanyline-lib --features ts-rs` puis
-  `cargo test -p vanyline-health --features ts-rs` puis
+  `tsrs` (`cargo test -p vanyline-health --features ts-rs` puis
   `cargo test -p vanyline-app --features ts-rs`, puis
   `git diff --exit-code -- packages/protocol/src/generated/`), et `coverage`
   (mesure de baseline, sans seuil, push sur `main` seulement).
@@ -47,7 +46,7 @@ Scenario: commande locale différente de la CI
   batterie est relancée complète, pas allégée
 
 Scenario: types ts-rs périmés
-  Given une tâche qui modifie `vanyline-lib` sans régénérer les types TS
+  Given une tâche qui modifie `vanyline-app` sans régénérer les types TS
   When le job `tsrs` s'exécute
   Then `git diff --exit-code` échoue et le push est rejeté
 

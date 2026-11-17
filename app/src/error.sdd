@@ -37,7 +37,6 @@ Can read:
   ../Cargo.toml
   ../../lib/src/error.rs
   ../../lib/src/error.sdd
-  ../../cfgstore/src/error.sdd
   ../../vanyline.sdd
 
 Depends on:
@@ -157,20 +156,16 @@ Exposes:
     dupliqués dans 9 modules, « même code qu'avant, aucun comportement observable changé ».
     Utilisé massivement par `.map_err(AppError::from)?` dans ./api/*.rs et ./ws/*.rs, et par
     l'opérateur `?` dans toute fonction retournant `Result<_, @AppError>`.
-  @From<@vanyline_lib::VnyError> pour @AppError — manuel, match à 4 branches, chaque
+  @From<@vanyline_lib::VnyError> pour @AppError — manuel, match à 3 branches, chaque
     conversion emballe le @Display COMPLET du @VnyError (`e.to_string()`) dans le payload de
     la variante cible (donc double marqueur systématique, voir `Handles`) :
       @VnyError::K8sConfigError(_) → @AppError::K8sConfigError (statut 502)
       @VnyError::K8sNotFound(_) → @AppError::K8sNotFound (404) — variante typée de
         `vanyline-lib` (feature `k8s`) : aucune détection par sous-chaîne
       @VnyError::K8sApiError(_) → @AppError::K8sApiError (500), quel que soit son payload
-      toute autre variante (`_`) → @AppError::InternalError (500) — y compris
-        @VnyError::LlmError, @VnyError::LlmProviderNotFound, @VnyError::UnknownReference :
-        la sémantique fine (502/404/422 qu'une variante AppError homonyme eût rendue) est
-        perdue par cette conversion : fallback inconditionnel voulu. Depuis C3 du chantier lymaille, cette
-        conversion ne peut plus rien produire d'autre que ses 4 bras : la variante
-        @AppError::UnprocessableReference (seul 422 manuel du crate, posé par le retiré
-        ./api/conversations.rs) n'existe plus.
+      @VnyError ne porte plus que ces trois variantes K8s (`../../lib/src/error.sdd`) : il n'y
+        a plus de bras de repli, le match est exhaustif et n'a pas de `_`. Le repli
+        @AppError::InternalError de cette conversion et son Scenario disparaissent (lot 6b, F2).
   @From<@vanyline_cfgstore::CfgStoreError> — RETIRÉ en C3 du chantier lymaille (le seul
     producteur de @CfgStoreError dans l'app, ./config_store.rs, est retiré ; la dépendance
     `vanyline-cfgstore` de ../Cargo.toml part avec lui).
@@ -264,13 +259,6 @@ Handles:
       Kubernetes resource not found: x` — même double titularité que `VNL-K8S-001`
     @VnyError::K8sApiError("boom") → `VNL-K8S-002: Kubernetes API error: VNL-K8S-002:
       Kubernetes API error: boom`
-    @VnyError::LlmError("x") → `VNL-INT-001: Internal error: VNL-LLM-001: LLM provider
-      error: x` (et statut 500, alors que la variante @AppError::LlmError, retirée en C3,
-      eût rendu 502)
-    @VnyError::UnknownReference("agent", "ghost") → `VNL-INT-001: Internal error:
-      VNL-CFG-003: Unknown agent reference: 'ghost'` (500 par `?`/From ; depuis le retrait C3
-      de @AppError::UnprocessableReference, plus aucun chemin de l'app ne rend de 422 pour
-      une référence)
     (@CfgStoreError::ReadOnly rendait `VNL-INT-001: … VNL-CFG-009: …` par la conversion
       retirée en C3)
     Même philosophie de double marqueur que ../../cfgstore/src/error.sdd et
@@ -336,8 +324,8 @@ Must:
     préfixe `VNL-INT-001: Internal error: ` devant.
   Ne plus rien convertir depuis @vanyline_cfgstore::CfgStoreError (retrait C3 acté ; la
     mention de ce @From dans ../../cfgstore/src/error.sdd est caduque — à annoter là-bas).
-  Conserver au @From<@VnyError> ses 4 branches dans l'ordre (K8sConfig → K8sNotFound → K8sApi
-    → InternalError, par variante typée, jamais par sous-chaîne) et l'emballage de
+  Conserver au @From<@VnyError> ses 3 branches dans l'ordre (K8sConfig → K8sNotFound → K8sApi,
+    par variante typée, jamais par sous-chaîne) et l'emballage de
     `e.to_string()` complet dans le payload (double marqueur systématique : politique assumée,
     alignée sur `lib`).
   Partager les marqueurs `VNL-K8S-001`, `VNL-K8S-002` et `VNL-K8S-003` entre @VnyError et
@@ -372,6 +360,8 @@ Must not:
     propagation WS est log-only (./ws/sandbox_state.rs ; ./ws/chat.rs retiré C2).
 
 Tasks:
+  [x] @From<@VnyError> réduite à trois branches (lot 6b, F2 : `../../lib/src/error.sdd` ne porte
+    plus que `VNL-K8S-001..003`) : le repli @AppError::InternalError et son Scenario sont retirés.
   [?] Collision interne `VNL-SBX-002` : @AppError::SandboxBranchEmpty
     (`branch must not be empty`) ET ./api/sandboxes.rs::ws_ticket
     (`sandbox ticket response missing 'ticket'` dans @AppError::InternalError) émettent le
@@ -484,16 +474,6 @@ Scenario: conversion_vnyerror_k8s_api_vers_500_quel_que_soit_le_payload
   Then les deux statuts sont 500 (@AppError::K8sApiError, jamais @AppError::K8sNotFound) et le
     premier message est `VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error:
     boom`
-
-Scenario: conversion_vnyerror_autres_variantes_degradees_en_500
-  Given @VnyError::LlmError("x") et @VnyError::UnknownReference("agent", "ghost"), chacune
-    convertie par @From<@vanyline_lib::VnyError> puis rendue par @IntoResponse
-  When on observe les réponses
-  Then les deux ont le statut 500 (@AppError::InternalError) avec pour messages
-    respectifs `VNL-INT-001: Internal error: VNL-LLM-001: LLM provider error: x` et
-    `VNL-INT-001: Internal error: VNL-CFG-003: Unknown agent reference: 'ghost'` — la
-    conversion ne produit jamais 502 ni 422 (les variantes AppError homonymes, y compris
-    @AppError::UnprocessableReference, sont retirées en C3 du chantier lymaille)
 
 Scenario: les traces de la config LLM maison ont disparu de ce fichier
   # Remplace `conversion_cfgstore_toutes_variantes_vers_500_display_complet` et

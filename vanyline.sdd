@@ -1,6 +1,6 @@
 Spec: vanyline
 
-Platform: Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore, health, edition 2024) + TypeScript/Vue 3 (workspace npm : frontend, packages/*)
+Platform: Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, health, edition 2024) + TypeScript/Vue 3 (workspace npm : frontend, packages/*)
 
 Purpose:
   Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour
@@ -120,7 +120,7 @@ Tasks:
     (l'extension VS Code est supprimée, kydah-code parle MCP à la sandbox), ses handlers dépendaient de la lib retirée.
   [ ] Reverse-engineering des specs par fichier, crate par crate, avec relecture attentive par
     Sébastien sur les incertitudes `[?]` — ordre : `vanyline-lib`, `vanyline-crds`,
-    `vanyline-tools`, `vanyline-cfgstore`, `controller`, `sandbox`, `app`, `cli`.
+    `vanyline-tools`, `controller`, `sandbox`, `app`, `cli`.
   [x] Purger la dette harnais crate par crate — FAIT 2026-10-09 : les 8 crates à zéro,
     `cargo clippy --workspace --all-targets -- -D warnings` VERT, 1121 tests verts
     (registre et evidence crate par crate dans ./tooling.sdd ; ~78 sites cli restent

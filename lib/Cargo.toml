@@ -4,30 +4,20 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Types et événements partagés, session d'agent, tâches autonomes et client Kubernetes (feature k8s), avec export de types ts-rs."
+description = "Librairie d'interface avec le cluster Kubernetes et les sandboxes : client K8s (feature k8s), client de l'accès fichier de la sandbox."
 repository = "https://github.com/sebt3/vanyline"
 readme = "../README.md"
-keywords = ["llm", "agent", "kubernetes"]
+keywords = ["kubernetes", "sandbox", "client"]
 categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
-rig-core = { version = "0.38", features = ["rmcp"] }
-rmcp = { version = "1.7.0", features = ["transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-vanyline-cfgstore = { path = "../cfgstore" }
-ts-rs = { version = "12", features = ["serde-json-impl"], optional = true }
-uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
-tracing = "0.1"
-percent-encoding = "1"
 futures = "0.3"
-async-trait = "0.1"
-parking_lot = "0.12"
-globset = "0.4"
 vanyline-crds = { path = "../crds", optional = true }
 kube = { version = "4", default-features = false, features = ["client", "rustls-tls"], optional = true }
 kube-runtime = { version = "4", default-features = false, optional = true }
@@ -37,14 +27,12 @@ secrecy = { version = "0.10", optional = true }
 
 [features]
 k8s = ["dep:kube", "dep:kube-runtime", "dep:vanyline-crds", "dep:k8s-openapi", "dep:tokio-tungstenite", "dep:secrecy"]
-ts-rs = ["dep:ts-rs"]
 
 [dev-dependencies]
-rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server", "client"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "json", "query"] }
+tracing = "0.1"
 tracing-subscriber = "0.3"
-schemars = "1.1.0"
-anyhow = "1"
-tokio-util = "0.7"
+uuid = { version = "1", features = ["v4", "serde"] }
+
 [lints]
 workspace = true

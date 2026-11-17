@@ -11,7 +11,7 @@ Purpose:
 
 Can modify:
   ./Cargo.toml: seules les tables `[workspace.lints.*]` et les lignes `[lints]` des membres
-  ./{lib,app,cli,sandbox,tools,controller,crds,cfgstore,health}/Cargo.toml: seule la table
+  ./{lib,app,cli,sandbox,tools,controller,crds,health}/Cargo.toml: seule la table
     `[package]` (champs de metadata `cargo_common_metadata` : description, repository, readme,
     keywords, categories, license si absents) — autorisation explicite de Sébastien du
     2026-10-06 ; rien d'autre dans ces fichiers (pas de dépendances, pas de `[lints]` local)
@@ -27,7 +27,6 @@ Can modify:
   ./sandbox/src/bin/ruff_lsp.rs: ligne d'exemption `cfg(test)` seulement
   ./controller/src/main.rs: ligne d'exemption `cfg(test)` seulement
   ./crds/src/lib.rs: ligne d'exemption `cfg(test)` seulement
-  ./cfgstore/src/lib.rs: ligne d'exemption `cfg(test)` seulement
   ./cli/tests/rpc_stdio_smoke.rs: ligne d'exemption du crate-test seulement
   ./sandbox/tests/maint.rs: ligne d'exemption du crate-test seulement
   Tout crate d'intégration ./*/tests/*.rs: ligne d'exemption du crate-test seulement

@@ -111,8 +111,9 @@ fn owner_token_cache_key(owner: &str, sa_uid: &str) -> String {
 ///
 /// # Errors
 ///
-/// `VnyError::InternalError` si ni l'expiration de l'apiserver ni le repli
-/// `now + 900 s` ne sont représentables (horodatage hors plage chrono).
+/// `VnyError::K8sApiError` (`VNL-K8S-002`) si ni l'expiration de l'apiserver ni le repli
+/// `now + 900 s` ne sont représentables (horodatage hors plage chrono) : le jeton est émis
+/// par l'apiserver, son échec d'horodatage est traité comme une erreur de l'API.
 fn token_expires_at(
     now: DateTime<Utc>,
     apiserver_expiry: Option<DateTime<Utc>>,
@@ -121,9 +122,7 @@ fn token_expires_at(
         || {
             now.checked_add_signed(chrono::Duration::seconds(OWNER_TOKEN_EXPIRATION_SECS))
                 .ok_or_else(|| {
-                    VnyError::InternalError(
-                        "expiration du jeton hors de la plage chrono".to_string(),
-                    )
+                    VnyError::K8sApiError("expiration du jeton hors de la plage chrono".to_string())
                 })
         },
         Ok,
@@ -815,7 +814,6 @@ mod tests {
         assert_eq!(corps["spec"]["owner"], "alice");
         assert_eq!(corps["spec"]["repoUrl"], "https://example.invalid/d.git");
     }
-    use crate::encode_git_path;
     use chrono::Duration;
 
     fn api_error(code: u16) -> kube::Error {
@@ -843,20 +841,19 @@ mod tests {
         assert!(matches!(kube_error(&autre), VnyError::K8sApiError(_)));
     }
 
+    /// Scenario `token_expires_at_hors_plage_chrono_rend_k8s_api_error`.
     #[test]
-    fn encode_git_path_preserves_separators() {
-        assert_eq!(encode_git_path("branches/feature-x"), "branches/feature-x");
-        assert_eq!(encode_git_path("status"), "status");
-    }
-
-    #[test]
-    fn encode_git_path_encodes_special() {
+    fn token_expires_at_hors_plage_chrono_rend_k8s_api_error() {
+        let proche_de_la_fin = DateTime::<Utc>::MAX_UTC;
+        assert!(matches!(
+            token_expires_at(proche_de_la_fin, None),
+            Err(VnyError::K8sApiError(_))
+        ));
+        let maintenant = Utc::now();
         assert_eq!(
-            encode_git_path("branches/feature x"),
-            "branches/feature%20x"
+            token_expires_at(maintenant, None).ok(),
+            maintenant.checked_add_signed(Duration::seconds(OWNER_TOKEN_EXPIRATION_SECS))
         );
-        // Le '%' est codé en %25, donc %20 devient %2520
-        assert_eq!(encode_git_path("a%20b"), "a%2520b");
     }
 
     // ── UN OWNER = UN NAMESPACE (2026-10-04) ──

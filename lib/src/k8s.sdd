@@ -123,8 +123,8 @@ Must not:
     désigne, ou avec une audience différente de @OWNER_TOKEN_AUDIENCE.
   Ré-encoder le `raw_path` dans @VnlK8sClient::sandbox_git_url : décoder puis ré-encoder
     perd la distinction entre un `%2F` légitime dans un segment (nom de branche contenant
-    `/`) et un vrai séparateur de chemin. Le @encode_git_path de ./lib.rs n'est plus
-    appelé depuis ce module.
+    `/`) et un vrai séparateur de chemin. La fonction @encode_git_path de ./lib.rs, sans
+    appelant depuis ce module, a été supprimée en F2.
   Propager `namespace_override` dans le client kube lui-même : l'override ne vit que dans
     le champ `app_namespace` du @VnlK8sClient.
   Offrir d'opération cluster-scopée ou de CRUD sur @Application autre que
@@ -148,8 +148,7 @@ Depends on:
   `serde` + `serde_json` — bounds de (de)sérialisation des helpers, construction du merge patch.
   ./error.rs — @VnyError::K8sConfigError (`"VNL-K8S-001"`) et @VnyError::K8sApiError
     (`"VNL-K8S-002"`), toutes deux gated `#[cfg(feature = "k8s")]`.
-  ./lib.rs — gating du module par la feature `k8s` ; @encode_git_path (plus appelé ici,
-    testé dans le module de test du fichier).
+  ./lib.rs — gating du module par la feature `k8s` (@encode_git_path supprimée en F2).
 
 Exposes:
   @WatchEvent — énumération publique, @Clone + @Debug, variantes @WatchEvent::Added,
@@ -230,7 +229,8 @@ Returns:
     @WatchEvent::Error puis se termine (le watch est impossible, le répéter n'aurait pas de sens).
   @VnlK8sClient::owner_token : un @OwnerToken — `token` rendu par l'apiserver (jamais loggé),
     `expires_at` = `status.expirationTimestamp` de la réponse TokenRequest, repli
-    `now + 900 s` si l'apiserver ne le pose pas.
+    `now + 900 s` si l'apiserver ne le pose pas ; si ni l'un ni l'autre n'est représentable
+    (hors plage chrono), `Err` @VnyError::K8sApiError.
 
 Raises:
   @VnyError::K8sConfigError (marqueur `"VNL-K8S-001"`) dans @VnlK8sClient::discover si
@@ -244,6 +244,9 @@ Raises:
     list/get/create/delete des trois CRD, @VnlK8sClient::get_application, patch de
     @VnlK8sClient::set_sandbox_suspended, et le @VnlK8sClient::get_sandbox de garde des
     trois constructeurs d'URL (ressource absente = `K8sNotFound`, ci-dessus).
+  @VnyError::K8sApiError (même marqueur `"VNL-K8S-002"`) AUSSI sur l'horodatage hors plage chrono
+    de @VnlK8sClient::owner_token (ni expiration de l'apiserver ni repli `now + 900 s`
+    représentables ; cas non atteignable en pratique, la variante `InternalError` n'existant plus).
   @VnyError::K8sApiError (même marqueur `"VNL-K8S-002"`) AUSSI sur REJET LOCAL d'un nom
     d'Owner produisant un namespace DNS-1123 invalide ou > 63 caractères, AVANT tout appel à
     l'apiserver (résolution `owner_namespace_name` du `Must`) ; l'affichage porte le gabarit
@@ -322,11 +325,8 @@ Tasks:
     contexte kubeconfig COURANT de l'utilisateur (décision 2026-10-04) ; ce contexte doit
     pouvoir `create` `serviceaccounts/token` pour le SA de l'Owner. À reporter dans les specs
     de `cli/`.
-  [?] Le module de test de ./k8s.rs teste @encode_git_path, fonction définie dans ./lib.rs
-    et indépendante de la feature `k8s` ; comme le module est gated `#[cfg(feature =
-    "k8s")]`, ces tests ne s'exécutent que si la feature est activée dans le graphe de
-    build. Faut-il déplacer ces deux tests vers ./lib.rs (et la spec de ./lib.rs), et le
-    gating actuel est-il un accident ou voulu ?
+    [x] @encode_git_path supprimée de ./lib.rs en F2, avec ses tests (ceux de ./k8s.rs compris) :
+    plus aucun appelant. Les Scenarios `encode_git_path_*` de ce fichier sont retirés.
   [?] @VnlK8sClient::sandbox_git_url accepte `raw_path` vide (URL `/git/` avec slash
     final) sans validation : contrat de transcription verbatim assumé tel quel, ou
     rejet/normalisation attendue côté lib plutôt que côté `app::api::sandboxes::raw_git_tail` ?
@@ -356,16 +356,6 @@ Done when:
   Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
   La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
     verte sur `vanyline-lib`, feature `k8s` activée et désactivée.
-
-Scenario: encode_git_path_preserve_separateurs
-  Given le module de test existant de ./k8s.rs (feature `k8s` activée)
-  When @encode_git_path reçoit `"branches/feature-x"` puis `"status"`
-  Then les résultats valent exactement `"branches/feature-x"` et `"status"`
-
-Scenario: encode_git_path_encode_speciaux
-  Given le module de test existant de ./k8s.rs (feature `k8s` activée)
-  When @encode_git_path reçoit `"branches/feature x"` puis `"a%20b"`
-  Then les résultats valent exactement `"branches/feature%20x"` et `"a%2520b"`
 
 Scenario: discover_override_namespace_prime
   Given un cluster joignable et un contexte kubeconfig de namespace par défaut `"A"`
@@ -533,6 +523,11 @@ Scenario: owner_token_owner_sans_service_account
   Given un Owner dont `status.serviceAccount` est absent
   When @VnlK8sClient::owner_token
   Then `Err` @VnyError::K8sApiError explicite, aucune demande de jeton n'est émise
+
+Scenario: token_expires_at_hors_plage_chrono_rend_k8s_api_error
+  Given une date `now` = `DateTime::<Utc>::MAX_UTC` et aucune expiration rendue par l'apiserver
+  When @token_expires_at (fonction pure de ./k8s.rs) est appelée
+  Then `Err` @VnyError::K8sApiError (`VNL-K8S-002`), le repli `now + 900 s` n'étant pas représentable
 
 Scenario: owner_token_debug_masque_le_jeton
   Given un @OwnerToken portant la valeur `secret-jwt`

@@ -71,8 +71,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # régénère packages/protocol/src/generated/ depuis vanyline-lib
-      - run: cargo test -p vanyline-lib --features ts-rs
       # régénère packages/protocol/src/generated/ depuis vanyline-health
       - run: cargo test -p vanyline-health --features ts-rs
       # régénère packages/protocol/src/generated/ depuis vanyline-app (B8 — host-event.ts ; G5 — dashboard-domain.ts)

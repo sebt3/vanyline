@@ -54,12 +54,6 @@ updates:
       interval: "weekly"
     labels:
       - "tools"
-  - package-ecosystem: "cargo"
-    directory: "/cfgstore"
-    schedule:
-      interval: "weekly"
-    labels:
-      - "cfgstore"
   - package-ecosystem: "npm"
     directory: "/"
     schedule:

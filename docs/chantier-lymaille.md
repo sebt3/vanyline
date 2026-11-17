@@ -141,13 +141,13 @@ Code, **séquentiel**, dans cet ordre (chaque étape après sa spec) :
 - [ ] **E7 — TUI sur lymaille** : backend remplacé, adaptateur d'événements, approbation en session retirée.
 - [ ] **E8 — `run` et `script`.**
 - [ ] **E9 — Commandes objets** (`apply`, `edit`) et **E10 — `sync`.**
-- [ ] **E11 — Retrait** : crate `cfgstore` du workspace, `cli/src/store.rs`, `config.rs`, `config_check.rs` et leurs specs.
+- [x] **E11 — Retrait** : crate `cfgstore` du workspace, `cli/src/store.rs`, `config.rs`, `config_check.rs` et leurs specs.
 
 ## F — `lib` allégée : librairie d'interface avec le cluster et les sandboxes (après C et E)
 
-- [ ] **F1 — Spec** : réécrire l'identité de `lib/src/lib.sdd` (client Kubernetes, jeton d'Owner, sandbox) ; retirer des specs
+- [x] **F1 — Spec** : réécrire l'identité de `lib/src/lib.sdd` (client Kubernetes, jeton d'Owner, sandbox) ; retirer des specs
   `session`, `event`, `prefixed_mcp`, `model`, `types` (`.claude/memory/inventaire-vanyline-lymaille-2026-11.md`).
-- [ ] **F2 — Code** : supprimer ces fichiers de `lib` ; `k8s.rs` reste ; `error.rs` est trié (`[?]` pour ce qui n'est pas évident).
+- [x] **F2 — Code** : supprimer ces fichiers de `lib` ; `k8s.rs` reste ; `error.rs` est trié (`[?]` pour ce qui n'est pas évident).
   Retirer `lib` du graphe de dépendances LLM de `app` et de `cli`.
 - Hors tâche : l'unification du client de sandbox entre `cli` et les relais d'`app` (« piste à valider » de l'inventaire).
 
@@ -203,5 +203,4 @@ leur Solution (`dsd/app/<nom>.md`) existera. Ne pas en rédiger.
   instruction en cours de session à un sous-agent ne amende pas une spec ; passer par le .sdd.
 - E11 (lot 6a) : retrait fait — `cli/src/{rpc/,tools,store,config,config_check,mcp_cmd,model_cmd,skill_cmd}.rs` et leurs
   specs, `tests/rpc_stdio_smoke.rs`, grammaire de `main.rs` réduite (`main.sdd`), dépendances `vanyline-cfgstore`,
-  `vanyline-tools`, `rig-core`, `rmcp`, `async-trait` retirées de `cli`. **E11 reste `[ ]`** : le crate `cfgstore` reste dans
-  le workspace tant que `lib` en dépend (`lib/Cargo.toml`) ; son retrait est le lot 6b, après F2.
+  `vanyline-tools`, `rig-core`, `rmcp`, `async-trait` retirées de `cli`. **E11 clos au lot 6b** : crate `cfgstore` retiré du workspace et supprimé, `llm-config/` (spec seule, caduque) supprimé.

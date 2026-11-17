@@ -7,7 +7,6 @@ members = [
     "tools",
     "controller",
     "crds",
-    "cfgstore",
     "health",
 ]
 resolver = "2"

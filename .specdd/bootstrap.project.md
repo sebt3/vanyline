@@ -52,7 +52,7 @@ Sébastien, pas d'implémentation avant les tests dérivés de la spec.
   justifiées uniquement) ; `missing_docs`
   `warn` (passera en `deny` après purge de la dette, décision de Sébastien).
 - Workspace Cargo UNIQUE (membres `lib`, `app`, `cli`, `sandbox`, `tools`, `controller`,
-  `crds`, `cfgstore`) : le harnais se déploie en un seul endroit — ne jamais recréer de
+  `crds`) : le harnais se déploie en un seul endroit — ne jamais recréer de
   table `[lints]` locale dans un membre.
 - Dans tout fichier touché par une tâche : nouveau et nouveau code à **zéro warning**
   clippy. La dette préexistante est tracée dans `/tooling.sdd`, ne doit pas grossir, et se
