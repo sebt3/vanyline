@@ -165,14 +165,14 @@ Code, **séquentiel**, après A2 et la spec correspondante :
 
 - [x] **G4 — Modèle, registre, défauts, résolution** (`app/src/dashboards/`), entité, migration, ressource, route `resolve`.
 - [x] **G5 — Types** : export ts-rs vers `packages/protocol/src/generated/`, job CI `tsrs` étendu.
-- [ ] **G4b — Aligner code et tests sur les specs `dashboards` amendées** (à faire AVANT G3/G6). Source : les tâches `[ ]` de
+- [x] **G4b — Aligner code et tests sur les specs `dashboards` amendées** (à faire AVANT G3/G6). Source : les tâches `[ ]` de
   `app/src/dashboards/*.sdd`, `app/src/db/entities/dashboards.sdd`, `app/src/migration/m20261113_000001_*.sdd` et
   `app/src/error.sdd` ; les décisions vivent dans ces specs, pas ici.
-- [ ] **H1 — Widgets scriptés, côté app** (après G4b ; écrans accueil, projet et sandbox). Source : les tâches `[ ]` de
+- [x] **H1 — Widgets scriptés, côté app** (après G4b ; écrans accueil, projet et sandbox). Source : les tâches `[ ]` de
   `app/src/widgets/*.sdd`, `app/src/dashboards/{registry,mod}.sdd`, `app/src/db/entities/dashboards.sdd`, `app/src/error.sdd`,
   `app/src/config.sdd`, `app/src/api/mod.sdd`, `app/src/main.sdd` et `app/src/sessions/catalog.sdd` ; les décisions vivent dans ces
   specs et dans `dsd/app/widgets.md`. Les types `G_project`/`G_sandbox` et `script_grants` de l'hôte sont faits (lot 2).
-- [ ] **H2 — Export TypeScript de la configuration lymaille** (avant les écrans de configuration). Source : la tâche `[ ]` de
+- [x] **H2 — Export TypeScript de la configuration lymaille** (avant les écrans de configuration). Source : la tâche `[ ]` de
   `app/src/sessions/events.sdd` (test `export_lymaille_types_ts`, export de miryad-core, #72).
 - [ ] **G6 — Moteur de rendu et widgets standard** (après G5 et G4b) : un widget à la fois, chacun avec ses tests.
 - [ ] **G7 — Écrans par défaut** : accueil, projet et vue d'ensemble de sandbox en définitions par défaut ; retrait de
